@@ -130,13 +130,14 @@ class SignalEngine:
 
         # EWMV – Exponentially Weighted Moving Variance
         # Az alfa meghatározza a "felejtési" sebességet:
-        #   alfa = 0.05  → ~20 ticknyi "félévezet" (100ms-es ticknél ~2 másodperc)
-        # Ez biztosítja, hogy a bot mindig a FRISS volatilitásra reagál,
-        # nem az óráival ezelőtti piaci állapotra. (Mentor kritika: "Hol a felejtés?")
-        self._ewm_alpha: float = 0.05
-        self._ewm_mean: float = 0.0    # exponenciálisan súlyozott átlag
-        self._ewm_var: float = 0.0     # exponenciálisan súlyozott variancia
-        self._ewm_n: int = 0           # warmup számláló
+        #   alfa = 0.05  → ~20 tick (~2s) – túl rövid, lassú esnél "normálisnak" látja
+        #   alfa = 0.01  → ~100 tick (~10s) – stabil viszonyítási alap (mentor javaslat)
+        #   alfa = 0.005 → ~200 tick (~20s) – még stabilabb, lassabb reakciójú
+        # α = 0.01 választva: nem "felejt" el egy 5-10 másodperces lassabb esnél sem
+        self._ewm_alpha: float = 0.01
+        self._ewm_mean: float = 0.0
+        self._ewm_var: float = 0.0
+        self._ewm_n: int = 0
 
         # Legacy paraméterek (fallback-nak megtartva)
         self.min_change_pct = 0.12
@@ -266,7 +267,7 @@ class SignalEngine:
         if self._ewm_n < self.Z_WARMUP:
             return r_t, None
 
-        sigma_r = math.sqrt(max(self._ewm_var, 1e-18))
+        sigma_r = math.sqrt(max(self._ewm_var, 1e-10))  # epsilon=1e-10 (mentor formula)
         if sigma_r <= 0:
             return r_t, None
 
