@@ -104,10 +104,11 @@ class PolymarketClient:
         
         try:
             # Orderbook lekérdezése
-            orderbook = self.client.get_order_book(token_id)
-            if orderbook and orderbook.get("bids"):
+            order_book = self.client.get_order_book(token_id)
+            bids = order_book.bids if hasattr(order_book, 'bids') else []
+            if bids:
                 # Legjobb vételi ár
-                best_bid = float(orderbook["bids"][0]["price"])
+                best_bid = float(bids[0].price if hasattr(bids[0], 'price') else bids[0].get("price", 0))
                 return best_bid
             return None
         except Exception as e:
@@ -221,23 +222,27 @@ class PolymarketClient:
             
         try:
             import time
-            order_args_list = []
+            signed_orders = []
             now_ts = int(time.time())
             
             for o in orders:
                 exp_sec = o.get("expiration", 0)
                 expiration_timestamp = str(now_ts + exp_sec) if exp_sec > 0 else "0"
                 
-                order_args_list.append(OrderArgs(
+                order_args = OrderArgs(
                     token_id=o["token_id"],
                     price=o["price"],
                     size=o["size"],
                     side=o["side"],
                     expiration=expiration_timestamp
-                ))
+                )
+                signed_order = self.client.create_order(order_args)
+                signed_orders.append(signed_order)
             
             # Batch API call a CLOB klienssel
-            response = self.client.create_and_post_orders(order_args_list)
+            response = []
+            if signed_orders:
+                response = self.client.post_orders(signed_orders)
             
             # Hibakezelés batch listára
             if isinstance(response, list):

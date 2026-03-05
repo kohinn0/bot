@@ -597,6 +597,24 @@ class TradingBot:
         logger.info(f"Total P&L: ${self.stats.total_pnl:.2f}")
 
         logger.info("✅ Bot stopped cleanly")
+        
+        # Asyncio takarítás a kilépési hiba ellen
+        import asyncio
+        try:
+            loop = asyncio.get_event_loop()
+            async def shutdown():
+                tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                loop.stop()
+                
+            if loop.is_running():
+                asyncio.run_coroutine_threadsafe(shutdown(), loop)
+            elif not loop.is_closed():
+                loop.run_until_complete(shutdown())
+        except Exception as e:
+            logger.info(f"Hiba az asyncio leállításakor: {e}")
 
 
 if __name__ == "__main__":
