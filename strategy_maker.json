@@ -42,10 +42,10 @@
             "enabled": true,
             "toxic_flow_detection": {
                 "binance_velocity_threshold_pct_per_sec": 0.25,
-                "sustained_duration_ms": 2000,
+                "sustained_duration_ms": 900,
                 "action_if_toxic": "SKIP_ENTRY_WIDEN_OFFSETS"
             },
-            "comment": "If Binance shows 0.25%+/sec for 2s+ → likely informed flow → don't place ladder"
+            "comment": "0.25%/s fölött ha 900ms-ig tart → Toxic flow. 2000ms túl késő: addigra már 0.5%-ot esett!"
         },
         "debounce": {
             "min_time_between_entries_ms": 3000
@@ -80,8 +80,8 @@
                 "post_only": true,
                 "time_in_force": "GTX",
                 "place_all_simultaneously": true,
-                "wait_for_fill_ms": 1500,
-                "cancel_unfilled_after_ms": 1500,
+                "wait_for_fill_ms": 4000,
+                "cancel_unfilled_after_ms": 4000,
                 "partial_fill_min_pct": 0.3,
                 "partial_fill_min_absolute_shares": 5
             },
@@ -112,6 +112,10 @@
                 "type": "GTD",
                 "base_expiration_sec": 12,
                 "fast_expiration_sec": 6,
+                "action_on_timeout": "try_aggressive_limit_then_market",
+                "aggressive_limit_offset_ticks": 1,
+                "aggressive_limit_wait_ms": 800,
+                "comment": "Time stop előtt agresszív limit kell (spread szélére), csak ha az nem tölt be, zárunk marketáron. Ez ment megj a taker fee-ből.",
                 "time_to_resolution_scaling": [
                     {
                         "if_ttr_sec_lte": 90,
@@ -131,8 +135,7 @@
                         "profit_multiplier": 1.0,
                         "size_multiplier": 1.0
                     }
-                ],
-                "action_on_timeout": "close_at_market"
+                ]
             },
             "reversal_stop": {
                 "enabled": true,

@@ -400,23 +400,83 @@ class ExitManager:
     def check_exit_conditions(self) -> Tuple[bool, str]:
         if not self.entry_time:
             return (False, "")
-            
+
         params = config.get_time_stop_params()
-        hold_time_sec = time.time() - self.entry_time
+        hold_time_sec = time.time() - float(self.entry_time)
         safe_fallback_timeout = params.get('expiration_sec', 12)
-        
+
         if hold_time_sec > safe_fallback_timeout:
             return (True, "TIME_STOP_TIMEOUT")
-            
-        # HL API TP Fill check via info API could also be placed here if bot.py loop relies on it
+
+        # HL API TP Fill check via info API
         if not self.dry_run and self.tp_order_id and not str(self.tp_order_id).startswith("ERR_"):
             try:
                 open_orders = self.hl_client.info.open_orders(self.hl_client.wallet.address)
                 open_oids = {str(o["oid"]) for o in open_orders}
                 if self.tp_order_id not in open_oids:
-                    # Missing from open orders -> filled
                     return (True, "TAKE_PROFIT_REACHED")
             except Exception as e:
                 logger.info(f"⚠️ Open orders ellenőrzése sikertelen az Exit checks-nél: {e}")
-        
+
         return (False, "")
+
+    def close_position_two_stage(self, current_price: float, tick_size: float) -> bool:
+        """
+        Kétlépcsős time-stop zárás (mentor javaslat):
+        1. Először agresszív post-only limit ordert próbálunk  (spread szélére)
+        2. Ha 800ms alatt nem tölt be → market close
+        Ez ment megj a 0.025% taker fee-t a legtöbb time-stop esetben.
+        """
+        ts_cfg = config._config.get('order_management', {}).get('exit', {}).get('time_stop', {})
+        action = ts_cfg.get('action_on_timeout', 'close_at_market')
+
+        if action != 'try_aggressive_limit_then_market' or self.dry_run:
+            # Dry run vagy legacy config: egyből market
+            logger.info("[TWO_STAGE] Dry run / legacy → direct market close")
+            return self.close_position_at_market()
+
+        # --- 1. Lépés: Agresszív limit ---
+        offset_ticks = ts_cfg.get('aggressive_limit_offset_ticks', 1)
+        wait_ms = ts_cfg.get('aggressive_limit_wait_ms', 800)
+        # Ha long pozíciónk van, szállunk ki SELL limit állal bid+1 tickre
+        closing_price = round(current_price + tick_size * offset_ticks, 2)
+        logger.info(
+            f"[TWO_STAGE] TIME_STOP: agresszív limit kizárási árasánt → ${closing_price} ({wait_ms}ms várakozás)"
+        )
+        aggressive_oid = None
+        try:
+            if self.hl_client.exchange:
+                sz = round(float(self.position_size), 4)
+                res = self.hl_client.exchange.order(
+                    self.coin, False, sz, closing_price,
+                    {"limit": {"tif": "Alo"}}
+                )
+                aggressive_oid = str(res.get('response', {}).get('data', {}).get('statuses', [{}])[0].get('resting', {}).get('oid', ''))
+                logger.info(f"[TWO_STAGE] Agresszív limit kiküldve: oid={aggressive_oid}")
+        except Exception as e:
+            logger.warning(f"[TWO_STAGE] Limit kiküldés sikertelen: {e} → market close")
+            return self.close_position_at_market()
+
+        # --- 2. Várakozás ---
+        time.sleep(wait_ms / 1000.0)
+
+        # --- 3. Ellenőrzzük, be töltött-e ---
+        try:
+            open_orders = self.hl_client.info.open_orders(self.hl_client.wallet.address)
+            open_oids = {str(o["oid"]) for o in open_orders}
+            if aggressive_oid and aggressive_oid not in open_oids:
+                logger.info("[TWO_STAGE] ✅ Agresszív limit betöltött! Taker fee megtakarítva.")
+                self._reset_state()
+                return True
+        except Exception as e:
+            logger.warning(f"[TWO_STAGE] Fill check hiba: {e}")
+
+        # --- 4. Fallback: piaci ár ---
+        logger.warning("[TWO_STAGE] Limit nem töltött be → market close fallback")
+        # Töröljük az agresszív limitet először
+        if aggressive_oid and self.hl_client.exchange:
+            try:
+                self.hl_client.exchange.cancel(self.coin, int(aggressive_oid))
+            except Exception:
+                pass
+        return self.close_position_at_market()
