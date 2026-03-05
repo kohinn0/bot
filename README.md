@@ -1,127 +1,129 @@
-# Crypto Sebesseg Bot - File Structure
+# SebessegBot – Hyperliquid Maker Strategy Bot
 
-## 📁 Directory Contents
+Ultra-low latency, mean-reversion maker bot a Hyperliquid perpetuálison.
 
-```
-crypo_sebesseg/
-├── .env                              # API keys (copied from parent)
-│
-├── Configuration Files
-│   ├── strategy_maker.json           # Main maker-only strategy config
-│   ├── strategy_taker.json           # Alternative taker strategy (for testing)
-│   ├── strategy_config.json          # Original config (legacy)
-│   ├── config.py                     # Python config loader with utilities
-│   └── requirements.txt              # Python dependencies
-│
-├── Documentation
-│   ├── MAKER_STRATEGY_GUIDE.md       # Professional maker techniques
-│   ├── TAKER_FEE_IMPACT.md           # Fee analysis & maker rebate program
-│   ├── FEE_INTEGRATION_QUICKSTART.md # Quick-start for fee integration
-│   └── README.md                     # This file
-│
-└── Utilities
-    ├── fee_utils.py                  # Fee-rate fetching & integration
-    └── order_signing_example.py      # Complete order signing examples
-```
-
-## 🎯 Quick Start
-
-### 1. Install Dependencies
+## ⚡ Egyetlen parancs telepítés (VPS)
 
 ```bash
+git clone https://github.com/FELHASZNALO/sebessegbot ~/sebessegbot
+cd ~/sebessegbot
+bash setup.sh
+```
+
+A telepítő automatikusan:
+- ✅ Telepíti a Python függőségeket
+- ✅ Bekéri a privát kulcsot és menti `.env`-be
+- ✅ Lefuttatja a backend öndiagnosztikát
+- ✅ Regisztrálja a `systemd` service-t (auto-restart ha leáll)
+- ✅ Beállítja a log rotációt (14 napos megőrzés)
+
+---
+
+## 🗂️ Projekt struktúra
+
+```
+sebessegbot/
+├── bot.py                # 🧠 Főprogram, FSM állapotgép
+├── order_manager.py      # 📋 Létra + TP orderek kezelése
+├── signal_engine.py      # 📡 Z-score, volatilitás, jelgenerátor
+├── hyperliquid_feed.py   # ⚡ L2 WebSocket feed (ultra-low latency)
+├── hyperliquid_client.py # 🔌 Hyperliquid REST/SDK kliens
+├── config.py             # ⚙️  Stratégia konfig loader
+├── bot_logger.py         # 📝 Strukturált naplózás
+├── check_balance.py      # 💰 Egyenleg lekérdező segédprogram
+├── strategy_maker.json   # 📊 Stratégia paraméterek
+├── requirements.txt      # 📦 Python függőségek
+├── .env.example          # 🔑 Env sablon (ebből csináld a .env-t)
+├── test_backend.py       # 🧪 Backend öndiagnosztika
+└── setup.sh              # 🛠️  Automatikus VPS telepítő
+```
+
+---
+
+## 🔧 Kézi indítás (fejlesztés / debug)
+
+```bash
+# Virtuális környezet
+python3 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
+
+# .env beállítása
+cp .env.example .env
+nano .env   # Add meg a PRIVATE_KEY-t
+
+# Backend teszt (futtatsd MINDIG mielőtt live-ba mész!)
+python test_backend.py
+
+# Dry run (szimuláció, nincs valódi order)
+python bot.py
+
+# Éles kereskedés
+python bot.py --live
 ```
 
-### 2. Test Configuration
+---
+
+## 🚀 VPS kezelés
+
+| Parancs | Mit csinál |
+|---|---|
+| `sudo systemctl start sebessegbot` | Bot indítása |
+| `sudo systemctl stop sebessegbot` | Bot leállítása |
+| `sudo systemctl status sebessegbot` | Státusz lekérdezése |
+| `journalctl -u sebessegbot -f` | Élő napló követése |
+| `bash setup.sh` | Frissítés + újratelepítés |
+
+---
+
+## 🛡️ Stratégia & Kockázatkezelés
+
+**Típus:** Maker-only Ambush Létra (Mean Reversion)  
+**Piac:** Hyperliquid BTC perpetual  
+**Margin:** Izolált margin (isolated, nem cross!)
+
+### Állapotgép (FSM)
+
+```
+IDLE → ARMED → LADDER_PLACED → IN_POSITION → EXITING → COOLDOWN
+                                                 ↕
+                                            RECOVERING  ← (WebSocket kiesés esetén)
+```
+
+### Hálózati védelem (kétlépcsős)
+
+| Késés | Reakció |
+|---|---|
+| 1–3 mp | ⚠️ Warning: Nincs új pozíció, meglévők tartva |
+| 3+ mp | 🚨 Panic Cancel: Minden order törölve, pozíció piaci áron zárva |
+| Feed visszatér | 🔄 RECOVERING állapot: API ellenőrzés → 30s cooldown → ARMED |
+
+### Kockázatok
+
+- Max **1x–5x** tőkeáttétel (strategy_maker.json-ban állítható)
+- Max **$20** per trade
+- **$25** napi vesztési limit
+- **60s** cooldown exit után
+- Exponenciális **retry** (3x) API timeout esetén
+
+---
+
+## 🔑 Biztonsági megjegyzések
+
+> ⚠️ A `.env` fájlt **SOHA ne commitold** be a Git-be!
+
+A `.gitignore` már tartalmazza a `.env` kizárást. Ellenőrzés:
+```bash
+cat .gitignore | grep .env
+```
+
+---
+
+## 📝 Naplók
 
 ```bash
-python config.py
+# Rendszer napló (systemd)
+journalctl -u sebessegbot --since "1 hour ago"
+
+# Fájl naplók
+tail -f ~/sebessegbot/logs/bot.log
 ```
-
-Expected output:
-- Strategy name and type
-- Ladder configuration
-- Take profit calculations
-- Time-based scaling parameters
-
-### 3. Test Fee Integration
-
-```bash
-python fee_utils.py
-```
-
-### 4. Review Strategy Documentation
-
-Start with:
-1. `MAKER_STRATEGY_GUIDE.md` - Core strategy principles
-2. `TAKER_FEE_IMPACT.md` - Why maker-only is best
-3. `FEE_INTEGRATION_QUICKSTART.md` - Implementation details
-
-## 📊 Strategy Overview
-
-**Type:** Maker-Only Ambush Ladder  
-**Goal:** Be the trap, not the hunter
-
-### Entry
-- 3-level post-only bid ladder (mid-1, mid-2, mid-3 ticks)
-- Wait 1.5s for panic sellers
-- If no fill → cancel all (no edge)
-
-### Exit
-- Immediate post-only take-profit (entry + 2-4 ticks)
-- Time-stop: 6-12s max hold
-- Reversal stop: Close if Binance retraces 50%+
-
-### Risk
-- Max 1 position
-- $20 max per trade
-- $25 daily loss limit
-- 60s cooldown between trades
-
-## 🔑 Key Features
-
-✅ **Maker-only discipline** - Never pay taker fees  
-✅ **Toxic flow protection** - Skip trades when Binance shows sustained momentum  
-✅ **Dynamic profit targets** - Adjust based on spread, depth, time-to-resolution  
-✅ **Adverse selection avoidance** - Mid-price ladder for better fills  
-✅ **Maker rebate earnings** - Get paid for providing liquidity
-
-## 🚀 Next Steps
-
-1. **Implement core components:**
-   - Binance WebSocket feed
-   - Polymarket orderbook reader
-   - Signal engine
-   - Order manager
-
-2. **Build state machine:**
-   - IDLE → ARMED → LADDER_PLACED → IN_POSITION → EXITING → COOLDOWN
-
-3. **Test in dry-run mode:**
-   - Verify Binance connection
-   - Test market discovery
-   - Validate order logic (without placing real orders)
-
-4. **Live testing:**
-   - Start with small position sizes
-   - Monitor fill rates and P&L
-   - Iterate on parameters
-
-## 📚 Documentation Links
-
-- [Implementation Plan](../../../.gemini/antigravity/brain/.../implementation_plan.md)
-- [Task Checklist](../../../.gemini/antigravity/brain/.../task.md)
-
-## ⚠️ Important Notes
-
-- **Dry-run by default:** Set `DRY_RUN=false` in `.env` for live trading
-- **Fee-rate required:** All orders must include `feeRateBps` (Jan 2026+)
-- **Maker-only:** Never use market orders (taker fees are 1.6-3.7%)
-- **Low fill rate is OK:** 30-50% fill rate means good selectivity
-
-## 🔗 Key Files to Review
-
-1. `strategy_maker.json` - All strategy parameters
-2. `config.py` - Configuration loader and utilities
-3. `MAKER_STRATEGY_GUIDE.md` - Strategy theory and best practices
-4. `fee_utils.py` - Fee integration (critical for Jan 2026+)

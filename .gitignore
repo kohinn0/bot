@@ -1,35 +1,26 @@
+# Python
 venv/
-env/
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
 *.egg-info/
-.installed.cfg
 *.egg
+.Python
+
+# Secrets – SOHA ne commitold!
 .env
-.env.*
+*.env
 !.env.example
-strategy_config.json
+
+# Naplók
 logs/
+
+# IDE
 .vscode/
 .idea/
 .DS_Store
-*.env
-inventory_state*.json
-patch_*.py
-inspect_clob.py
-debug_error.txt
+
+# Build
+build/
+dist/
