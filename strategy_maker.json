@@ -1,0 +1,278 @@
+{
+    "strategy_name": "pm_ambush_ladder_maker_v2",
+    "strategy_type": "MAKER_ONLY_PRO",
+    "philosophy": "Be the trap, don't chase. Position ahead of panic flow with mid-price ladder.",
+    "markets": {
+        "type": "polymarket_15min_updown",
+        "min_liquidity": {
+            "min_top_of_book_usd": 150,
+            "max_spread": 0.04,
+            "min_top_3_levels_total_usd": 450,
+            "depth_requirement": "top_3_levels >= position_size * 3"
+        },
+        "trade_only_if": {
+            "time_to_resolution_sec_min": 45,
+            "time_to_resolution_sec_max": 780
+        }
+    },
+    "signal_engine": {
+        "binance_triggers": {
+            "bearish": {
+                "price_drop_pct_range": [
+                    0.12,
+                    0.20
+                ],
+                "max_duration_ms": 1000,
+                "sell_burst_count": [
+                    3,
+                    5
+                ],
+                "sell_burst_window_ms": 300
+            },
+            "bullish": {
+                "price_rise_pct_range": [
+                    0.12,
+                    0.20
+                ],
+                "max_duration_ms": 1000,
+                "buy_burst_count": [
+                    3,
+                    5
+                ],
+                "buy_burst_window_ms": 300
+            }
+        },
+        "adverse_selection_filter": {
+            "enabled": true,
+            "toxic_flow_detection": {
+                "binance_velocity_threshold_pct_per_sec": 0.25,
+                "sustained_duration_ms": 2000,
+                "action_if_toxic": "SKIP_ENTRY_WIDEN_OFFSETS"
+            },
+            "comment": "If Binance shows 0.25%+/sec for 2s+ → likely informed flow → don't place ladder"
+        },
+        "debounce": {
+            "min_time_between_entries_ms": 3000
+        }
+    },
+    "order_management": {
+        "mode": "ambush_ladder_maker",
+        "entry": {
+            "type": "mid_price_offset_ladder",
+            "reference_price": "mid",
+            "ladder_config": [
+                {
+                    "level": 1,
+                    "offset_from_mid_ticks": -1,
+                    "size_pct": 0.5,
+                    "comment": "mid - 1 tick (most likely fill, still good price)"
+                },
+                {
+                    "level": 2,
+                    "offset_from_mid_ticks": -2,
+                    "size_pct": 0.3,
+                    "comment": "mid - 2 ticks (better price, moderate fill chance)"
+                },
+                {
+                    "level": 3,
+                    "offset_from_mid_ticks": -3,
+                    "size_pct": 0.2,
+                    "comment": "mid - 3 ticks (best price, lower fill chance)"
+                }
+            ],
+            "execution": {
+                "post_only": true,
+                "time_in_force": "GTX",
+                "place_all_simultaneously": true,
+                "wait_for_fill_ms": 1500,
+                "cancel_unfilled_after_ms": 1500,
+                "partial_fill_min_pct": 0.3,
+                "partial_fill_min_absolute_shares": 5
+            },
+            "no_chase_discipline": {
+                "never_requote_higher": true,
+                "never_convert_to_taker": true,
+                "if_no_fill_log_as": "no_edge_skip"
+            }
+        },
+        "exit": {
+            "immediate_actions_on_fill": {
+                "step_1": "cancel_all_unfilled_ladder_levels",
+                "step_2": "place_post_only_take_profit",
+                "step_3": "start_time_stop_timer"
+            },
+            "take_profit": {
+                "enabled": true,
+                "mode": "small_fast_profit",
+                "formula": "filled_price + max(2 * tick_size, 0.7 * current_spread)",
+                "min_profit_ticks": 2,
+                "max_profit_ticks": 4,
+                "spread_multiplier": 0.7,
+                "post_only": true,
+                "comment": "Small profit (2-4 ticks), fast exit - harvest repricing, not settlement"
+            },
+            "time_stop": {
+                "enabled": true,
+                "type": "GTD",
+                "base_expiration_sec": 12,
+                "fast_expiration_sec": 6,
+                "time_to_resolution_scaling": [
+                    {
+                        "if_ttr_sec_lte": 90,
+                        "expiration_sec": 6,
+                        "profit_multiplier": 0.6,
+                        "size_multiplier": 0.7
+                    },
+                    {
+                        "if_ttr_sec_lte": 180,
+                        "expiration_sec": 9,
+                        "profit_multiplier": 0.8,
+                        "size_multiplier": 0.9
+                    },
+                    {
+                        "if_ttr_sec_gte": 300,
+                        "expiration_sec": 12,
+                        "profit_multiplier": 1.0,
+                        "size_multiplier": 1.0
+                    }
+                ],
+                "action_on_timeout": "close_at_market"
+            },
+            "reversal_stop": {
+                "enabled": true,
+                "binance_retrace_pct": 0.5,
+                "action": "close_immediately_at_market"
+            }
+        },
+        "oco_behavior": {
+            "on_any_ladder_fill": "cancel_all_other_ladder_levels",
+            "on_tp_fill": "cancel_all_stop_orders",
+            "strict_inventory_single_position": true
+        },
+        "rate_limiting": {
+            "min_ms_between_order_updates": 250,
+            "recommended_ms": 500,
+            "max_orders_per_minute": 40,
+            "comment": "Never refresh faster than 250ms to avoid spam flagging"
+        }
+    },
+    "risk_management": {
+        "position_limits": {
+            "max_open_positions": 1,
+            "max_notional_usd_per_trade": 20,
+            "max_bankroll_pct_conservative": 0.05,
+            "max_bankroll_pct_aggressive": 0.10
+        },
+        "inventory_risk": {
+            "max_token_asymmetry_shares": 500,
+            "spread_penalty_ticks_per_100_shares": 1
+        },
+        "daily_limits": {
+            "max_daily_loss_usd": 25,
+            "max_daily_trades": 50
+        },
+        "partial_fill_handling": {
+            "min_position_size_to_manage": "30% of intended size",
+            "action_if_below": "cancel_unfilled_and_close_partial_at_market"
+        },
+        "consecutive_errors": {
+            "max_count": 5,
+            "window_sec": 300,
+            "action": "HALT_trading"
+        },
+        "cooldown": {
+            "after_exit_sec": 60,
+            "after_stop_loss_sec": 120
+        },
+        "fill_rate_monitoring": {
+            "enabled": true,
+            "min_acceptable_fill_rate_pct": 25,
+            "lookback_trades": 20,
+            "note": "30-50% fill rate is GOOD for maker (means we're selective)"
+        }
+    },
+    "technical_precision": {
+        "tick_size": 0.01,
+        "min_shares": 5,
+        "rounding": {
+            "price_formula": "round(price / tick_size) * tick_size",
+            "size_formula": "max(min_shares, floor(size))"
+        },
+        "post_only_validation": {
+            "check_before_place": true,
+            "reject_if_would_cross_spread": true
+        }
+    },
+    "preflight_checks": {
+        "spread_check": {
+            "max_spread": 0.04
+        },
+        "depth_check": {
+            "top_3_levels_min_usd": 450,
+            "depth_vs_size_ratio": 3
+        },
+        "toxic_flow_check": {
+            "binance_velocity_pct_per_sec_max": 0.25,
+            "sustained_duration_ms_max": 2000
+        },
+        "time_window_check": {
+            "min_ttr_sec": 45,
+            "max_ttr_sec": 780
+        },
+        "balance_check": {
+            "require_sufficient_usdc": true,
+            "require_allowance_ok": true
+        }
+    },
+    "state_machine": {
+        "states": [
+            "IDLE",
+            "ARMED",
+            "LADDER_PLACED",
+            "WAITING_FILL",
+            "IN_POSITION",
+            "EXITING",
+            "COOLDOWN",
+            "HALT"
+        ],
+        "key_transitions": {
+            "ARMED_to_LADDER_PLACED": "Trigger + all preflight checks pass",
+            "WAITING_FILL_to_IN_POSITION": "Any ladder level fills >= min_fill_pct",
+            "WAITING_FILL_to_ARMED": "Timeout (1.5s) with no fills → cancel all, log 'no edge'",
+            "IN_POSITION_to_EXITING": "TP fills OR time-stop OR reversal-stop",
+            "EXITING_to_COOLDOWN": "Position closed, P&L logged"
+        }
+    },
+    "logging": {
+        "latency_tracking": {
+            "binance_event_to_ladder_placement_ms": true,
+            "ladder_placement_to_first_fill_ms": true,
+            "fill_to_exit_order_placement_ms": true
+        },
+        "performance_metrics": {
+            "fill_rate_pct": true,
+            "avg_price_improvement_vs_mid": true,
+            "avg_price_improvement_vs_ask": true,
+            "tp_hit_rate_pct": true,
+            "time_stop_rate_pct": true,
+            "toxic_flow_skip_rate": true
+        },
+        "order_details": {
+            "log_all_placements": true,
+            "log_all_fills": true,
+            "log_all_cancels": true,
+            "log_reject_reasons": true
+        }
+    },
+    "execution_philosophy": {
+        "core_principles": [
+            "Be the trap, don't chase the price",
+            "Only trade when edge is clear (low fill rate is OK)",
+            "Harvest repricing waves, don't speculate on settlement",
+            "Small profits (2-4 ticks), fast exits (6-12s)",
+            "Avoid adverse selection via toxic flow detection",
+            "Strict maker-only discipline (never chase, never requote up)"
+        ],
+        "decision_tree": "Trigger → Preflight checks → Place ladder → Wait 1.5s → Fill? (Yes: TP+timer, No: cancel+skip)"
+    }
+}
