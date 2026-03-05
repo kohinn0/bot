@@ -1,11 +1,14 @@
 """
 Order Manager - Handles 3-level post-only ladder placement and management
 """
+import math
 import time
 from typing import Optional, List, Dict, Tuple
 from dataclasses import dataclass
+
 from polymarket_client import PolymarketClient
 from fee_utils import fetch_fee_rate_bps
+from binance_feed import BinanceFeed
 from config import config
 
 
@@ -35,8 +38,15 @@ class LadderPosition:
 class OrderManager:
     """Manages post-only ladder orders"""
     
-    def __init__(self, poly_client: PolymarketClient, dry_run: bool = True):
+    def __init__(
+        self,
+        poly_client: PolymarketClient,
+        binance: Optional[BinanceFeed] = None,
+        dry_run: bool = True,
+    ):
         self.poly_client = poly_client
+        # Binance feed a dinamikus, volatilitás-alapú létrához és P(fill) becsléshez
+        self.binance = binance
         self.dry_run = dry_run
         self.active_ladder: Optional[LadderPosition] = None
     
@@ -73,8 +83,14 @@ class OrderManager:
             print(f"   ⚠️ INVENTORY RISK: Aszimmetria büntetés érvényesítve: -{penalty_ticks} ticks (-${penalty_usd:.3f})")
             mid_price -= penalty_usd
             
-        # Calculate ladder prices
-        ladder_prices = config.calculate_ladder_prices(mid_price, "BUY", tick_size)
+        # 1) VOLA-ALAPÚ DINAMIKUS LÉTRA (ha van elérhető szigma a Binance feedből)
+        sigma_r = self._get_sigma_r()
+        ladder_prices: List[Tuple[int, float, float]]
+        if sigma_r is not None and sigma_r > 0:
+            ladder_prices = self._build_vol_ladder(mid_price, tick_size, sigma_r)
+        else:
+            # Fallback: régi, fix tick-es létra
+            ladder_prices = config.calculate_ladder_prices(mid_price, "BUY", tick_size)
         
         # Create orders
         orders = []
@@ -103,7 +119,17 @@ class OrderManager:
         if self.dry_run:
             print(f"🧪 [DRY RUN] Placing ladder for {side} token:")
             for order in orders:
-                print(f"   Level {order.level}: {order.size} shares @ ${order.price:.2f}")
+                # Logisztikus P(fill) becslés a mid-től való távolság és a volatilitás alapján
+                p_fill = None
+                if sigma_r is not None and sigma_r > 0:
+                    distance = abs(order.price - mid_price)
+                    p_fill = self._logistic_p_fill(distance, sigma_r)
+                    print(
+                        f"   Level {order.level}: {order.size} shares @ ${order.price:.4f} "
+                        f"(P(fill)≈{p_fill * 100:.1f}% , d={distance:.4f})"
+                    )
+                else:
+                    print(f"   Level {order.level}: {order.size} shares @ ${order.price:.4f}")
                 order.order_id = f"DRY_{order.level}"
         else:
             # Generate batch for real API
@@ -211,6 +237,70 @@ class OrderManager:
         
         self.active_ladder = None
         return True
+
+    # ------------------------------------------------------------------
+    # Dinamikus létra és P(fill) segédfüggvények
+    # ------------------------------------------------------------------
+
+    def _get_sigma_r(self, window_sec: int = 60) -> Optional[float]:
+        """
+        Binance volatilitás lekérdezése (sigma_r) az elmúlt window_sec másodpercre.
+        """
+        if not self.binance:
+            return None
+        return self.binance.get_sigma_per_s(window_sec=window_sec)
+
+    def _build_vol_ladder(
+        self,
+        mid_price: float,
+        tick_size: float,
+        sigma_r: float,
+    ) -> List[Tuple[int, float, float]]:
+        """
+        Volatilitás-alapú "Ambush Ladder":
+
+        P_i = P_mid * (1 - i * gamma * sigma_r) - SlippagePenalty
+
+        Itt a SlippagePenalty-t kezdetben 0-ra tesszük (a future verzióban
+        az orderbook-imbalance alapján lehet dinamikusan lefelé tolni a szinteket).
+        """
+        gamma = 1.0  # Kockázatvállalási szorzó (tuningolható vagy kivihető a configba)
+        slippage_penalty = 0.0
+
+        ladder: List[Tuple[int, float, float]] = []
+        for level_cfg in config.ladder_levels:
+            i = level_cfg.level
+            raw_price = mid_price * (1.0 - i * gamma * sigma_r) - slippage_penalty
+            price = config.round_to_tick(raw_price, tick_size)
+            ladder.append((level_cfg.level, price, level_cfg.size_pct))
+
+        return ladder
+
+    def _logistic_p_fill(
+        self,
+        distance: float,
+        sigma_r: float,
+        lam: float = 10.0,
+    ) -> float:
+        """
+        Logisztikus P(fill) modell a dokumentumban leírt forma szerint:
+
+            P(fill_i) = 1 / (1 + exp(λ (d_i - σ_r)))
+
+        distance (d_i): távolság a mid ártól (abszolút értékben).
+        sigma_r: a volatilitás mértéke ugyanazon idősávra.
+        lam (λ): könyvsűrűség paraméter (minél nagyobb, annál élesebb a görbe).
+        """
+        try:
+            x = lam * (distance - sigma_r)
+            # numerikus stabilitás
+            if x > 60:
+                return 0.0
+            if x < -60:
+                return 1.0
+            return 1.0 / (1.0 + math.exp(x))
+        except Exception:
+            return 0.0
     
     def has_active_ladder(self) -> bool:
         """Check if there's an active ladder"""
@@ -366,7 +456,7 @@ if __name__ == "__main__":
     client = PolymarketClient()
     
     # Create managers
-    order_mgr = OrderManager(client, dry_run=True)
+    order_mgr = OrderManager(client, binance=None, dry_run=True)
     exit_mgr = ExitManager(client, dry_run=True)
     
     # Test ladder placement
