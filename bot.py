@@ -82,10 +82,10 @@ class SebessegBot:
         # Várakozás az első adatokra
         logger.info("⏳ Várakozás a Hyperliquid Feed stabilizálódására...")
         time.sleep(3)
-        if self.feed_engine.current_mid <= 0:
+        if not self.feed_engine.get_current_price() or self.feed_engine.get_current_price() <= 0:
             logger.info("❌ Hiba: Nincs kezdeti Mid Price az L2 WebSocket bookból!")
             return False
-        logger.info(f"✅ Kezdeti Vola / Price feed betöltve. Ár: ${self.feed_engine.current_mid:.2f}")
+        logger.info(f"✅ Kezdeti Vola / Price feed betöltve. Ár: ${self.feed_engine.get_current_price():.2f}")
 
         # 3. Signal Engine
         self.signal_engine = SignalEngine(self.feed_engine)
@@ -158,7 +158,7 @@ class SebessegBot:
         # Bullish -> Panic buy momentum -> we place SHORT trap above (mean reversion)
         # Bearish -> Panic sell momentum -> we place LONG trap below
         side = "SHORT" if signal == "BULLISH" else "LONG"
-        mid_price = self.feed_engine.current_mid
+        mid_price = self.feed_engine.get_current_price()
         
         # Max Size Limit
         target_usd = config.risk_management.max_notional_usd_per_trade
