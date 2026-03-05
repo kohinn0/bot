@@ -64,10 +64,13 @@ class OrderManager:
         orders = []
         for level, price, size_pct in ladder_prices:
             size_raw = total_shares * size_pct
-            size = max(config.min_shares, size_raw) # min shares should probably be min token amount for HL
+            size = max(float(config.min_shares), float(size_raw))
             
-            # HL typically requires specific size step formats, but we'll round to 4 decimals for now
-            size = round(size, 4)
+            # HL typically requires specific size step formats (szDecimals). Usually 4 for BTC, 2 for ETH, etc.
+            # Assuming 4 for now until dynamic loading is passed deeply, avoiding round() up to prevent exceeding margin.
+            szDecimals = 4
+            factor = 10 ** szDecimals
+            size = math.floor(size * factor) / factor
             
             order = LadderOrder(
                 level=level,
@@ -119,8 +122,13 @@ class OrderManager:
                             orders[i].order_id = str(st["resting"]["oid"])
                         elif "filled" in st:
                             orders[i].order_id = str(st["filled"]["oid"])
+                        elif "error" in st:
+                            orders[i].order_id = f"ALO_REJECT_"
+                            logger.info(f"⚠️ Rendelés ALO (Post-Only) miatt visszadobva: {st['error']}")
                         else:
                             orders[i].order_id = f"ERR_{i}"
+                            
+                    # Ha minden szint ALO_REJECT-et kapott, azt bot.py check_szál kezelje (üres ids)
                 else:
                     for order in orders:
                         order.order_id = f"ERR_{order.level}"
@@ -211,7 +219,7 @@ class OrderManager:
         sigma_r: float,
     ) -> List[Tuple[int, float, float]]:
         gamma = 1.0  
-        slippage_penalty = 0.0
+        slippage_penalty = tick_size * 2 # To prevent ALO rejection, pad by 2 ticks off mid
 
         ladder: List[Tuple[int, float, float]] = []
         for level_cfg in config.ladder_levels:

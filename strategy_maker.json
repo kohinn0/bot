@@ -159,7 +159,7 @@
         },
         "leverage": {
             "max_leverage": 10,
-            "cross_margin": true
+            "cross_margin": false
         },
         "daily_limits": {
             "max_daily_loss_usd": 100,

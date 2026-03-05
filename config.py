@@ -265,7 +265,7 @@ class MakerStrategyConfig:
             cooldown_after_exit_sec=rm['cooldown']['after_exit_sec'],
             leverage=LeverageRisk(
                 max_leverage=lev.get('max_leverage', 10),
-                cross_margin=lev.get('cross_margin', True)
+                cross_margin=lev.get('cross_margin', False)
             )
         )
     @property
@@ -280,8 +280,16 @@ class MakerStrategyConfig:
         return self._config['technical_precision']['min_shares']
     
     def round_to_tick(self, price: float, tick_size: float) -> float:
-        """Round price to valid market tick size"""
-        return round(price / tick_size) * tick_size
+        """Round price to valid market tick size safely avoiding float precision artifacts"""
+        ticks = round(price / tick_size)
+        result = ticks * tick_size
+        
+        # Calculate maximum decimals needed by looking at tick_size string representation
+        # 0.01 -> 2 decimals. 1.0 -> 0 decimals.
+        str_tick = f"{tick_size:.10f}".rstrip('0')
+        decimals = len(str_tick.split('.')[1]) if '.' in str_tick else 0
+        
+        return round(result, decimals)
     
     def validate_shares(self, shares: float) -> int:
         """Validate and round shares to minimum"""

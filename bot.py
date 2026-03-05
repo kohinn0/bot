@@ -149,7 +149,7 @@ class SebessegBot:
             return
             
         # Daily Loss limit check
-        if self.daily_pnl <= -abs(config.risk_management.max_daily_loss_usd):
+        if self.daily_pnl <= -float(abs(config.risk_management.max_daily_loss_usd)):
             logger.info(f"🚨 DAILY LOSS LIMIT ELÉRVE (${self.daily_pnl:.2f}). HALT!")
             self.state = "HALT"
             return
@@ -182,6 +182,19 @@ class SebessegBot:
         )
         
         if ladder:
+            # Check for ALO rejections
+            valid_orders = []
+            if not self.dry_run:
+                for o in ladder.orders:
+                    if o.order_id and not o.order_id.startswith("ERR_") and not o.order_id.startswith("ALO_REJECT_"):
+                        valid_orders.append(o)
+                
+                if not valid_orders:
+                    logger.info("❌ Minden létrafok ALO_REJECT / ERR miatt visszadobva! Vissza ARMED-be.")
+                    self.order_manager.cancel_ladder()
+                    self.state = "ARMED"
+                    return
+                    
             self.state = "LADDER_PLACED"
         else:
             logger.info("❌ Létra elhelyezése SIKERTELEN. Vissza ARMED állapotba.")
