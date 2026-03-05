@@ -1,9 +1,10 @@
 import asyncio
 import json
+import math
 import time
 import threading
 from collections import deque
-from typing import Deque, Optional
+from typing import Deque, Optional, Tuple
 from dataclasses import dataclass
 
 import websockets
@@ -114,10 +115,19 @@ class SignalEngine:
     def __init__(self, binance: BinanceFeed):
         self.binance = binance
         self.last_signal_time = 0
-        self.price_history: Deque = deque(maxlen=100)
+        # Árfolyam történet (ms, price)
+        self.price_history: Deque[Tuple[float, float]] = deque(maxlen=500)
         self.poly_ws = None
         
-        # Config
+        # Dinamikus Z-score alapú triggerhez
+        # Az elmúlt ~60s hozamait tartjuk egy mozgó ablakban
+        self.returns_window_ms = 60_000
+        # (timestamp_ms, r_t) párok
+        self.returns: Deque[Tuple[float, float]] = deque(maxlen=1200)
+        # Z threshold (tipikusan 2.5–3.0 → 3σ anomália)
+        self.z_threshold = 2.5
+
+        # Legacy paraméterek (fallback-nak megtartva)
         self.min_change_pct = 0.12  # 0.12%
         self.max_change_pct = 0.20  # 0.20%
         self.max_duration_ms = 1000  # 1 second
@@ -147,21 +157,112 @@ class SignalEngine:
             return None
         
         now = time.time() * 1000  # milliseconds
+
+        # Frissítjük az árfolyam- és hozamtörténetet, kiszámoljuk az aktuális Z-score-t
+        r_t, z_t = self._update_returns_and_z(now, current_price)
         
-        # Add to history
-        self.price_history.append((now, current_price))
-        
-        # Check debounce
+        # Debounce – túl sűrű jelek tiltása
         if now - self.last_signal_time < self.min_time_between_signals_ms:
             return None
         
-        # Look for price moves in the last 1 second
+        # 1) DINAMIKUS Z-SCORE TRIGGER
+        # Bearish: Z_t < -k  (anomális esés)
+        if z_t is not None and z_t <= -self.z_threshold:
+            self.last_signal_time = now
+            pct_change = (r_t or 0.0) * 100.0
+            # A legutóbbi két ár alapján becsült start/end
+            if len(self.price_history) >= 2:
+                oldest_ts, oldest_price = self.price_history[-2]
+                newest_ts, newest_price = self.price_history[-1]
+            else:
+                oldest_ts, oldest_price = now - 1000, current_price
+                newest_ts, newest_price = now, current_price
+            duration_ms = newest_ts - oldest_ts
+            return PriceMove(
+                direction="BEARISH",
+                start_price=oldest_price,
+                end_price=newest_price,
+                pct_change=pct_change,
+                duration_ms=duration_ms,
+                timestamp=now,
+            )
+
+        # Bullish: Z_t > +k  (anomális emelkedés)
+        if z_t is not None and z_t >= self.z_threshold:
+            self.last_signal_time = now
+            pct_change = (r_t or 0.0) * 100.0
+            if len(self.price_history) >= 2:
+                oldest_ts, oldest_price = self.price_history[-2]
+                newest_ts, newest_price = self.price_history[-1]
+            else:
+                oldest_ts, oldest_price = now - 1000, current_price
+                newest_ts, newest_price = now, current_price
+            duration_ms = newest_ts - oldest_ts
+            return PriceMove(
+                direction="BULLISH",
+                start_price=oldest_price,
+                end_price=newest_price,
+                pct_change=pct_change,
+                duration_ms=duration_ms,
+                timestamp=now,
+            )
+        
+        # 2) Fallback: régi, fix %-os trigger (ha még nincs elég adat a Z-score-hoz)
         signal = self._detect_move(now, current_price)
         
         if signal:
             self.last_signal_time = now
         
         return signal
+
+    def _update_returns_and_z(
+        self,
+        now_ms: float,
+        price: float,
+    ) -> Tuple[Optional[float], Optional[float]]:
+        """
+        Másodperces (ill. tick-közi) hozam és Z-score számítása
+        az elmúlt returns_window_ms időablakra.
+        """
+        # Ha még nincs előző ár, csak inicializáljuk a history-t
+        if not self.price_history:
+            self.price_history.append((now_ms, price))
+            return None, None
+
+        last_ts, last_price = self.price_history[-1]
+        dt_ms = now_ms - last_ts
+        if dt_ms <= 0 or last_price <= 0:
+            # Degenerált adat – csak frissítjük az árfolyamot
+            self.price_history.append((now_ms, price))
+            return None, None
+
+        # Diszkrét hozam (nem log-return, hogy illeszkedjen a korábbi dokumentumhoz)
+        r_t = (price - last_price) / last_price
+
+        # Árfolyam history frissítése
+        self.price_history.append((now_ms, price))
+
+        # Hozamtörténet bővítése és ablak tisztítása
+        self.returns.append((now_ms, r_t))
+        cutoff = now_ms - self.returns_window_ms
+        while self.returns and self.returns[0][0] < cutoff:
+            self.returns.popleft()
+
+        # Ha még kevés adatunk van, nem számítunk Z-score-t
+        if len(self.returns) < 20:
+            return r_t, None
+
+        # Z-score: Z_t = (r_t - mu_r) / sigma_r
+        values = [x[1] for x in self.returns]
+        mu_r = sum(values) / len(values)
+        var = sum((x - mu_r) ** 2 for x in values) / max(len(values) - 1, 1)
+        sigma_r = math.sqrt(max(var, 1e-18))
+
+        if sigma_r <= 0:
+            return r_t, None
+
+        z_t = (r_t - mu_r) / sigma_r
+        return r_t, z_t
     
     def _detect_move(self, now: float, current_price: float) -> Optional[PriceMove]:
         """Detect significant price moves"""
