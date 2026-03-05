@@ -139,6 +139,9 @@ class SebessegBot:
         
         # 2. lépcső: Panic Cancel & Pozíció zárása (3 másodperc felett)
         if staleness > 3.0:
+            if self.state == "RECOVERING":
+                return True # Már pánikoltunk és recoveryben vagyunk, ne spammeljük az API-t
+
             logger.error(f"🚨 KRITIKUS FEED STALE ({staleness:.1f}s): Vakság! Panic Cancel & Market Close!")
             if not self.dry_run and self.hl_client:
                 self.hl_client.cancel_all_orders()
@@ -148,7 +151,7 @@ class SebessegBot:
                 logger.error("   Azonnali Piaci Zárás indítása a beragadás elkerülésére...")
                 self.exit_manager.close_position_at_market()
                 
-            self.state = "HALT"
+            self.state = "RECOVERING"
             return True
             
         # 1. lépcső: Warning (1-3 másodperc között)
@@ -330,10 +333,13 @@ class SebessegBot:
         self.cooldown_end_time = time.time() + config.risk_management.cooldown_after_exit_sec
 
 
-    def _start_cooldown(self, action: str):
-        sec = config.risk_management.cooldown_after_exit_sec
-        if "STOP_LOSS" in action:
-            sec = 120 # longer wait 
+    def _start_cooldown(self, action: str, override_sec: Optional[int] = None):
+        if override_sec is not None:
+            sec = override_sec
+        else:
+            sec = config.risk_management.cooldown_after_exit_sec
+            if "STOP_LOSS" in action:
+                sec = 120 # longer wait 
             
         logger.info(f"🧊 COOLDOWN AKTIVÁLVA ({sec} mp). Ok: {action}")
         self.cooldown_end_time = time.time() + sec
@@ -347,6 +353,52 @@ class SebessegBot:
             self.state = "ARMED"
             # Signal Engine-ben debouncer bypass vagy reset
             self.signal_engine.last_trade_timestamp = time.time()
+
+    def _recovering_tick(self):
+        """Hálózati szakadás utáni talpraállás és ellenőrzés"""
+        if self.feed_engine.get_staleness_sec() > 1.0:
+            # Még mindig szakadt a vonal
+            time.sleep(1.0)
+            return
+            
+        logger.info("📡 Feed újra él! Pozíciók és aktív megbízások ellenőrzése (Recovery Mode)...")
+        
+        if self.dry_run:
+            logger.info("🧪 [DRY RUN] Recovery sikeres. Átállás 30s COOLDOWN-ra...")
+            self._start_cooldown("RECOVERY_CLEAR", override_sec=30)
+            return
+            
+        is_clear = True
+        try:
+            # a) Nincs nyitott megbízás
+            open_orders = self.hl_client.info.open_orders(self.hl_client.wallet.address)
+            if open_orders:
+                logger.warning(f"⚠️ Recovery: Találtam {len(open_orders)} árva megbízást! Törlés...")
+                self.hl_client.cancel_all_orders()
+                is_clear = False
+                
+            # b) Nincs nyitott pozíció
+            state = self.hl_client.info.user_state(self.hl_client.wallet.address)
+            positions = state.get("assetPositions", [])
+            for pos in positions:
+                if pos["position"]["coin"] == self.active_coin:
+                    sz = float(pos["position"]["szi"])
+                    if abs(sz) > 0:
+                        logger.warning(f"⚠️ Recovery: Beragadt pozíciót találtam ({sz})! Market Close kikényszerítése...")
+                        self.exit_manager.coin = self.active_coin
+                        self.exit_manager.close_position_at_market()
+                        is_clear = False
+                        break
+        except Exception as e:
+            logger.error(f"❌ Recovery API ellenőrzés hiba: {e}")
+            is_clear = False
+            
+        if is_clear:
+            logger.info("✅ Minden tiszta! Bot visszatér a normál működéshez 30 másodperc múlva.")
+            self._start_cooldown("RECOVERY_CLEAR", override_sec=30)
+        else:
+            # Ha nem tiszta, visszatartjuk és kövi tickben próbáljuk megint
+            time.sleep(2.0)
 
     def shutdown(self):
         """Biztonságos leállítás garantálása!"""
