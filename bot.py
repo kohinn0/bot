@@ -115,7 +115,7 @@ class TradingBot:
         
         # Order manager
         print("  ├─ Order manager...", end=" ", flush=True)
-        self.order_mgr = OrderManager(self.poly_client, dry_run=self.dry_run)
+        self.order_mgr = OrderManager(self.poly_client, binance=self.binance, dry_run=self.dry_run)
         print("✅")
         
         # Exit manager
