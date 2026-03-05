@@ -3,16 +3,12 @@
     "strategy_type": "MAKER_ONLY_PRO",
     "philosophy": "Be the trap, don't chase. Position ahead of panic flow with mid-price ladder.",
     "markets": {
-        "type": "polymarket_15min_updown",
+        "type": "hyperliquid_perpetual",
         "min_liquidity": {
             "min_top_of_book_usd": 150,
-            "max_spread": 0.04,
-            "min_top_3_levels_total_usd": 450,
+            "max_spread": 4.0,
+            "min_top_3_levels_total_usd": 1000,
             "depth_requirement": "top_3_levels >= position_size * 3"
-        },
-        "trade_only_if": {
-            "time_to_resolution_sec_min": 45,
-            "time_to_resolution_sec_max": 780
         }
     },
     "signal_engine": {
@@ -159,16 +155,14 @@
     "risk_management": {
         "position_limits": {
             "max_open_positions": 1,
-            "max_notional_usd_per_trade": 20,
-            "max_bankroll_pct_conservative": 0.05,
-            "max_bankroll_pct_aggressive": 0.10
+            "max_notional_usd_per_trade": 50
         },
-        "inventory_risk": {
-            "max_token_asymmetry_shares": 500,
-            "spread_penalty_ticks_per_100_shares": 1
+        "leverage": {
+            "max_leverage": 10,
+            "cross_margin": true
         },
         "daily_limits": {
-            "max_daily_loss_usd": 25,
+            "max_daily_loss_usd": 100,
             "max_daily_trades": 50
         },
         "partial_fill_handling": {

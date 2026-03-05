@@ -35,20 +35,18 @@ class ToxicFlowDetection:
 
 
 @dataclass
-class InventoryRisk:
-    max_token_asymmetry_shares: int
-    spread_penalty_ticks_per_100_shares: int
+class LeverageRisk:
+    max_leverage: int
+    cross_margin: bool
 
 
 @dataclass
 class RiskManagement:
     max_open_positions: int
     max_notional_usd_per_trade: float
-    max_bankroll_pct_conservative: float
-    max_bankroll_pct_aggressive: float
     max_daily_loss_usd: float
     cooldown_after_exit_sec: int
-    inventory_risk: InventoryRisk
+    leverage: LeverageRisk
 
 
 class MakerStrategyConfig:
@@ -93,12 +91,8 @@ class MakerStrategyConfig:
         return self._config['markets']['min_liquidity']['min_top_3_levels_total_usd']
     
     @property
-    def min_time_to_resolution_sec(self) -> int:
-        return self._config['markets']['trade_only_if']['time_to_resolution_sec_min']
-    
-    @property
-    def max_time_to_resolution_sec(self) -> int:
-        return self._config['markets']['trade_only_if']['time_to_resolution_sec_max']
+    def min_top_3_levels_usd(self) -> float:
+        return self._config['markets']['min_liquidity']['min_top_3_levels_total_usd']
     
     # === Signal Engine ===
     @property
@@ -246,30 +240,13 @@ class MakerStrategyConfig:
         
         return round(tp_price / tick_size) * tick_size
     
-    def get_time_stop_params(self, time_to_resolution_sec: int) -> dict[str, float]:
+    def get_time_stop_params(self) -> dict[str, float]:
         """
-        Get time-stop parameters based on time until resolution.
+        Get time-stop parameters.
         
         Returns:
-            {'max_hold_ms': int, 'profit_multiplier': float, 'size_multiplier': float}
+            {'expiration_sec': int, 'profit_multiplier': float, 'size_multiplier': float}
         """
-        rules = self._config['order_management']['exit']['time_stop']['time_to_resolution_scaling']
-        
-        for rule in rules:
-            if 'if_ttr_sec_lte' in rule and time_to_resolution_sec <= rule['if_ttr_sec_lte']:
-                return {
-                    'max_hold_ms': rule['max_hold_ms'],
-                    'profit_multiplier': rule['profit_multiplier'],
-                    'size_multiplier': rule['size_multiplier']
-                }
-            elif 'if_ttr_sec_gte' in rule and time_to_resolution_sec >= rule['if_ttr_sec_gte']:
-                return {
-                    'max_hold_ms': rule['max_hold_ms'],
-                    'profit_multiplier': rule['profit_multiplier'],
-                    'size_multiplier': rule['size_multiplier']
-                }
-        
-        # Default GTD expiration ha nem illeszkedik semmi
         return {
             'expiration_sec': self._config['order_management']['exit']['time_stop'].get('base_expiration_sec', 12),
             'profit_multiplier': 1.0,
@@ -280,37 +257,17 @@ class MakerStrategyConfig:
     @property
     def risk_management(self) -> RiskManagement:
         rm = self._config['risk_management']
-        ir = rm.get('inventory_risk', {})
+        lev = rm.get('leverage', {})
         return RiskManagement(
             max_open_positions=rm['position_limits']['max_open_positions'],
             max_notional_usd_per_trade=rm['position_limits']['max_notional_usd_per_trade'],
-            max_bankroll_pct_conservative=rm['position_limits']['max_bankroll_pct_conservative'],
-            max_bankroll_pct_aggressive=rm['position_limits']['max_bankroll_pct_aggressive'],
             max_daily_loss_usd=rm['daily_limits']['max_daily_loss_usd'],
             cooldown_after_exit_sec=rm['cooldown']['after_exit_sec'],
-            inventory_risk=InventoryRisk(
-                max_token_asymmetry_shares=ir.get('max_token_asymmetry_shares', 500),
-                spread_penalty_ticks_per_100_shares=ir.get('spread_penalty_ticks_per_100_shares', 1)
+            leverage=LeverageRisk(
+                max_leverage=lev.get('max_leverage', 10),
+                cross_margin=lev.get('cross_margin', True)
             )
         )
-        
-    def get_inventory_risk_spread_penalty(self, current_shares_yes: int, current_shares_no: int, placing_side: str) -> int:
-        """Kiszámítja a büntető ticks-et, ha aszimmetrikusan akarunk venni."""
-        ir = self.risk_management.inventory_risk
-        
-        # Ha UP (YES)-t veszünk, akkor az aszimmetriát a (YES - NO) különbség élezi
-        if placing_side == "UP":
-            delta = current_shares_yes - current_shares_no
-        else:
-            delta = current_shares_no - current_shares_yes
-            
-        if delta <= 0:
-            return 0  # Kifejezetten javítunk a helyzeten
-            
-        penalty_blocks = delta / 100.0
-        return int(penalty_blocks * ir.spread_penalty_ticks_per_100_shares)
-    
-    # === Blockchain ===
     @property
     def rpc_url(self) -> str:
         """Returns the configured RPC URL, essential for lower latencies."""
@@ -384,12 +341,11 @@ if __name__ == "__main__":
     print(f"  TP: ${tp:.2f} (+{profit_ticks:.0f} ticks)")
     
     # Time-based scaling
-    print(f"\n⏱️  TIME-TO-RESOLUTION SCALING:")
-    for ttr in [60, 150, 400]:
-        params = config.get_time_stop_params(ttr)
-        print(f"  TTR {ttr}s: GTD expiration={params.get('expiration_sec')}sec, "
-              f"profit_mult={params['profit_multiplier']:.1f}x, "
-              f"size_mult={params['size_multiplier']:.1f}x")
+    print(f"\n⏱️  TIME-STOP SCALING:")
+    params = config.get_time_stop_params()
+    print(f"  GTD expiration={params.get('expiration_sec')}sec, "
+          f"profit_mult={params['profit_multiplier']:.1f}x, "
+          f"size_mult={params['size_multiplier']:.1f}x")
     
     # Toxic flow check
     print(f"\n🛡️  TOXIC FLOW PROTECTION:")
