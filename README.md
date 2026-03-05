@@ -1,129 +1,113 @@
-# SebessegBot – Hyperliquid Maker Strategy Bot
+# ⚡ SebessegBot
 
-Ultra-low latency, mean-reversion maker bot a Hyperliquid perpetuálison.
+**Ultra-low latency, mean-reversion maker bot a Hyperliquid perpetuálison.**
 
-## ⚡ Egyetlen parancs telepítés (VPS)
+Z-score alapú létra stratégia, kétlépcsős WebSocket védelem, automatikus VPS deploy.
+
+---
+
+## 🚀 Telepítés (VPS – egyetlen parancs)
 
 ```bash
-git clone https://github.com/FELHASZNALO/sebessegbot ~/sebessegbot
+git clone https://github.com/kohinn0/bot ~/sebessegbot
 cd ~/sebessegbot
 bash setup.sh
 ```
 
-A telepítő automatikusan:
-- ✅ Telepíti a Python függőségeket
-- ✅ Bekéri a privát kulcsot és menti `.env`-be
-- ✅ Lefuttatja a backend öndiagnosztikát
-- ✅ Regisztrálja a `systemd` service-t (auto-restart ha leáll)
-- ✅ Beállítja a log rotációt (14 napos megőrzés)
+A script interaktívan bekéri a privát kulcsot, lefuttatja a backend tesztet,
+és regisztrálja a botot `systemd` alá – szerver újraindítás után is automatikusan elindul.
 
 ---
 
-## 🗂️ Projekt struktúra
-
-```
-sebessegbot/
-├── bot.py                # 🧠 Főprogram, FSM állapotgép
-├── order_manager.py      # 📋 Létra + TP orderek kezelése
-├── signal_engine.py      # 📡 Z-score, volatilitás, jelgenerátor
-├── hyperliquid_feed.py   # ⚡ L2 WebSocket feed (ultra-low latency)
-├── hyperliquid_client.py # 🔌 Hyperliquid REST/SDK kliens
-├── config.py             # ⚙️  Stratégia konfig loader
-├── bot_logger.py         # 📝 Strukturált naplózás
-├── check_balance.py      # 💰 Egyenleg lekérdező segédprogram
-├── strategy_maker.json   # 📊 Stratégia paraméterek
-├── requirements.txt      # 📦 Python függőségek
-├── .env.example          # 🔑 Env sablon (ebből csináld a .env-t)
-├── test_backend.py       # 🧪 Backend öndiagnosztika
-└── setup.sh              # 🛠️  Automatikus VPS telepítő
-```
-
----
-
-## 🔧 Kézi indítás (fejlesztés / debug)
+## ⚙️ Kézi indítás
 
 ```bash
-# Virtuális környezet
 python3 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
+cp .env.example .env   # majd add meg a PRIVATE_KEY-t
 
-# .env beállítása
-cp .env.example .env
-nano .env   # Add meg a PRIVATE_KEY-t
-
-# Backend teszt (futtatsd MINDIG mielőtt live-ba mész!)
-python test_backend.py
-
-# Dry run (szimuláció, nincs valódi order)
-python bot.py
-
-# Éles kereskedés
-python bot.py --live
+python test_backend.py  # ← mindig futtasd először!
+python bot.py           # dry run (szimuláció)
+python bot.py --live    # éles kereskedés
 ```
 
 ---
 
-## 🚀 VPS kezelés
+## � .env konfiguráció
 
-| Parancs | Mit csinál |
-|---|---|
-| `sudo systemctl start sebessegbot` | Bot indítása |
-| `sudo systemctl stop sebessegbot` | Bot leállítása |
-| `sudo systemctl status sebessegbot` | Státusz lekérdezése |
-| `journalctl -u sebessegbot -f` | Élő napló követése |
-| `bash setup.sh` | Frissítés + újratelepítés |
+```env
+PRIVATE_KEY=0x...       # Hyperliquid privát kulcs
+DRY_RUN=true            # true = szimuláció | false = éles
+```
+
+> ⚠️ A `.env` fájl nincs a repóban – sosem kerüljön commitba.
 
 ---
 
-## 🛡️ Stratégia & Kockázatkezelés
+## 🖥️ VPS kezelés
 
-**Típus:** Maker-only Ambush Létra (Mean Reversion)  
-**Piac:** Hyperliquid BTC perpetual  
-**Margin:** Izolált margin (isolated, nem cross!)
+```bash
+sudo systemctl start sebessegbot    # indítás
+sudo systemctl stop sebessegbot     # leállítás
+sudo systemctl status sebessegbot   # státusz
+journalctl -u sebessegbot -f        # élő napló
+bash setup.sh                       # frissítés
+```
 
-### Állapotgép (FSM)
+---
+
+## 🧪 Backend teszt
+
+A `test_backend.py` az alábbiak rendben létét ellenőrzi mielőtt a bot elindul:
+
+- Python 3.10+ és függőségek
+- `.env` fájl és `PRIVATE_KEY`
+- Összes Python modul betölthetősége
+- `strategy_maker.json` konfig (leverage, isolated margin)
+- Hyperliquid REST API elérhetősége
+- WebSocket L2 feed 3 másodperces élő tesztje
+- Wallet inicializálás
+
+---
+
+## 🛡️ Állapotgép (FSM)
 
 ```
 IDLE → ARMED → LADDER_PLACED → IN_POSITION → EXITING → COOLDOWN
                                                  ↕
-                                            RECOVERING  ← (WebSocket kiesés esetén)
+                                            RECOVERING
 ```
 
-### Hálózati védelem (kétlépcsős)
-
-| Késés | Reakció |
+| Állapot | Leírás |
 |---|---|
-| 1–3 mp | ⚠️ Warning: Nincs új pozíció, meglévők tartva |
-| 3+ mp | 🚨 Panic Cancel: Minden order törölve, pozíció piaci áron zárva |
-| Feed visszatér | 🔄 RECOVERING állapot: API ellenőrzés → 30s cooldown → ARMED |
+| `ARMED` | Jelet vár, nem kereskedik |
+| `LADDER_PLACED` | Post-only limit létra aktív |
+| `IN_POSITION` | Pozíció nyitva, TP order könyvben |
+| `EXITING` | Kilépés folyamatban |
+| `COOLDOWN` | Várakozás következő belépés előtt |
+| `RECOVERING` | WebSocket kiesés utáni cleanup + ellenőrzés |
 
-### Kockázatok
+### Hálózati védelem
 
-- Max **1x–5x** tőkeáttétel (strategy_maker.json-ban állítható)
-- Max **$20** per trade
-- **$25** napi vesztési limit
-- **60s** cooldown exit után
-- Exponenciális **retry** (3x) API timeout esetén
+| Feed késés | Reakció |
+|---|---|
+| **1–3 mp** | Warning – nincs új belépés, meglévő pozíció tartva |
+| **3+ mp** | Panic Cancel – minden order törölve, pozíció piaci áron zárva |
+| **Feed visszatér** | Recovery – API ellenőrzés → 30s cooldown → `ARMED` |
 
 ---
 
-## 🔑 Biztonsági megjegyzések
+## 📁 Struktúra
 
-> ⚠️ A `.env` fájlt **SOHA ne commitold** be a Git-be!
-
-A `.gitignore` már tartalmazza a `.env` kizárást. Ellenőrzés:
-```bash
-cat .gitignore | grep .env
 ```
-
----
-
-## 📝 Naplók
-
-```bash
-# Rendszer napló (systemd)
-journalctl -u sebessegbot --since "1 hour ago"
-
-# Fájl naplók
-tail -f ~/sebessegbot/logs/bot.log
+bot.py                 # Főprogram, FSM
+order_manager.py       # Létra + TP kezelés
+signal_engine.py       # Z-score, volatilitás, jelgenerátor
+hyperliquid_feed.py    # L2 WebSocket (ultra-low latency)
+hyperliquid_client.py  # HL REST/SDK kliens
+config.py              # Konfig loader
+bot_logger.py          # Naplózás
+strategy_maker.json    # Stratégia paraméterek
+test_backend.py        # Öndiagnosztika
+setup.sh               # VPS telepítő
 ```
