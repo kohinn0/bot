@@ -1,3 +1,4 @@
+from bot_logger import logger
 """
 Binance Feed v3 - Ultra Low Latency WebSocket
 Optimalizációk:
@@ -87,7 +88,7 @@ class BinanceFeed:
         self._thread = threading.Thread(target=self._run_async_loop, daemon=True)
         self._thread.start()
         
-        print(f"✅ Binance Feed v3 Started (NTP offset: {self._ntp_offset_ms:.0f}ms)")
+        logger.info(f"✅ Binance Feed v3 Started (NTP offset: {self._ntp_offset_ms:.0f}ms)")
     
     def stop(self) -> None:
         """Leállítás"""
@@ -96,7 +97,7 @@ class BinanceFeed:
             self._loop.call_soon_threadsafe(self._loop.stop)
         if self._thread:
             self._thread.join(timeout=2)
-        print("🛑 Binance Feed Stopped")
+        logger.info("🛑 Binance Feed Stopped")
     
     def _measure_ntp_offset(self) -> None:
         """
@@ -114,9 +115,9 @@ class BinanceFeed:
                 # RTT / 2 kompenzáció
                 local_time = (t1 + t2) / 2
                 self._ntp_offset_ms = local_time - server_time
-                print(f"   📡 NTP offset: {self._ntp_offset_ms:.0f}ms (local - server)")
+                logger.info(f"   📡 NTP offset: {self._ntp_offset_ms:.0f}ms (local - server)")
         except Exception as e:
-            print(f"   ⚠️ NTP mérés hiba: {e}")
+            logger.info(f"   ⚠️ NTP mérés hiba: {e}")
             self._ntp_offset_ms = 0
     
     def _run_async_loop(self) -> None:
@@ -128,7 +129,7 @@ class BinanceFeed:
             self._loop.run_until_complete(self._ws_handler())
         except Exception as e:
             if not self._stop.is_set():
-                print(f"⚠️ Async loop error: {e}")
+                logger.info(f"⚠️ Async loop error: {e}")
         finally:
             self._loop.close()
     
@@ -139,7 +140,7 @@ class BinanceFeed:
                 await self._connect_and_listen()
             except Exception as e:
                 if not self._stop.is_set():
-                    print(f"⚠️ WS Error: {e}, reconnecting in 1s...")
+                    logger.info(f"⚠️ WS Error: {e}, reconnecting in 1s...")
                     await asyncio.sleep(1)
     
     async def _connect_and_listen(self) -> None:
@@ -152,7 +153,7 @@ class BinanceFeed:
             ping_timeout=10,
             close_timeout=5
         ) as ws:
-            print("🔗 Binance WS Connected (optimized)")
+            logger.info("🔗 Binance WS Connected (optimized)")
             
             async for message in ws:
                 if self._stop.is_set():
@@ -210,7 +211,7 @@ class BinanceFeed:
         except Exception as e:
             # Log unexpected parse errors so format changes are visible
             import traceback
-            print(f"⚠️ BinanceFeed parse error: {e}")
+            logger.info(f"⚠️ BinanceFeed parse error: {e}")
     
     def _trim(self, now: float) -> None:
         """Buffer takarítás"""
@@ -316,8 +317,8 @@ class BinanceFeed:
 if __name__ == "__main__":
     import statistics
     
-    print("🧪 Binance Feed v3 - Latency Test")
-    print("=" * 50)
+    logger.info("🧪 Binance Feed v3 - Latency Test")
+    logger.info("=" * 50)
     
     feed = BinanceFeed()
     feed.start()
@@ -325,7 +326,7 @@ if __name__ == "__main__":
     time.sleep(2)  # Warm up
     
     latencies = []
-    print("\n📊 Collecting 100 ticks...")
+    logger.info("\n📊 Collecting 100 ticks...")
     
     for i in range(100):
         tick = feed.get_last_tick()
@@ -341,6 +342,6 @@ if __name__ == "__main__":
         p95 = sorted_lat[int(len(sorted_lat) * 0.95)]
         avg = statistics.mean(latencies)
         
-        print(f"\n📈 RESULTS (NTP kompenzált):")
-        print(f"   Samples: {len(latencies)}")
-        print(f"   P50: {p50:.0f}ms | P95: {p95:.0f}ms | Avg: {avg:.0f}ms")
+        logger.info(f"\n📈 RESULTS (NTP kompenzált):")
+        logger.info(f"   Samples: {len(latencies)}")
+        logger.info(f"   P50: {p50:.0f}ms | P95: {p95:.0f}ms | Avg: {avg:.0f}ms")

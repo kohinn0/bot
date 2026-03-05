@@ -1,3 +1,4 @@
+from bot_logger import logger
 """
 Polymarket kliens - Itt történnek a tényleges fogadások
 Használja a py-clob-client könyvtárat
@@ -18,7 +19,7 @@ try:
     from py_clob_client.order_builder.constants import BUY, SELL
     CLOB_AVAILABLE = True
 except ImportError:
-    print("⚠️  py-clob-client nincs telepítve. Futtasd: pip install py-clob-client")
+    logger.info("⚠️  py-clob-client nincs telepítve. Futtasd: pip install py-clob-client")
     CLOB_AVAILABLE = False
 
 
@@ -30,20 +31,20 @@ class PolymarketClient:
         self.chain_id = 137  # Polygon mainnet
         
         if not self.private_key or "ide_" in self.private_key:
-            print("⚠️  FIGYELEM: Polymarket PRIVATE_KEY nincs beállítva!")
-            print("   Szerkeszd a .env fájlt és add meg a privát kulcsot.")
+            logger.info("⚠️  FIGYELEM: Polymarket PRIVATE_KEY nincs beállítva!")
+            logger.info("   Szerkeszd a .env fájlt és add meg a privát kulcsot.")
             self.client = None
             self.creds = None
         elif not self.funder_address:
-            print("⚠️  FIGYELEM: Csatlakozás visszautasítva: FUNDER_ADDRESS (Proxy) hiányzik.")
+            logger.info("⚠️  FIGYELEM: Csatlakozás visszautasítva: FUNDER_ADDRESS (Proxy) hiányzik.")
             self.client = None
             self.creds = None
         elif not CLOB_AVAILABLE:
-            print("⚠️  py-clob-client könyvtár hiányzik!")
+            logger.info("⚠️  py-clob-client könyvtár hiányzik!")
             self.client = None
             self.creds = None
         else:
-            print("✅ Polymarket privát kulcs és Proxy cím betöltve")
+            logger.info("✅ Polymarket privát kulcs és Proxy cím betöltve")
             # A klienst majd aszinkron módon inicializáljuk
             self.client = None
             self.creds = None
@@ -84,12 +85,12 @@ class PolymarketClient:
             )
             
             # Wallet cím kiíratása (debug)
-            print(f"✅ Polymarket Proxy (Gasless) kapcsolat OK")
-            print(f"📍 Működési cím: {self.funder_address}")
+            logger.info(f"✅ Polymarket Proxy (Gasless) kapcsolat OK")
+            logger.info(f"📍 Működési cím: {self.funder_address}")
             return True
             
         except Exception as e:
-            print(f"❌ Polymarket inicializálási hiba: {e}")
+            logger.info(f"❌ Polymarket inicializálási hiba: {e}")
             self.client = None
             return False
     
@@ -110,7 +111,7 @@ class PolymarketClient:
                 return best_bid
             return None
         except Exception as e:
-            print(f"❌ Ár lekérdezési hiba: {e}")
+            logger.info(f"❌ Ár lekérdezési hiba: {e}")
             return None
 
     def get_ask_price(self, token_id: str) -> float | None:
@@ -149,14 +150,14 @@ class PolymarketClient:
         Returns: Order dict vagy None
         """
         if not self.client or not token_id:
-            print("❌ Nincs Polymarket kapcsolat")
+            logger.info("❌ Nincs Polymarket kapcsolat")
             return None
         
         if dry_run:
-            print(f"🧪 [DRY RUN] Vennék IGEN-t:")
-            print(f"   Token: {token_id[:20]}...")
-            print(f"   Ár: ${price}")
-            print(f"   Összeg: ${size} USDC")
+            logger.info(f"🧪 [DRY RUN] Vennék IGEN-t:")
+            logger.info(f"   Token: {token_id[:20]}...")
+            logger.info(f"   Ár: ${price}")
+            logger.info(f"   Összeg: ${size} USDC")
             return {"status": "simulated", "price": price, "size": size}
         
         try:
@@ -164,9 +165,9 @@ class PolymarketClient:
             import time
             expiration_timestamp = str(int(time.time()) + expiration) if expiration > 0 else "0"
             
-            print(f"DEBUG - Token: {token_id} | TTL: {expiration}s")
-            print(f"DEBUG - Price: {price}")
-            print(f"DEBUG - Size (Shares): {size}")
+            logger.info(f"DEBUG - Token: {token_id} | TTL: {expiration}s")
+            logger.info(f"DEBUG - Price: {price}")
+            logger.info(f"DEBUG - Size (Shares): {size}")
             
             order_args = OrderArgs(
                 token_id=token_id,
@@ -177,24 +178,24 @@ class PolymarketClient:
             )
             
             response = self.client.create_and_post_order(order_args)
-            print(f"DEBUG - API Response: {response}")
+            logger.info(f"DEBUG - API Response: {response}")
             
             # Hibakezelés: A válasz lehet lista vagy dict
             resp_data = response[0] if isinstance(response, list) and response else response
             
             if isinstance(resp_data, dict) and ('error_message' in resp_data or 'error' in resp_data):
-                 print(f"❌ API Hiba: {resp_data.get('error_message') or resp_data.get('error')}")
+                 logger.info(f"❌ API Hiba: {resp_data.get('error_message') or resp_data.get('error')}")
                  return None
             
             if isinstance(resp_data, dict) and resp_data.get('success') is False:
-                 print(f"❌ Sikertelen order: {resp_data}")
+                 logger.info(f"❌ Sikertelen order: {resp_data}")
                  return None
                  
-            print(f"✅ Order leadva! ID: {resp_data.get('orderID', 'N/A')}")
+            logger.info(f"✅ Order leadva! ID: {resp_data.get('orderID', 'N/A')}")
             return resp_data
             
         except Exception as e:
-            print(f"❌ Order kivétel: {e}")
+            logger.info(f"❌ Order kivétel: {e}")
             return None
     
     def place_batch_orders(self, orders: list[dict], dry_run: bool = True) -> list[dict] | None:
@@ -209,13 +210,13 @@ class PolymarketClient:
             Lista a válasz order dict-ekkel vagy None hiba esetén.
         """
         if not self.client or not orders:
-            print("❌ Nincs Polymarket kapcsolat vagy üres as order lista")
+            logger.info("❌ Nincs Polymarket kapcsolat vagy üres as order lista")
             return None
             
         if dry_run:
-            print(f"🧪 [DRY RUN] BATCH ({len(orders)} db order) küldése:")
+            logger.info(f"🧪 [DRY RUN] BATCH ({len(orders)} db order) küldése:")
             for o in orders:
-                print(f"   - {o['side']} Token: {o['token_id'][:15]}... | Ár: ${o['price']} | Összeg: ${o['size']} USDC")
+                logger.info(f"   - {o['side']} Token: {o['token_id'][:15]}... | Ár: ${o['price']} | Összeg: ${o['size']} USDC")
             return [{"status": "simulated", **o} for o in orders]
             
         try:
@@ -245,18 +246,18 @@ class PolymarketClient:
                     if isinstance(resp, dict) and 'orderID' in resp:
                         successes.append(resp)
                     else:
-                        print(f"⚠️ Részleges Batch hiba: {resp}")
+                        logger.info(f"⚠️ Részleges Batch hiba: {resp}")
                 
                 if successes:
-                    print(f"✅ BATCH leadva! ({len(successes)}/{len(orders)} sikeres)")
+                    logger.info(f"✅ BATCH leadva! ({len(successes)}/{len(orders)} sikeres)")
                     return successes
                 return None
             else:
-                 print(f"❌ API Batch Hiba formátum: {response}")
+                 logger.info(f"❌ API Batch Hiba formátum: {response}")
                  return None
                  
         except Exception as e:
-            print(f"❌ Batch feladási kivétel: {e}")
+            logger.info(f"❌ Batch feladási kivétel: {e}")
             return None
 
     def cancel_batch_orders(self, order_ids: list[str], dry_run: bool = True) -> bool:
@@ -267,15 +268,15 @@ class PolymarketClient:
             return False
             
         if dry_run:
-            print(f"🧪 [DRY RUN] Törlés {len(order_ids)} beragadt limit ordert...")
+            logger.info(f"🧪 [DRY RUN] Törlés {len(order_ids)} beragadt limit ordert...")
             return True
             
         try:
             response = self.client.cancel_orders(order_ids)
-            print(f"✅ Törlés sikeres ({len(order_ids)} order).")
+            logger.info(f"✅ Törlés sikeres ({len(order_ids)} order).")
             return True
         except Exception as e:
-            print(f"❌ Batch törlési kivétel: {e}")
+            logger.info(f"❌ Batch törlési kivétel: {e}")
             return False
 
     def is_connected(self) -> bool:
@@ -285,17 +286,17 @@ class PolymarketClient:
 
 # Teszt
 async def test_connection():
-    print("🔍 Polymarket kapcsolat tesztelése...")
+    logger.info("🔍 Polymarket kapcsolat tesztelése...")
     client = PolymarketClient()
     
     if client.private_key and client.funder_address:
         success = await client.initialize()
         if success:
-            print("✅ Polymarket kliens működik (Gasless mode)!")
+            logger.info("✅ Polymarket kliens működik (Gasless mode)!")
         else:
-            print("❌ Polymarket inicializálás sikertelen")
+            logger.info("❌ Polymarket inicializálás sikertelen")
     else:
-        print("❌ Nincs PRIVATE_KEY vagy FUNDER_ADDRESS beállítva a .env-ben!")
+        logger.info("❌ Nincs PRIVATE_KEY vagy FUNDER_ADDRESS beállítva a .env-ben!")
 
 
 if __name__ == "__main__":

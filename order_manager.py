@@ -1,3 +1,4 @@
+from bot_logger import logger
 """
 Order Manager - Handles 3-level post-only ladder placement and management
 """
@@ -80,7 +81,7 @@ class OrderManager:
         penalty_ticks = config.get_inventory_risk_spread_penalty(inventory_yes, inventory_no, side)
         if penalty_ticks > 0:
             penalty_usd = penalty_ticks * tick_size
-            print(f"   ⚠️ INVENTORY RISK: Aszimmetria büntetés érvényesítve: -{penalty_ticks} ticks (-${penalty_usd:.3f})")
+            logger.info(f"   ⚠️ INVENTORY RISK: Aszimmetria büntetés érvényesítve: -{penalty_ticks} ticks (-${penalty_usd:.3f})")
             mid_price -= penalty_usd
             
         # 1) VOLA-ALAPÚ DINAMIKUS LÉTRA (ha van elérhető szigma a Binance feedből)
@@ -117,19 +118,19 @@ class OrderManager:
         
         # Place orders
         if self.dry_run:
-            print(f"🧪 [DRY RUN] Placing ladder for {side} token:")
+            logger.info(f"🧪 [DRY RUN] Placing ladder for {side} token:")
             for order in orders:
                 # Logisztikus P(fill) becslés a mid-től való távolság és a volatilitás alapján
                 p_fill = None
                 if sigma_r is not None and sigma_r > 0:
                     distance = abs(order.price - mid_price)
                     p_fill = self._logistic_p_fill(distance, sigma_r)
-                    print(
+                    logger.info(
                         f"   Level {order.level}: {order.size} shares @ ${order.price:.4f} "
                         f"(P(fill)≈{p_fill * 100:.1f}% , d={distance:.4f})"
                     )
                 else:
-                    print(f"   Level {order.level}: {order.size} shares @ ${order.price:.4f}")
+                    logger.info(f"   Level {order.level}: {order.size} shares @ ${order.price:.4f}")
                 order.order_id = f"DRY_{order.level}"
         else:
             # Generate batch for real API
@@ -151,7 +152,7 @@ class OrderManager:
                 for i, order in enumerate(orders):
                     order.order_id = responses[i].get('orderID')
             else:
-                print(f"⚠️  Real batch order placement partially or fully failed.")
+                logger.info(f"⚠️  Real batch order placement partially or fully failed.")
                 for order in orders:
                     order.order_id = f"ERR_{order.level}"
         
@@ -200,10 +201,10 @@ class OrderManager:
                                 order.price * filled_sz
                             )
                 except Exception as e:
-                    print(f"\u26a0\ufe0f Fill check error for "
+                    logger.info(f"\u26a0\ufe0f Fill check error for "
                           f"{order.order_id}: {e}")
         except Exception as e:
-            print(f"\u26a0\ufe0f Bulk fill check error: {e}")
+            logger.info(f"\u26a0\ufe0f Bulk fill check error: {e}")
         
         if total_filled > 0:
             avg = weighted_price_sum / total_filled
@@ -221,19 +222,19 @@ class OrderManager:
         unfilled_ids = [o.order_id for o in self.active_ladder.orders if not o.filled and o.order_id]
         
         if self.dry_run:
-            print(f"🧪 [DRY RUN] Canceling {len(unfilled_ids)} ladder orders")
+            logger.info(f"🧪 [DRY RUN] Canceling {len(unfilled_ids)} ladder orders")
             for order in self.active_ladder.orders:
                 if not order.filled:
-                    print(f"   Canceled Level {order.level}")
+                    logger.info(f"   Canceled Level {order.level}")
         else:
             if unfilled_ids:
                 success = self.poly_client.cancel_batch_orders(unfilled_ids, dry_run=False)
                 if success:
-                    print(f"✅ Successfully canceled {len(unfilled_ids)} ladder orders via BATCH.")
+                    logger.info(f"✅ Successfully canceled {len(unfilled_ids)} ladder orders via BATCH.")
                 else:
-                    print("❌ Failed to cancel some ladder orders.")
+                    logger.info("❌ Failed to cancel some ladder orders.")
             else:
-                 print("ℹ️ Nincsenek törlendő (unfilled) id-k a létrában.")
+                 logger.info("ℹ️ Nincsenek törlendő (unfilled) id-k a létrában.")
         
         self.active_ladder = None
         return True
@@ -357,7 +358,7 @@ class ExitManager:
             # Épphogy csak profitáljunk (1 tick), és nagyon gyorsan ejtsük (pár sec)
             tp_price = entry_price + tick_size
             expiration_sec = 3  # Gyors on-chain GTD halál
-            print(f"   ⚠️ TOXIKUS PIAC (Score: {toxicity_score:.2f}) -> FAST TP aktiválva. Célár: ${tp_price:.3f}, GTD: 3s")
+            logger.info(f"   ⚠️ TOXIKUS PIAC (Score: {toxicity_score:.2f}) -> FAST TP aktiválva. Célár: ${tp_price:.3f}, GTD: 3s")
         else:
             # Normál ügymenet: "Slow TP"
             tp_price = config.calculate_take_profit_price(entry_price, current_spread, tick_size)
@@ -373,10 +374,10 @@ class ExitManager:
         self.position_size = position_size
         
         if self.dry_run:
-            print(f"🧪 [DRY RUN] Placing TP order (GTD: +{expiration_sec}s):")
-            print(f"   Entry: ${entry_price:.2f}")
-            print(f"   TP: ${tp_price:.2f} (+{(tp_price - entry_price):.2f})")
-            print(f"   Size: {position_size} shares")
+            logger.info(f"🧪 [DRY RUN] Placing TP order (GTD: +{expiration_sec}s):")
+            logger.info(f"   Entry: ${entry_price:.2f}")
+            logger.info(f"   TP: ${tp_price:.2f} (+{(tp_price - entry_price):.2f})")
+            logger.info(f"   Size: {position_size} shares")
             self.tp_order_id = "DRY_TP"
             return True
         else:
@@ -394,10 +395,10 @@ class ExitManager:
             
             if responses and len(responses) > 0:
                  self.tp_order_id = responses[0].get('orderID')
-                 print(f"✅ Real TP GTD order placed! ID: {self.tp_order_id}")
+                 logger.info(f"✅ Real TP GTD order placed! ID: {self.tp_order_id}")
                  return True
             else:
-                 print(f"⚠️  Real TP order placement BATCH failed.")
+                 logger.info(f"⚠️  Real TP order placement BATCH failed.")
                  self.tp_order_id = "ERR_TP"
                  return False
     
@@ -428,7 +429,7 @@ class ExitManager:
         """Cancel all exit orders"""
         if self.tp_order_id:
             if self.dry_run:
-                print(f"\ud83e\uddea [DRY RUN] Canceled TP order")
+                logger.info(f"\ud83e\uddea [DRY RUN] Canceled TP order")
             else:
                 # LIVE: Küldje el a törlési kérést az API-nak
                 if not self.tp_order_id.startswith("ERR_"):
@@ -436,10 +437,10 @@ class ExitManager:
                         self.poly_client.cancel_batch_orders(
                             [self.tp_order_id], dry_run=False
                         )
-                        print(f"\u2705 LIVE TP order törölve: "
+                        logger.info(f"\u2705 LIVE TP order törölve: "
                               f"{self.tp_order_id}")
                     except Exception as e:
-                        print(f"\u26a0\ufe0f TP cancel hiba: {e}")
+                        logger.info(f"\u26a0\ufe0f TP cancel hiba: {e}")
         
         self.tp_order_id = None
         self.entry_price = None
@@ -448,8 +449,8 @@ class ExitManager:
 
 
 if __name__ == "__main__":
-    print("🧪 Testing Order Manager")
-    print("=" * 60)
+    logger.info("🧪 Testing Order Manager")
+    logger.info("=" * 60)
     
     # Mock client
     from polymarket_client import PolymarketClient
@@ -460,7 +461,7 @@ if __name__ == "__main__":
     exit_mgr = ExitManager(client, dry_run=True)
     
     # Test ladder placement
-    print("\n1. Placing ladder:")
+    logger.info("\n1. Placing ladder:")
     ladder = order_mgr.place_ladder(
         token_id="test_token_123",
         side="DOWN",
@@ -470,21 +471,21 @@ if __name__ == "__main__":
     )
     
     if ladder:
-        print(f"✅ Ladder placed with {len(ladder.orders)} levels")
+        logger.info(f"✅ Ladder placed with {len(ladder.orders)} levels")
     
     # Simulate wait
     time.sleep(2)
     
     # Check age
     age = order_mgr.get_ladder_age_ms()
-    print(f"\n2. Ladder age: {age:.0f}ms")
+    logger.info(f"\n2. Ladder age: {age:.0f}ms")
     
     # Cancel ladder
-    print(f"\n3. Canceling ladder:")
+    logger.info(f"\n3. Canceling ladder:")
     order_mgr.cancel_ladder()
     
     # Test TP
-    print(f"\n4. Placing TP:")
+    logger.info(f"\n4. Placing TP:")
     exit_mgr.place_take_profit(
         token_id="test_token_123",
         entry_price=0.47,
@@ -496,6 +497,6 @@ if __name__ == "__main__":
     # Check exit conditions
     time.sleep(1)
     should_exit, reason = exit_mgr.check_exit_conditions(time_to_resolution_sec=300)
-    print(f"\n5. Should exit: {should_exit} ({reason})")
+    logger.info(f"\n5. Should exit: {should_exit} ({reason})")
     
-    print(f"\n✅ Test complete")
+    logger.info(f"\n✅ Test complete")

@@ -28,3 +28,8 @@ logs/
 .vscode/
 .idea/
 .DS_Store
+*.env
+inventory_state*.json
+patch_*.py
+inspect_clob.py
+debug_error.txt

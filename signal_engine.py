@@ -1,3 +1,4 @@
+from bot_logger import logger
 import asyncio
 import json
 import math
@@ -72,7 +73,7 @@ class PolymarketWS:
                     data = json.loads(msg)
                     self._process_message(data)
         except Exception as e:
-            print(f"⚠️ Polymarket WS hiba: {e}")
+            logger.info(f"⚠️ Polymarket WS hiba: {e}")
 
     def _process_message(self, data: dict):
         if 'asset_id' not in data or 'bids' not in data:
@@ -105,7 +106,7 @@ class PolymarketWS:
             
         total_vol = sum(size for _, size in self.recent_volume[token])
         if total_vol > self.spike_threshold_shares:
-             print(f"🚨🚨 VOLUMEN SPIKE DETEKTÁLVA! ({total_vol} shares/sec) 🚨🚨")
+             logger.info(f"🚨🚨 VOLUMEN SPIKE DETEKTÁLVA! ({total_vol} shares/sec) 🚨🚨")
              self.halt_signal = True
 
 
@@ -327,8 +328,8 @@ class SignalEngine:
 
 
 if __name__ == "__main__":
-    print("🧪 Testing Signal Engine")
-    print("=" * 60)
+    logger.info("🧪 Testing Signal Engine")
+    logger.info("=" * 60)
     
     # Initialize
     binance = BinanceFeed()
@@ -337,25 +338,23 @@ if __name__ == "__main__":
     
     engine = SignalEngine(binance)
     
-    print(f"Monitoring for signals...")
-    print(f"  Trigger range: {config.bearish_trigger_pct_range[0]:.2f}% - {config.bearish_trigger_pct_range[1]:.2f}%")
-    print(f"  Max duration: 1000ms")
-    print(f"  Debounce: {config.min_time_between_entries_ms}ms")
-    print()
-    
+    logger.info(f"Monitoring for signals...")
+    logger.info(f"  Trigger range: {config.bearish_trigger_pct_range[0]:.2f}% - {config.bearish_trigger_pct_range[1]:.2f}%")
+    logger.info(f"  Max duration: 1000ms")
+    logger.info(f"  Debounce: {config.min_time_between_entries_ms}ms")
+
     # Monitor for 30 seconds
     for i in range(300):  # 30 seconds at 100ms intervals
         signal = engine.update()
         
         if signal:
-            print(f"🚨 SIGNAL DETECTED!")
-            print(f"   Direction: {signal.direction}")
-            print(f"   Change: {signal.pct_change:+.3f}%")
-            print(f"   Duration: {signal.duration_ms:.0f}ms")
-            print(f"   Price: ${signal.start_price:,.2f} → ${signal.end_price:,.2f}")
-            print()
-        
+            logger.info(f"🚨 SIGNAL DETECTED!")
+            logger.info(f"   Direction: {signal.direction}")
+            logger.info(f"   Change: {signal.pct_change:+.3f}%")
+            logger.info(f"   Duration: {signal.duration_ms:.0f}ms")
+            logger.info(f"   Price: ${signal.start_price:,.2f} → ${signal.end_price:,.2f}")
+
         time.sleep(0.1)  # 100ms
     
     binance.stop()
-    print("✅ Test complete")
+    logger.info("✅ Test complete")

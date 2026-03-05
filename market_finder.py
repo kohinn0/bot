@@ -1,3 +1,4 @@
+from bot_logger import logger
 import json
 import re
 import time
@@ -64,7 +65,7 @@ class MarketFinder:
         # The search result 'market_lite' is missing 'id' and 'clobTokenIds'!
         market_full = self._fetch_market_by_slug(slug)
         if not market_full:
-            print(f"⚠️ Could not fetch full details for slug: {slug}")
+            logger.info(f"⚠️ Could not fetch full details for slug: {slug}")
             return None
 
         # 3. Convert full market to context
@@ -103,7 +104,7 @@ class MarketFinder:
                 if not slug: continue
                 
                 # Debug logging
-                # print(f"DEBUG Check Slug: {slug}")
+                # logger.info(f"DEBUG Check Slug: {slug}")
                 
                 # Filter for "Up or Down" markets
                 # Allow 'bitcoin-up-or-down', 'btc-updown', 'btc-up-or-down'
@@ -114,7 +115,7 @@ class MarketFinder:
                 if not self._slug_re.match(slug):
                     # Debug: print why rejected?
                     if "btc" in slug and "15m" not in slug:
-                        # print(f"DEBUG: Rejected by Regex: {slug}")
+                        # logger.info(f"DEBUG: Rejected by Regex: {slug}")
                         pass
                     continue
                     
@@ -134,10 +135,10 @@ class MarketFinder:
                     continue
 
             if not candidates:
-                print("DEBUG: No candidates after filtering.")
+                logger.info("DEBUG: No candidates after filtering.")
                 return None
 
-            # print(f"DEBUG: Found {len(candidates)} valid candidates.")
+            # logger.info(f"DEBUG: Found {len(candidates)} valid candidates.")
             
             # Sort by End Date (find the one ending soonest but in future? or just started?)
             # Since Gamma returns active markets, we just want the nearest one.
@@ -164,21 +165,21 @@ class MarketFinder:
                     valid_candidates.append({'slug': slug, 'ts': ts, 'is_15m': '15m' in slug})
             
             if not valid_candidates:
-                print("DEBUG: No valid candidates found (all expired?).")
+                logger.info("DEBUG: No valid candidates found (all expired?).")
                 return None
             
             # Prioritize 15m markets!
             # If we have ANY 15m market, filter out non-15m markets
             has_15m = any(c['is_15m'] for c in valid_candidates)
             if has_15m:
-                # print("DEBUG: Found 15m markets! Filtering for 15m only.")
+                # logger.info("DEBUG: Found 15m markets! Filtering for 15m only.")
                 valid_candidates = [c for c in valid_candidates if c['is_15m']]
             
             # Sort by time asc (nearest deadlines first)
             valid_candidates.sort(key=lambda x: x['ts'])
             
             best_slug = valid_candidates[0]['slug']
-            print(f"DEBUG: Best Candidate: {best_slug} (Ends: {datetime.fromtimestamp(valid_candidates[0]['ts']).strftime('%H:%M:%S')})")
+            logger.info(f"DEBUG: Best Candidate: {best_slug} (Ends: {datetime.fromtimestamp(valid_candidates[0]['ts']).strftime('%H:%M:%S')})")
             
             # Find the event object again
             for e in events:
@@ -187,7 +188,7 @@ class MarketFinder:
             return None
             
         except Exception as e:
-            print(f"⚠️ Market Discovery Error: {e}")
+            logger.info(f"⚠️ Market Discovery Error: {e}")
             return None
 
     def _fetch_market_by_slug(self, slug: str) -> Optional[Dict[str, Any]]:
@@ -207,7 +208,7 @@ class MarketFinder:
                     return mkts[0]
             return None
         except Exception as e:
-            print(f"⚠️ Fetch Slug Error: {e}")
+            logger.info(f"⚠️ Fetch Slug Error: {e}")
             return None
 
     def _to_context(self, market: Dict[str, Any], binance: BinanceFeed) -> Optional[MarketContext]:
@@ -289,7 +290,7 @@ class MarketFinder:
                 tick_size=tick_size  # NEW: Dynamic precision
             )
         except Exception as e:
-            print(f"⚠️ Context Conversion Error: {e}")
+            logger.info(f"⚠️ Context Conversion Error: {e}")
             import traceback
             traceback.print_exc()
             return None
@@ -334,11 +335,11 @@ class MarketFinder:
         # 3. Fallback to Binance History at Timestamp
         if val is None or val <= 0:
             ts_ms = int(start.timestamp() * 1000)
-            print(f"🔍 Fetching S0 from Binance History: {ts_ms}")
+            logger.info(f"🔍 Fetching S0 from Binance History: {ts_ms}")
             try:
                 val = binance.get_price_at_ms(ts_ms)
             except Exception as e:
-                print(f"⚠️ Binance History Fetch Failed: {e}")
+                logger.info(f"⚠️ Binance History Fetch Failed: {e}")
                 # Fallback to last known good value if implies stability vs crash
                 pass
 
@@ -351,30 +352,30 @@ class MarketFinder:
 if __name__ == "__main__":
     from binance_feed import BinanceFeed
     
-    print("🔬 MARKET FINDER DIAGNOSTICS")
+    logger.info("🔬 MARKET FINDER DIAGNOSTICS")
     binance = BinanceFeed()
     finder = MarketFinder()
     
-    print("1. Searching for active market...")
+    logger.info("1. Searching for active market...")
     market_lite = finder._discover_latest_active_slug()
     
     if market_lite:
         slug = market_lite.get("slug")
-        print(f"✅ FOUND SLUG: {slug}")
+        logger.info(f"✅ FOUND SLUG: {slug}")
         
-        print("2. Fetching FULL market details...")
+        logger.info("2. Fetching FULL market details...")
         market_full = finder._fetch_market_by_slug(slug)
         
         if market_full:
-            print(f"✅ FULL MARKET FETCHED. ID: {market_full.get('id')}", flush=True)
+            logger.info(f"✅ FULL MARKET FETCHED. ID: {market_full.get('id')}")
             
-            print("3. Converting to Context...", flush=True)
+            logger.info("3. Converting to Context...")
             ctx = finder._to_context(market_full, binance)
             if ctx:
-                print(f"✅ CONTEXT SUCCESS: {ctx}", flush=True)
+                logger.info(f"✅ CONTEXT SUCCESS: {ctx}")
             else:
-                print("❌ CONTEXT FAILED", flush=True)
+                logger.info("❌ CONTEXT FAILED")
         else:
-            print("❌ FULL FETCH FAILED", flush=True)
+            logger.info("❌ FULL FETCH FAILED")
     else:
-        print("❌ NO MARKET FOUND", flush=True)
+        logger.info("❌ NO MARKET FOUND")
