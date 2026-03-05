@@ -14,7 +14,6 @@ import websockets
 
 HL_WS_URL = "wss://api.hyperliquid.xyz/ws"
 HL_REST_URL = "https://api.hyperliquid.xyz"
-COIN = "BTC"
 VOL_WINDOW_SEC = 60
 
 @dataclass(frozen=True)
@@ -37,8 +36,9 @@ class HyperliquidFeed:
     Lecseréli a Binance feedet, közvetlenül a Hyperliquid /ws l2Book-ra csatlakozik.
     """
     
-    def __init__(self, session: Optional[requests.Session] = None):
+    def __init__(self, session: Optional[requests.Session] = None, coin: str = "BTC"):
         self.session = session or requests.Session()
+        self.coin = coin
         self._buf: Deque[PricePoint] = deque()
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -64,7 +64,7 @@ class HyperliquidFeed:
         self._thread = threading.Thread(target=self._run_async_loop, daemon=True)
         self._thread.start()
         
-        logger.info(f"✅ Hyperliquid Feed Started (Piac: {COIN})")
+        logger.info(f"✅ Hyperliquid Feed Started (Piac: {self.coin})")
     
     def stop(self) -> None:
         self._stop.set()
@@ -106,7 +106,7 @@ class HyperliquidFeed:
             
             sub_msg = {
                 "method": "subscribe",
-                "subscription": {"type": "l2Book", "coin": COIN}
+                "subscription": {"type": "l2Book", "coin": self.coin}
             }
             await ws.send(json.dumps(sub_msg))
             
@@ -179,7 +179,7 @@ class HyperliquidFeed:
         
         # Failover ha a WS nem adna semmit
         try:
-            resp = self.session.post(HL_REST_URL + "/info", json={"type": "l2Book", "coin": COIN}, timeout=2)
+            resp = self.session.post(HL_REST_URL + "/info", json={"type": "l2Book", "coin": self.coin}, timeout=2)
             if resp.status_code == 200:
                 levels = resp.json().get("levels", [])
                 if len(levels) == 2 and levels[0] and levels[1]:

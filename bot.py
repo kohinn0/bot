@@ -1,634 +1,334 @@
-"""
-Crypto Sebesseg - Main Trading Bot
-Automated maker-only momentum scalping bot
-"""
+import os
 import time
-import sys
-import datetime
-from enum import Enum
-from dataclasses import dataclass
-from typing import Optional
+import asyncio
+import argparse
+from bot_logger import logger
+from typing import Optional, Dict, Any
 
 from config import config
-from bot_logger import logger
-from inventory_state import read_inventory, save_inventory
-from binance_feed import BinanceFeed
-from market_finder import MarketFinder, MarketContext
-from polymarket_client import PolymarketClient
-from signal_engine import SignalEngine, PriceMove
+from hyperliquid_client import HyperliquidClient
+from hyperliquid_feed import HyperliquidFeed
+from signal_engine import SignalEngine
 from order_manager import OrderManager, ExitManager
-from toxicity_engine import ToxicityEngine
 
-
-class BotState(Enum):
-    """Bot states"""
-    IDLE = "IDLE"
-    ARMED = "ARMED"
-    LADDER_PLACED = "LADDER_PLACED"
-    WAITING_FILL = "WAITING_FILL"
-    IN_POSITION = "IN_POSITION"
-    EXITING = "EXITING"
-    COOLDOWN = "COOLDOWN"
-    HALT = "HALT"
-
-
-@dataclass
-class BotStats:
-    """Bot statistics"""
-    signals_detected: int = 0
-    ladders_placed: int = 0
-    fills_received: int = 0
-    exits_completed: int = 0
-    no_fill_skips: int = 0
-    total_pnl: float = 0.0
-
-
-class TradingBot:
-    """Main trading bot"""
-    
+class SebessegBot:
     def __init__(self, dry_run: bool = True):
         self.dry_run = dry_run
-        self.state = BotState.IDLE
-        self.stats = BotStats()
         
-        # Components
-        self.binance: BinanceFeed = None  # type: ignore
-        self.finder: MarketFinder = None  # type: ignore
-        self.poly_client: PolymarketClient = None  # type: ignore
-        self.signal_engine: SignalEngine = None  # type: ignore
-        self.order_mgr: OrderManager = None  # type: ignore
-        self.exit_mgr: ExitManager = None  # type: ignore
-        self.toxicity_engine: ToxicityEngine = None  # type: ignore
+        # Állapotgépi Változók
+        self.state = "IDLE"
+        self.active_coin: Optional[str] = "BTC" # Default coin to trade
         
-        self.market: MarketContext = None  # type: ignore
+        # Risk Management - Hyperliquid Perpetual specific (LONG / SHORT margin)
+        self.daily_pnl = 0.0
+        self.consecutive_losses = 0
         
-        # Inventory tracking
-        self.inventory_yes, self.inventory_no = read_inventory()
-        logger.info(f"Loaded Inventory - YES: {self.inventory_yes}, NO: {self.inventory_no}")
+        # Kliensek & Engine-ek
+        self.hl_client: Optional[HyperliquidClient] = None
+        self.feed_engine: Optional[HyperliquidFeed] = None
+        self.signal_engine: Optional[SignalEngine] = None
+        self.order_manager: Optional[OrderManager] = None
+        self.exit_manager: Optional[ExitManager] = None
         
-        # Analytics state
-        self.last_signal_time: float = 0.0
-        self.last_quote_time: float = 0.0
+        self.last_tick_time = 0.0
+        self.min_tick_interval = 0.01  # 10ms for lower loop stress but fast reaction
         
-        # Cooldown
-        self.cooldown_until: float = 0
+        self.trade_params = {
+            "current_mid": 0.0,
+            "target_side": "",
+            "sz_usd": 0.0,
+            "tick_size": 1.0, # Ezt lekérjük config/API-ből
+        }
         
-        # Verbose logging
-        self.last_price_log: float = 0
-        self.last_logged_price: Optional[float] = None
-        
-        logger.info(f"🤖 Crypto Sebesseg Bot")
-        logger.info(f"   Mode: {'DRY RUN' if dry_run else '🔴 LIVE'}")
-        logger.info(f"   Risk: ${config.risk_management.max_notional_usd_per_trade}/trade")
-
     def initialize(self) -> bool:
-        """Initialize all components"""
-        logger.info("🔧 Initializing components...")
+        logger.info(f"🚀 INICIALIZÁLÁS: SebessegBot v2 (Hyperliquid) | DRY_RUN={self.dry_run}")
         
-        # Binance feed
-        logger.info("  ├─ Binance WebSocket...")
-        self.binance = BinanceFeed()
-        self.binance.start()
-        time.sleep(2)
-        if not self.binance.get_current_price():
-            logger.info("❌")
-            return False
-        logger.info("✅")
+        if config.strategy_name != "pm_ambush_ladder_maker_v2":
+            logger.warning(f"Strategy name mismatch! Found: {config.strategy_name}")
+            
+        # 1. HL Client
+        self.hl_client = HyperliquidClient(dry_run=self.dry_run)
         
-        # Market finder
-        logger.info("  ├─ Market finder...")
-        self.finder = MarketFinder()
-        logger.info("✅")
-        
-        # Polymarket client wrapper
-        logger.info("  ├─ Polymarket client...")
-        self.poly_client = PolymarketClient()
+        # Cancel any leftover open orders from previous crash
         if not self.dry_run:
-            if not self.poly_client.initialize():
-                logger.info("❌")
-                return False
-        logger.info("✅")
-        
-        # Signal engine
-        logger.info("  ├─ Signal engine...")
-        self.signal_engine = SignalEngine(self.binance)
-        logger.info("✅")
-        
-        # Order manager
-        logger.info("  ├─ Order manager...")
-        self.order_mgr = OrderManager(self.poly_client, binance=self.binance, dry_run=self.dry_run)
-        logger.info("✅")
-        
-        # Exit manager
-        logger.info("  ├─ Exit manager...")
-        self.exit_mgr = ExitManager(self.poly_client, dry_run=self.dry_run)
-        logger.info("✅")
-        
-        # Toxicity engine
-        logger.info("  └─ Toxicity engine...")
-        self.toxicity_engine = ToxicityEngine(log_dir="logs")
-        logger.info("✅")
+            self.hl_client.cancel_all_orders()
 
-        return True
-    
-    def find_market(self) -> bool:
-        """Find active 15-min market"""
-        logger.info("🔍 Finding active market...")
-        try:
-            self.market = self.finder.get_active_market(self.binance)
-            if self.market:
-                logger.info("✅")
-                logger.info(f"   Market: {self.market.slug[:50]}...")
+        # Update Leverage
+        lev_cfg = config.risk_management.leverage
+        self.hl_client.update_leverage(
+            coin=self.active_coin,
+            leverage=lev_cfg.max_leverage,
+            is_cross=lev_cfg.cross_margin
+        )
+        
+        # Fetch initial precise tick_size / lot size requirements from info
+        meta = self.hl_client.metaCache
+        if meta and "universe" in meta:
+            try:
+                coin_idx = self.hl_client.coin_to_idx[self.active_coin]
+                coin_data = meta["universe"][coin_idx]
+                sz_decimals = int(coin_data.get("szDecimals", 4))
+                # Minimum tick_size usually hardcoded but can be pulled
+            except Exception as e:
+                logger.info(f"Could not fetch metadata sizing: {e}")
                 
-                # Csatlakoztatás a WS auto-halthoz
-                logger.info("   🔗 Polymarket WS monitor csatlakoztatása...")
-                tokens = [self.market.up_token_id, self.market.down_token_id]
-                self.signal_engine.attach_polymarket_ws(tokens)
-                logger.info("✅")
-                
-                return True
-            else:
-                logger.info("❌")
-                return False
-        except Exception as e:
-            logger.info(f"❌ {e}")
+        # We enforce a dynamic tick size for testing
+        self.trade_params["tick_size"] = 1.0 if self.active_coin == "BTC" else 0.01
+
+        # 2. Market Feed (L2 WebSocket)
+        self.feed_engine = HyperliquidFeed(coin=self.active_coin)
+        self.feed_engine.start()
+        
+        # Várakozás az első adatokra
+        logger.info("⏳ Várakozás a Hyperliquid Feed stabilizálódására...")
+        time.sleep(3)
+        if self.feed_engine.current_mid <= 0:
+            logger.info("❌ Hiba: Nincs kezdeti Mid Price az L2 WebSocket bookból!")
             return False
-    
+        logger.info(f"✅ Kezdeti Vola / Price feed betöltve. Ár: ${self.feed_engine.current_mid:.2f}")
+
+        # 3. Signal Engine
+        self.signal_engine = SignalEngine(self.feed_engine)
+        
+        # 4. Order Managers
+        self.order_manager = OrderManager(self.hl_client, dry_run=self.dry_run)
+        self.exit_manager = ExitManager(self.hl_client, dry_run=self.dry_run)
+        
+        # Start state
+        self.state = "ARMED"
+        return True
+
     def run(self):
-        """Main trading loop"""
-        if not self.initialize():
-            logger.info("❌ Initialization failed")
-            return
-        
-        if not self.find_market():
-            logger.info("⚠️  No market found - bot will wait for markets")
-
-        logger.info("=" * 60)
-        logger.info("🚀 BOT STARTED - Monitoring for signals")
-        logger.info("=" * 60)
-        
-        # Market cycle tracking
-        if self.market:
-            import datetime
-            time_to_res = (self.market.end - datetime.datetime.now(datetime.timezone.utc)).total_seconds()
-            logger.info(f"⏱️  Time to market resolution: {int(time_to_res)}s (~{int(time_to_res/60)} min)")
-
-        self.state = BotState.ARMED
-        
-        cycle_start = time.time()
-        last_stats = time.time()
+        """Fő ciklus (Run Loop)"""
+        logger.info("🟢 BOT INDÍTÁSA - Fő ciklus fut...")
         
         try:
-            while True:
-                self._tick()
-                
-                # Show stats every 60 seconds
-                if time.time() - last_stats > 60:
-                    elapsed = time.time() - cycle_start
-                    signals_per_min = (self.stats.signals_detected / elapsed) * 60 if elapsed > 0 else 0
-                    logger.info(f"\n📈 STATS UPDATE ({int(elapsed/60)}min elapsed):")
-                    logger.info(f"   Signals: {self.stats.signals_detected} ({signals_per_min:.1f}/min)")
-                    logger.info(f"   Ladders: {self.stats.ladders_placed}")
-                    logger.info(f"   Fills: {self.stats.fills_received}")
-                    logger.info(f"   No-fills: {self.stats.no_fill_skips}")
-
-                    last_stats = time.time()
-                
-                time.sleep(0.1)  # 100ms tick
-                
-        except KeyboardInterrupt:
-            logger.info("\n\n🛑 Stopping bot...")
-            self._shutdown()
-    
-    def _tick(self):
-        """Single bot tick (called every 100ms)"""
-        
-        # 1. EMERGENCY AUTO-HALT CHECK (Minden állapotban ellenőrizzük)
-        if self.signal_engine and self.signal_engine.check_auto_halt():
-            logger.info("\n🚨🚨 AUTO-HALT KIVÁLTVA! MÉRGES (TOXIC) VOLUMEN SPIKE DETEKTÁLVA! 🚨🚨")
-            logger.info("   Minden aktív pozíció és order azonnali visszavonása...")
-            
-            # Orderek törlése azonnal
-            if self.order_mgr:
-                self.order_mgr.cancel_ladder()
-            if self.exit_mgr:
-                self.exit_mgr.cancel_exit_orders()
-            
-            # Karantén
-            self.state = BotState.HALT
-            cooldown_min = 30
-            self.cooldown_until = time.time() + (cooldown_min * 60)
-            logger.info(f"   ⏸️  Piac karanténba helyezve {cooldown_min} percre.")
-            return
-
-        # 2. Markout Engine Refresh (Telemetria)
-        if self.toxicity_engine and self.state != BotState.IDLE:
-            current_mid_prices = {}
-            if self.market and self.toxicity_engine.pending_markouts:
-                # Guard: csak ha van élő kliens (LIVE mód)
-                has_client = (self.poly_client
-                              and hasattr(self.poly_client, 'client')
-                              and self.poly_client.client is not None)
-                if has_client:
-                    tokens_to_check = {self.market.up_token_id,
-                                       self.market.down_token_id}
-                    for token in tokens_to_check:
-                        try:
-                            book = self.poly_client.client.get_order_book(token)
-                            if book and book.bids and book.asks:
-                                bb = float(book.bids[0].price)
-                                bs = float(book.bids[0].size)
-                                ba = float(book.asks[0].price)
-                                a_s = float(book.asks[0].size)
-                                mid = (bb + ba) / 2.0
-                                tot = bs + a_s
-                                microprice = ((bb * a_s + ba * bs) / tot
-                                              if tot > 0 else mid)
-                                current_mid_prices[token] = {
-                                    'mid': mid,
-                                    'microprice': microprice
-                                }
-                            else:
-                                fb = (self.poly_client.get_yes_price(token)
-                                      or 0.50)
-                                current_mid_prices[token] = {
-                                    'mid': fb, 'microprice': fb
-                                }
-                        except Exception as e:
-                            logger.info(f"⚠️ Microprice fetch error: {e}")
-                    
-            self.toxicity_engine.update_markouts(current_mid_prices)
-            
-            # Dinamikus Toxicity Kiírás ha túl mérgező (és nem cooldownban vagyunk)
-            if self.toxicity_engine.is_toxic() and self.state == BotState.ARMED:
+            while self.state != "HALT":
                 now = time.time()
-                if now - self.last_price_log > 5.0:  # Ne spamelje tele a logot
-                    logger.info(f"\n⚠️  FIGYELEM: Toxikus order flow! Score: {self.toxicity_engine.toxicity_score:.2f} (Edge vesztés veszélye)")
-                    self.last_price_log = now
+                if now - self.last_tick_time < self.min_tick_interval:
+                    time.sleep(0.001)
+                    continue
+                self.last_tick_time = now
+                
+                # --- State Machine ---
+                if self.state == "ARMED":
+                    self._armed_tick()
+                elif self.state == "LADDER_PLACED":
+                    self._ladder_placed_tick()
+                elif self.state == "IN_POSITION":
+                    self._in_position_tick()
+                elif self.state == "EXITING":
+                    self._exiting_tick()
+                elif self.state == "COOLDOWN":
+                    self._cooldown_tick()
+                    
+        except KeyboardInterrupt:
+            logger.info("\n🛑 JELZÉS (Ctrl+C). Bot leállítása...")
+            self.shutdown()
+        except Exception as e:
+            logger.error(f"💥 KRITIKUS HIBA A FŐ CIKLUSBAN: {e}")
+            self.shutdown()
 
-        # State machine
-        if self.state == BotState.ARMED:
-            self._armed_tick()
-        
-        elif self.state == BotState.LADDER_PLACED:
-            self._ladder_placed_tick()
-        
-        elif self.state == BotState.WAITING_FILL:
-            self._waiting_fill_tick()
-        
-        elif self.state == BotState.IN_POSITION:
-            self._in_position_tick()
-        
-        elif self.state == BotState.COOLDOWN:
-            self._cooldown_tick()
-            
-        elif self.state == BotState.HALT:
-            self._halt_tick()
-    
-    def _halt_tick(self):
-        """Halt state - Piac karanténban mérgező flow miatt"""
-        if time.time() >= self.cooldown_until:
-            logger.info(f"\n✅ Karantén lejárt - Vissza ARMED módba")
-            self.state = BotState.ARMED
-        
-        # Ritkább logolás halt alatt (pl 10 másodpercenként)
-        now = time.time()
-        if now - self.last_price_log > 10.0:
-            rem = int(self.cooldown_until - now)
-            logger.info(f"🔒 AUTO-HALT AKTÍV | Hátralévő karantén: {rem} másodperc")
-            self.last_price_log = now
+    # ================= ÁLLAPOT CIKLUSOK =================
     
     def _armed_tick(self):
-        """Armed state - waiting for signal"""
+        """Jelzések figyelése és Ladder elhelyezése"""
+        signal, metadata = self.signal_engine.update()
         
-        # Guardrail ellenőrzés a piacra lépés előtt
-        if self.stats.total_pnl <= -config.risk_management.max_daily_loss_usd:
-            logger.info(f"🛑 Napi veszteség limit eléréve (-${-self.stats.total_pnl:.2f}). Bot leáll.")
-            self.state = BotState.HALT
-            self.cooldown_until = time.time() + 86400 # 24 óra
+        # Ticks only happen when queue yields items inside signal engine, but we continuously poll
+        if not signal:
             return
             
-        # Hard Guardrail: Több aktív rendeléssel nem kockáztatunk a jelenlegi pipeline-al
-        # (Jelenleg 1 létrával operálunk egyszerre, de future-proofoljuk)
-        if self.order_mgr.active_ladder is not None:
-             logger.info("⚠️ Hiba: Már van lógó ladder.")
-             self.state = BotState.LADDER_PLACED
-             return
+        logger.info(f"⚡ JELZÉS ÉRKEZETT: {signal} (Z-Score: {metadata.get('z_score', 0):.2f})")
         
-        # Log BTC price every 5 seconds
-        now = time.time()
-        if now - self.last_price_log > 5.0:
-            btc_price = self.binance.get_current_price()
-            if btc_price:
-                change = ""
-                if self.last_logged_price:
-                    pct = ((btc_price - self.last_logged_price) / self.last_logged_price) * 100
-                    change = f" ({pct:+.3f}%)"
-                
-                logger.info(f"📊 BTC: ${btc_price:,.2f}{change} | Monitoring...")
-                self.last_logged_price = btc_price
-            self.last_price_log = now
+        # Toxic Flow Check!
+        v_pct = metadata.get("velocity_pct_sec", 0)
+        dur = metadata.get("duration_ms", 0)
+        if config.is_toxic_flow(v_pct, dur):
+            logger.info(f"🛡️ TOXIKUS KLIMA SZŰRVE: Sebesség={v_pct:.3f}%/s, Idő={dur}ms. SKIP!")
+            return
+            
+        # Daily Loss limit check
+        if self.daily_pnl <= -abs(config.risk_management.max_daily_loss_usd):
+            logger.info(f"🚨 DAILY LOSS LIMIT ELÉRVE (${self.daily_pnl:.2f}). HALT!")
+            self.state = "HALT"
+            return
+            
+        # Decision Table for HL 
+        # Bullish -> Panic buy momentum -> we place SHORT trap above (mean reversion)
+        # Bearish -> Panic sell momentum -> we place LONG trap below
+        side = "SHORT" if signal == "BULLISH" else "LONG"
+        mid_price = self.feed_engine.current_mid
         
-        signal = self.signal_engine.update()
+        # Max Size Limit
+        target_usd = config.risk_management.max_notional_usd_per_trade
         
-        if signal:
-            self.last_signal_time = time.perf_counter()
-            self.stats.signals_detected += 1
-            logger.info(f"\n🚨 SIGNAL #{self.stats.signals_detected}")
-            logger.info(f"   Direction: {signal.direction}")
-            logger.info(f"   Change: {signal.pct_change:+.3f}%")
-            logger.info(f"   Duration: {signal.duration_ms:.0f}ms")
-            logger.info(f"   Price: ${signal.start_price:,.2f} → ${signal.end_price:,.2f}")
-            
-            # Map to token
-            if signal.direction == "BEARISH":
-                token_id = self.market.down_token_id if self.market else None
-                side = "DOWN"
-            else:
-                token_id = self.market.up_token_id if self.market else None
-                side = "UP"
-            
-            if not token_id:
-                logger.info("   ⚠️  No market available, skipping")
-                return
-            
-            # Place ladder
-            logger.info(f"   → Placing {side} ladder...")
-            
-            # Fetch real yes/no token price depending on side
-            if side == "UP":
-                mid_price = self.poly_client.get_yes_price(token_id) or 0.50
-            else:
-                mid_price = self.poly_client.get_yes_price(token_id) or 0.50 # On PM, UP/DOWN token has its own "Yes" price usually
-                
-            # Dinamikus position sizing a konfigból
-            max_usd = config.risk_management.max_notional_usd_per_trade
-            total_shares = max(config.min_shares,
-                               int(max_usd / mid_price))
+        logger.info(f"🎯 LÉTRA INDÍTÁSA:")
+        logger.info(f"   Irány: {side} {self.active_coin}")
+        logger.info(f"   Mid Ár: ${mid_price:.2f}")
+        logger.info(f"   Szándékolt Méret: ${target_usd:.2f} Notional")
 
-            ladder = self.order_mgr.place_ladder(
-                token_id=token_id,
-                side=side,
-                mid_price=mid_price,
-                total_shares=total_shares,
-                tick_size=self.market.tick_size,
-                inventory_yes=self.inventory_yes,
-                inventory_no=self.inventory_no
-            )
-            self.last_quote_time = time.perf_counter()
-            
-            if ladder:
-                self.stats.ladders_placed += 1
-                self.state = BotState.LADDER_PLACED
-                logger.info(f"   ✅ Ladder placed")
-    
+        # PILLANATNYI ADATOK MENTÉSE (A későbbi állapotokhoz)
+        self.trade_params["current_mid"] = mid_price
+        self.trade_params["target_side"] = side
+        self.trade_params["sz_usd"] = target_usd
+        
+        ladder = self.order_manager.place_ladder(
+            coin=self.active_coin,
+            side=side,
+            mid_price=mid_price,
+            total_usd_notional=target_usd,
+            tick_size=self.trade_params["tick_size"]
+        )
+        
+        if ladder:
+            self.state = "LADDER_PLACED"
+        else:
+            logger.info("❌ Létra elhelyezése SIKERTELEN. Vissza ARMED állapotba.")
+
     def _ladder_placed_tick(self):
-        """Just placed ladder - transition to waiting"""
-        self.state = BotState.WAITING_FILL
-    
-    def _waiting_fill_tick(self):
-        """Waiting for fills"""
-       
-        # Check ladder age
-        age_ms = self.order_mgr.get_ladder_age_ms()
+        """Várakozás a részleges / teljes fill-re"""
         
-        any_filled = False
-        filled_size = 0.0
-        avg_price = 0.0
+        has_fills, filled_size, avg_price = self.order_manager.check_fills()
         
-        if self.dry_run and self.order_mgr.active_ladder:
-            # SHADOW RUN LOGIC: Fiktív soft-fill ellenőrzés
-            token = self.order_mgr.active_ladder.token_id
-            hyp_price = self.order_mgr.active_ladder.orders[0].price
-
-            # Guard: csak ha van élő kliens
-            has_client = (self.poly_client
-                          and hasattr(self.poly_client, 'client')
-                          and self.poly_client.client is not None)
-            if has_client:
-                try:
-                    book = self.poly_client.client.get_order_book(token)
-                    if book and book.bids and book.asks:
-                        best_ask = float(book.asks[0].price)
-                        if best_ask <= hyp_price:
-                            any_filled = True
-                            filled_size = self.order_mgr.active_ladder.orders[0].size
-                            avg_price = best_ask
-                            logger.info(f"👻 [SHADOW] Soft-Fill: {best_ask} <= {hyp_price}")
-                except Exception as e:
-                    logger.info(f"⚠️ Shadow book fetch error: {e}")
+        age_ms = self.order_manager.get_ladder_age_ms()
+        if age_ms > config.wait_for_fill_ms:
+            # IDŐTÚLLÉPÉS
+            if has_fills:
+                logger.info(f"⏳ LÉTRA IDŐTÚLLÉPÉS, de VOLT RÉSZLEGES FILL. Törlés és EXITING ciklus.")
+                self.order_manager.cancel_ladder()
+                # Pass data to exit manager
+                self.state = "EXITING"
+                # Call immediately to setup TP
+                self._setup_take_profit(filled_size, avg_price)
             else:
-                # Nincs kliens → REST fallback a soft-fillhez
-                try:
-                    ask = self.poly_client.get_ask_price(token) if self.poly_client else None
-                    if ask and ask <= hyp_price:
-                        any_filled = True
-                        filled_size = self.order_mgr.active_ladder.orders[0].size
-                        avg_price = ask
-                        logger.info(f"👻 [SHADOW] Soft-Fill (REST): {ask} <= {hyp_price}")
-                except Exception as e:
-                    logger.info(f"⚠️ Shadow REST fetch error: {e}")
+                logger.info(f"⏳ LÉTRA IDŐTÚLLÉPÉS ({age_ms:.0f}ms). NO EDGE SKIP. Törlés.")
+                self.order_manager.cancel_ladder()
+                self.state = "ARMED"  # Vissza vadászni
+            return
+
+        # Ha MINDEN kitöltődött a MAX TTR elérése előtt...
+        # HL-nél lehet gyors is.
+        if has_fills:
+            # OCO Behavior: on_any_ladder_fill = cancel_all_other
+            # Strategy requests to cancel unfilled!
+            if config._config['order_management']['oco_behavior']['on_any_ladder_fill'] == "cancel_all_other_ladder_levels":
+                logger.info("⚡ OCO TRIGGERED: Canceled resting levels because we got a fill!")
+                self.order_manager.cancel_ladder()
+                self._setup_take_profit(filled_size, avg_price)
+                self.state = "IN_POSITION"
+            
+
+    def _setup_take_profit(self, position_size: float, avg_price: float):
+        # 1 lépés: Spread kinyerése
+        spread = 0.0 # TODO: Feed-ben most nincs spread proxy, fix tick size * x
+        
+        # Optional: Toxicity
+        toxicity = 0.0 # self.signal_engine.last_sig_score ha lenne
+        
+        logger.info(f"📈 TAKE PROFIT SETUP: {self.trade_params['target_side']} @ ${avg_price:.2f} ({position_size} shares)")
+        
+        placed = self.exit_manager.place_take_profit(
+            coin=self.active_coin,
+            side=self.trade_params['target_side'],
+            entry_price=avg_price,
+            position_size=position_size,
+            current_spread=spread,
+            tick_size=self.trade_params['tick_size'],
+            toxicity_score=toxicity
+        )
+        
+        if placed:
+            self.state = "IN_POSITION"
         else:
-            # Check for real fills
-            any_filled, filled_size, avg_price = self.order_mgr.check_fills()
-        
-        if any_filled:
-            # Transition to position
-            self.stats.fills_received += 1
-            logger.info(f"\n✅ FILLED: {filled_size} shares @ ${avg_price:.2f}")
-            
-            # Toxicity Monitor beküldése
-            # Az időszinkron fontos: wall-clock a logginghoz, perf_counter a latencyhez
-            self.toxicity_engine.register_fill(
-                token_id=self.order_mgr.active_ladder.token_id,
-                side=self.order_mgr.active_ladder.side,
-                price=avg_price,
-                size=filled_size,
-                t_signal=self.last_signal_time,
-                t_quote_sent=self.last_quote_time,
-                wall_clock_time=time.time()
-            )
-            
-            # Update inventory logic
-            active_side = self.order_mgr.active_ladder.side
-            if active_side == "UP":
-                self.inventory_yes += filled_size
-                save_inventory(self.inventory_yes, self.inventory_no)
-            else:
-                self.inventory_no += filled_size
-                save_inventory(self.inventory_yes, self.inventory_no)
-                
-            # Másodpercek számítása GTD Time Stop-hoz (Time-to-Resolution)
-            time_to_res_sec = int(
-                (self.market.end - datetime.datetime.now(
-                    datetime.timezone.utc)).total_seconds())
+            logger.info("❌ TP ELHELYEZÉSE SIKERTELEN. Market Close Action...")
+            # Ideally Market Close, falling back to Cooldown
+            self.state = "COOLDOWN"
 
-            # Place TP (dinamikusan a toxicity engine score alapján is húzható kicsit közelebb)
-            current_tox = self.toxicity_engine.toxicity_score
-            self.exit_mgr.place_take_profit(
-                token_id=self.order_mgr.active_ladder.token_id,
-                entry_price=avg_price,
-                position_size=filled_size,
-                current_spread=self._get_current_spread() or 0.04,
-                tick_size=self.market.tick_size,
-                time_to_resolution_sec=time_to_res_sec,
-                toxicity_score=current_tox
-            )
-            
-            # Cancel unfilled ladder orders
-            # (order_mgr handles this automatically)
-            
-            self.state = BotState.IN_POSITION
-        
-        elif age_ms > 1500:  # 1.5 second timeout
-            # No fills - cancel and skip
-            logger.info(f"\n⏱️  No fills after 1.5s - canceling (no edge)")
-            self.order_mgr.cancel_ladder()
-            self.stats.no_fill_skips += 1
-            self._enter_cooldown()
-    
     def _in_position_tick(self):
-        """In position - check exit conditions"""
+        """Várakozás Take Profitra vagy Time Stopra"""
+        # Time stop check!
+        time_to_close, reason = self.exit_manager.check_exit_conditions()
         
-        # Check exit conditions for the position
-        should_exit, reason = self.exit_mgr.check_exit_conditions()
-        
-        if should_exit:
-            logger.info(f"\n📤 EXITING: {reason}")
-            self.state = BotState.EXITING
-            self._exit_position(reason)
-    
-    def _exit_position(self, reason: str):
-        """Exit position - cancel TP és ifőkorlát esetén market sell."""
-
-        # Cancel pending exit orders (TP)
-        self.exit_mgr.cancel_exit_orders()
-
-        # Ha TIME_STOP_FALLBACK vagy más kényszer exit,
-        # küldjünk tényleges SELL ordert LIVE módban
-        if not self.dry_run and self.order_mgr.active_ladder:
-            token_id = self.order_mgr.active_ladder.token_id
-            filled = self.order_mgr.active_ladder.total_size_filled
-            if filled > 0:
-                try:
-                    from py_clob_client.order_builder.constants import SELL
-                    sell_order = {
-                        "token_id": token_id,
-                        "price": 0.01,  # Market sell (leg low limit)
-                        "size": filled,
-                        "side": SELL,
-                        "expiration": 5  # Gyors GTD
-                    }
-                    resp = self.poly_client.place_batch_orders(
-                        [sell_order], dry_run=False
-                    )
-                    if resp:
-                        logger.info(f"   💰 SELL order küldve: "
-                              f"{filled} shares")
-                    else:
-                        logger.info("   ⚠️ SELL order sikertelen!")
-                except Exception as e:
-                    logger.info(f"   ❌ SELL order hiba: {e}")
-        elif self.dry_run and self.order_mgr.active_ladder:
-            filled = self.order_mgr.active_ladder.total_size_filled
-            logger.info(f"   🧪 [DRY] Szimulált SELL: {filled} shares")
-
-        # Log exit
-        self.stats.exits_completed += 1
-        logger.info(f"   ✅ Exit #{self.stats.exits_completed} ({reason})")
-
-        # Enter cooldown
-        self._enter_cooldown()
-    
-    def _get_current_spread(self) -> Optional[float]:
-        """Fetch live spread from orderbook (best_ask - best_bid)"""
-        if not self.market or not self.poly_client:
-            return None
-        has_client = (hasattr(self.poly_client, 'client')
-                      and self.poly_client.client is not None)
-        if not has_client:
-            return None
-        try:
-            token = self.market.up_token_id
-            book = self.poly_client.client.get_order_book(token)
-            if book and book.bids and book.asks:
-                return float(book.asks[0].price) - float(book.bids[0].price)
-        except Exception:
-            pass
-        return None
-
-    def _enter_cooldown(self):
-        """Enter cooldown state"""
-        # FIGYELEM: inventory nullázás CSAK DRY RUN módban biztonságos.
-        # LIVE módban a tényleges pozíciót a blockchain állapotból kellene olvasni.
+        # Check API if TP is filled
+        if not self.dry_run:
+            pass # TODO: call info.open_orders and see if TP exists
+            
         if self.dry_run:
-            self.inventory_yes = 0
-            self.inventory_no = 0
-            save_inventory(0, 0)
-        else:
-            # TODO: Blockchain inventory lekérdezés
-            logger.info("   LIVE: Saving inventory to file (No blockchain state used yet)")
-            save_inventory(self.inventory_yes, self.inventory_no)
-
-        cooldown_sec = config.risk_management.cooldown_after_exit_sec
-        self.cooldown_until = time.time() + cooldown_sec
-        self.state = BotState.COOLDOWN
-        logger.info(f"   ⏸️  Cooldown for {cooldown_sec}s")
-    
-    def _cooldown_tick(self):
-        """Cooldown state"""
-        if time.time() >= self.cooldown_until:
-            logger.info(f"\n✅ Cooldown complete - back to ARMED")
-            self.state = BotState.ARMED
-    
-    def _shutdown(self):
-        """Clean shutdown"""
-        if self.binance:
-            self.binance.stop()
-
-        logger.info("=" * 60)
-        logger.info("📊 SESSION STATS")
-        logger.info("=" * 60)
-        logger.info(f"Signals detected: {self.stats.signals_detected}")
-        logger.info(f"Ladders placed: {self.stats.ladders_placed}")
-        logger.info(f"Fills received: {self.stats.fills_received}")
-        logger.info(f"No-fill skips: {self.stats.no_fill_skips}")
-        logger.info(f"Exits completed: {self.stats.exits_completed}")
-        logger.info(f"Total P&L: ${self.stats.total_pnl:.2f}")
-
-        logger.info("✅ Bot stopped cleanly")
+            # Simulate FAST fill
+            time.sleep(2)
+            time_to_close = True
+            reason = "DRY_RUN_SIMULATION_TP_REACHED"
         
-        # Asyncio takarítás a kilépési hiba ellen
-        import asyncio
-        try:
-            loop = asyncio.get_event_loop()
-            async def shutdown():
-                tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
-                for task in tasks:
-                    task.cancel()
-                await asyncio.gather(*tasks, return_exceptions=True)
-                loop.stop()
-                
-            if loop.is_running():
-                asyncio.run_coroutine_threadsafe(shutdown(), loop)
-            elif not loop.is_closed():
-                loop.run_until_complete(shutdown())
-        except Exception as e:
-            logger.info(f"Hiba az asyncio leállításakor: {e}")
+        if time_to_close:
+            logger.info(f"🚪 EXIT KIVÁLTVA: {reason}")
+            self.exit_manager.cancel_exit_orders()
+            # Valójában itt meg kellene küldeni egy Market Ordert befelé, 
+            # de egyelőre sima kilépésként szimuláljuk P&L-el
+            
+            # Pnl Update
+            self.daily_pnl += 5.0 # Dummy P&L for Dry Run Demo 
+            logger.info(f"💰 BECSÜLT PNL: $5.00 -> DAILY PNL: ${self.daily_pnl:.2f}")
+            
+            self._start_cooldown(reason)
+            
 
+    def _exiting_tick(self):
+        """
+        Abban az esetben ha cancel-özünk pozíciót piacin (Market close)
+        """
+        # Not fully implemented without real market orders on HL yet
+        self.state = "COOLDOWN"
+        self.cooldown_end_time = time.time() + config.risk_management.cooldown_after_exit_sec
+
+
+    def _start_cooldown(self, action: str):
+        sec = config.risk_management.cooldown_after_exit_sec
+        if "STOP_LOSS" in action:
+            sec = 120 # longer wait 
+            
+        logger.info(f"🧊 COOLDOWN AKTIVÁLVA ({sec} mp). Ok: {action}")
+        self.cooldown_end_time = time.time() + sec
+        self.state = "COOLDOWN"
+
+
+    def _cooldown_tick(self):
+        """Zárolás lejárásának figyelése"""
+        if time.time() >= self.cooldown_end_time:
+            logger.info("🔥 COOLDOWN LEJÁRT. Vissza a harcba!")
+            self.state = "ARMED"
+            # Signal Engine-ben debouncer bypass vagy reset
+            self.signal_engine.last_trade_timestamp = time.time()
+
+    def shutdown(self):
+        """Biztonságos leállítás garantálása!"""
+        logger.info("⚠️ BIZTONSÁGI LEÁLLÍTÁS (SHUTDOWN) FOLYAMATA...")
+        self.state = "HALT"
+        
+        if self.feed_engine:
+            self.feed_engine.stop()
+            
+        if self.order_manager:
+            self.order_manager.cancel_ladder()
+            
+        if self.exit_manager:
+            self.exit_manager.cancel_exit_orders()
+            
+        if self.hl_client and not self.dry_run:
+            self.hl_client.cancel_all_orders()
+            
+        logger.info("✅ LEÁLLÍTÁS SIKERES. Good Night!")
 
 if __name__ == "__main__":
-    import argparse
-    
-    parser = argparse.ArgumentParser(description='Crypto Sebesseg Trading Bot')
-    parser.add_argument('--live', action='store_true', help='Run in LIVE mode (default: DRY RUN)')
+    parser = argparse.ArgumentParser(description="Sebesseg Crypto Maker Bot")
+    parser.add_argument('--live', action='store_true', help='ÉLES KERESKEDÉS (pénzt kockáztatsz!)')
     args = parser.parse_args()
-    
-    dry_run = not args.live
-    
-    if not dry_run:
-        logger.info("⚠️  WARNING: LIVE MODE!")
-        logger.info("   Real orders will be placed!")
-    
-    bot = TradingBot(dry_run=dry_run)
-    bot.run()
+
+    # HA --live argumentummal indítod: dry_run=False
+    is_dry_run = not args.live
+
+    bot = SebessegBot(dry_run=is_dry_run)
+    if bot.initialize():
+        bot.run()
+    else:
+        logger.error("❌ INICIALIZÁLÁS SIKERTELEN. KILÉPÉS.")

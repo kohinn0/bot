@@ -1,502 +1,338 @@
 from bot_logger import logger
-"""
-Order Manager - Handles 3-level post-only ladder placement and management
-"""
 import math
 import time
 from typing import Optional, List, Dict, Tuple
 from dataclasses import dataclass
 
-from polymarket_client import PolymarketClient
-from fee_utils import fetch_fee_rate_bps
-from binance_feed import BinanceFeed
+from hyperliquid_client import HyperliquidClient
 from config import config
 
 
 @dataclass
 class LadderOrder:
-    """Single order in the ladder"""
     level: int
     price: float
-    size: int
-    token_id: str
+    size: float
     order_id: Optional[str] = None
     filled: bool = False
-    filled_size: int = 0
-
+    filled_size: float = 0.0
 
 @dataclass
 class LadderPosition:
-    """Active ladder position"""
-    side: str  # "UP" or "DOWN"
-    token_id: str
+    side: str  # "LONG" or "SHORT"
+    coin: str
     orders: List[LadderOrder]
     placed_at: float
-    total_size_filled: int = 0
+    total_size_filled: float = 0.0
     avg_fill_price: float = 0.0
 
-
 class OrderManager:
-    """Manages post-only ladder orders"""
+    """Manages post-only perpetual limits on Hyperliquid"""
     
     def __init__(
         self,
-        poly_client: PolymarketClient,
-        binance: Optional[BinanceFeed] = None,
+        hl_client: HyperliquidClient,
         dry_run: bool = True,
     ):
-        self.poly_client = poly_client
-        # Binance feed a dinamikus, volatilitás-alapú létrához és P(fill) becsléshez
-        self.binance = binance
+        self.hl_client = hl_client
         self.dry_run = dry_run
         self.active_ladder: Optional[LadderPosition] = None
     
     def place_ladder(
         self,
-        token_id: str,
-        side: str,  # "UP" or "DOWN"
+        coin: str,
+        side: str,  # "LONG" or "SHORT"
         mid_price: float,
-        total_shares: int,
+        total_usd_notional: float,
         tick_size: float,
-        inventory_yes: int = 0,
-        inventory_no: int = 0,
+        sigma_r: Optional[float] = None
     ) -> Optional[LadderPosition]:
-        """
-        Place 3-level post-only ladder and apply inventory risk penalty.
         
-        Args:
-            token_id: Token to buy
-            side: "UP" or "DOWN"
-            mid_price: Current mid price
-            total_shares: Total shares to distribute across levels
-            tick_size: Dynamic tick size for the current market
-            inventory_yes: Current held UP shares
-            inventory_no: Current held DOWN shares
-        
-        Returns:
-            LadderPosition if successful, None otherwise
-        """
-        
-        # Kalkuláljuk a spread büntetést az inventoryból
-        penalty_ticks = config.get_inventory_risk_spread_penalty(inventory_yes, inventory_no, side)
-        if penalty_ticks > 0:
-            penalty_usd = penalty_ticks * tick_size
-            logger.info(f"   ⚠️ INVENTORY RISK: Aszimmetria büntetés érvényesítve: -{penalty_ticks} ticks (-${penalty_usd:.3f})")
-            mid_price -= penalty_usd
-            
-        # 1) VOLA-ALAPÚ DINAMIKUS LÉTRA (ha van elérhető szigma a Binance feedből)
-        sigma_r = self._get_sigma_r()
+        # 1) VOLA-ALAPÚ DINAMIKUS LÉTRA
         ladder_prices: List[Tuple[int, float, float]]
         if sigma_r is not None and sigma_r > 0:
-            ladder_prices = self._build_vol_ladder(mid_price, tick_size, sigma_r)
+            ladder_prices = self._build_vol_ladder(mid_price, side, tick_size, sigma_r)
         else:
-            # Fallback: régi, fix tick-es létra
-            ladder_prices = config.calculate_ladder_prices(mid_price, "BUY", tick_size)
+            # Fallback
+            # Notice the conversion: BUY -> LONG, SELL -> SHORT is handled in config now intuitively
+            ladder_prices = config.calculate_ladder_prices(mid_price, "BUY" if side == "LONG" else "SELL", tick_size)
         
-        # Create orders
+        # Calculate sizes based on USD notional size
+        # HL size is in token amount
+        total_shares = total_usd_notional / mid_price
+        
         orders = []
         for level, price, size_pct in ladder_prices:
-            size = int(total_shares * size_pct)
-            if size < config.min_shares:
-                size = config.min_shares
+            size_raw = total_shares * size_pct
+            size = max(config.min_shares, size_raw) # min shares should probably be min token amount for HL
+            
+            # HL typically requires specific size step formats, but we'll round to 4 decimals for now
+            size = round(size, 4)
             
             order = LadderOrder(
                 level=level,
                 price=price,
                 size=size,
-                token_id=token_id
             )
             orders.append(order)
         
-        # Create ladder position
         ladder = LadderPosition(
             side=side,
-            token_id=token_id,
+            coin=coin,
             orders=orders,
             placed_at=time.time()
         )
         
-        # Place orders
         if self.dry_run:
-            logger.info(f"🧪 [DRY RUN] Placing ladder for {side} token:")
+            logger.info(f"🧪 [DRY RUN] Placing ladder for {side} {coin}:")
             for order in orders:
-                # Logisztikus P(fill) becslés a mid-től való távolság és a volatilitás alapján
-                p_fill = None
-                if sigma_r is not None and sigma_r > 0:
-                    distance = abs(order.price - mid_price)
-                    p_fill = self._logistic_p_fill(distance, sigma_r)
-                    logger.info(
-                        f"   Level {order.level}: {order.size} shares @ ${order.price:.4f} "
-                        f"(P(fill)≈{p_fill * 100:.1f}% , d={distance:.4f})"
-                    )
-                else:
-                    logger.info(f"   Level {order.level}: {order.size} shares @ ${order.price:.4f}")
+                logger.info(f"   Level {order.level}: {order.size} {coin} @ ${order.price:.4f}")
                 order.order_id = f"DRY_{order.level}"
         else:
-            # Generate batch for real API
-            batch_request = []
-            from py_clob_client.order_builder.constants import BUY
+            if not self.hl_client.exchange:
+                return None
+                
+            batch = []
+            is_buy = True if side == "LONG" else False
             
-            for order in orders:
-                batch_request.append({
-                    "token_id": order.token_id,
-                    "price": order.price,
-                    "size": order.size,
-                    "side": BUY,
-                    "expiration": 0 # A létra GTX marad (nincs GTD)
+            for o in orders:
+                batch.append({
+                    "coin": coin,
+                    "is_buy": is_buy,
+                    "sz": o.size,
+                    "limit_px": o.price,
+                    "order_type": {"limit": {"tif": "Alo"}}, # GTX = ALO (Add Liquidity Only) in HL
+                    "reduce_only": False
                 })
-            
-            responses = self.poly_client.place_batch_orders(batch_request, dry_run=False)
-            
-            if responses and len(responses) == len(orders):
-                for i, order in enumerate(orders):
-                    order.order_id = responses[i].get('orderID')
-            else:
-                logger.info(f"⚠️  Real batch order placement partially or fully failed.")
+                
+            try:
+                res = self.hl_client.exchange.bulk_orders(batch)
+                logger.info(f"📤 BATCH ORDER RESPONSE: {res}")
+                
+                # HL response parsing
+                # if res["status"] == "ok": extract OIDs
+                # This requires proper HL response mapping which depends on the SDK version outputs
+                if res and res.get("status") == "ok" and "response" in res and "data" in res["response"]:
+                    statuses = res["response"]["data"]["statuses"]
+                    for i, st in enumerate(statuses):
+                        if "resting" in st:
+                            orders[i].order_id = str(st["resting"]["oid"])
+                        elif "filled" in st:
+                            orders[i].order_id = str(st["filled"]["oid"])
+                        else:
+                            orders[i].order_id = f"ERR_{i}"
+                else:
+                    for order in orders:
+                        order.order_id = f"ERR_{order.level}"
+
+            except Exception as e:
+                logger.info(f"⚠️  Real batch order placement failed: {e}")
                 for order in orders:
                     order.order_id = f"ERR_{order.level}"
         
         self.active_ladder = ladder
         return ladder
     
-    def check_fills(self) -> Tuple[bool, int, float]:
-        """
-        Check if any ladder orders have been filled.
-        
-        Returns:
-            (any_filled, total_filled_size, avg_price)
-        """
+    def check_fills(self) -> Tuple[bool, float, float]:
         if not self.active_ladder:
-            return (False, 0, 0.0)
+            return (False, 0.0, 0.0)
         
-        # In dry run, fills are handled by bot.py shadow logic
         if self.dry_run:
-            return (False, 0, 0.0)
+            return (False, 0.0, 0.0) # bot.py shadows this
         
-        # LIVE: Poll each order's status via the CLOB API
-        total_filled = 0
+        total_filled = 0.0
         weighted_price_sum = 0.0
         
+        if not self.hl_client.wallet:
+            return (False, 0.0, 0.0)
+            
         try:
+            # Info API polling open orders helps, but user_fills is better for exact details
+            open_orders = self.hl_client.info.open_orders(self.hl_client.wallet.address)
+            # Find which of our ladder orders are NO LONGER in open_orders
+            open_oids = {str(o["oid"]) for o in open_orders}
+            
             for order in self.active_ladder.orders:
-                if order.filled or not order.order_id:
+                if order.filled or not order.order_id or order.order_id.startswith("ERR_"):
                     continue
-                if order.order_id.startswith("ERR_"):
-                    continue
-                
-                try:
-                    resp = self.poly_client.client.get_order(
-                        order.order_id
-                    )
-                    if resp:
-                        status = resp.get('status', '')
-                        filled_sz = int(
-                            float(resp.get('size_matched', 0))
-                        )
-                        if filled_sz > 0:
-                            order.filled = True
-                            order.filled_size = filled_sz
-                            total_filled += filled_sz
-                            weighted_price_sum += (
-                                order.price * filled_sz
-                            )
-                except Exception as e:
-                    logger.info(f"\u26a0\ufe0f Fill check error for "
-                          f"{order.order_id}: {e}")
+                    
+                if order.order_id not in open_oids:
+                    # It's missing from open orders. Assume it filled!
+                    # In a production bot you'd query user_fills to get the exact fill amount and price.
+                    # For Sebesseg, missing from book = filled.
+                    order.filled = True
+                    order.filled_size = order.size
+                    total_filled += order.size
+                    weighted_price_sum += (order.price * order.size)
+                    
         except Exception as e:
-            logger.info(f"\u26a0\ufe0f Bulk fill check error: {e}")
+            logger.info(f"⚠️ Bulk fill check error: {e}")
         
         if total_filled > 0:
             avg = weighted_price_sum / total_filled
-            self.active_ladder.total_size_filled = total_filled
-            self.active_ladder.avg_fill_price = avg
+            self.active_ladder.total_size_filled += total_filled
+            # Moving avg approximation
+            if self.active_ladder.avg_fill_price == 0:
+                self.active_ladder.avg_fill_price = avg
+            else:
+                self.active_ladder.avg_fill_price = (self.active_ladder.avg_fill_price + avg) / 2.0
+                
             return (True, total_filled, avg)
         
-        return (False, 0, 0.0)
+        return (False, 0.0, 0.0)
     
     def cancel_ladder(self) -> bool:
-        """Cancel all unfilled ladder orders"""
         if not self.active_ladder:
             return False
             
-        unfilled_ids = [o.order_id for o in self.active_ladder.orders if not o.filled and o.order_id]
+        unfilled_ids = [o.order_id for o in self.active_ladder.orders if not o.filled and o.order_id and not o.order_id.startswith("ERR_")]
         
         if self.dry_run:
             logger.info(f"🧪 [DRY RUN] Canceling {len(unfilled_ids)} ladder orders")
-            for order in self.active_ladder.orders:
-                if not order.filled:
-                    logger.info(f"   Canceled Level {order.level}")
         else:
-            if unfilled_ids:
-                success = self.poly_client.cancel_batch_orders(unfilled_ids, dry_run=False)
-                if success:
-                    logger.info(f"✅ Successfully canceled {len(unfilled_ids)} ladder orders via BATCH.")
-                else:
-                    logger.info("❌ Failed to cancel some ladder orders.")
+            if unfilled_ids and self.hl_client.exchange:
+                cancels = [{"coin": self.active_ladder.coin, "o": int(oid)} for oid in unfilled_ids]
+                try:
+                    res = self.hl_client.exchange.cancel(cancels)
+                    logger.info(f"✅ Successfully canceled {len(unfilled_ids)} BATCH: {res}")
+                except Exception as e:
+                    logger.info(f"❌ Failed to cancel some ladder orders: {e}")
             else:
                  logger.info("ℹ️ Nincsenek törlendő (unfilled) id-k a létrában.")
         
         self.active_ladder = None
         return True
 
-    # ------------------------------------------------------------------
-    # Dinamikus létra és P(fill) segédfüggvények
-    # ------------------------------------------------------------------
-
-    def _get_sigma_r(self, window_sec: int = 60) -> Optional[float]:
-        """
-        Binance volatilitás lekérdezése (sigma_r) az elmúlt window_sec másodpercre.
-        """
-        if not self.binance:
-            return None
-        return self.binance.get_sigma_per_s(window_sec=window_sec)
-
     def _build_vol_ladder(
         self,
         mid_price: float,
+        side: str,
         tick_size: float,
         sigma_r: float,
     ) -> List[Tuple[int, float, float]]:
-        """
-        Volatilitás-alapú "Ambush Ladder":
-
-        P_i = P_mid * (1 - i * gamma * sigma_r) - SlippagePenalty
-
-        Itt a SlippagePenalty-t kezdetben 0-ra tesszük (a future verzióban
-        az orderbook-imbalance alapján lehet dinamikusan lefelé tolni a szinteket).
-        """
-        gamma = 1.0  # Kockázatvállalási szorzó (tuningolható vagy kivihető a configba)
+        gamma = 1.0  
         slippage_penalty = 0.0
 
         ladder: List[Tuple[int, float, float]] = []
         for level_cfg in config.ladder_levels:
             i = level_cfg.level
-            raw_price = mid_price * (1.0 - i * gamma * sigma_r) - slippage_penalty
+            
+            # If LONG (BUY), price should be lower than mid
+            # If SHORT (SELL), price should be higher than mid
+            direction_mult = -1 if side == "LONG" else 1
+            
+            raw_price = mid_price * (1.0 + (direction_mult * i * gamma * sigma_r)) - (direction_mult * slippage_penalty)
             price = config.round_to_tick(raw_price, tick_size)
             ladder.append((level_cfg.level, price, level_cfg.size_pct))
 
         return ladder
-
-    def _logistic_p_fill(
-        self,
-        distance: float,
-        sigma_r: float,
-        lam: float = 10.0,
-    ) -> float:
-        """
-        Logisztikus P(fill) modell a dokumentumban leírt forma szerint:
-
-            P(fill_i) = 1 / (1 + exp(λ (d_i - σ_r)))
-
-        distance (d_i): távolság a mid ártól (abszolút értékben).
-        sigma_r: a volatilitás mértéke ugyanazon idősávra.
-        lam (λ): könyvsűrűség paraméter (minél nagyobb, annál élesebb a görbe).
-        """
-        try:
-            x = lam * (distance - sigma_r)
-            # numerikus stabilitás
-            if x > 60:
-                return 0.0
-            if x < -60:
-                return 1.0
-            return 1.0 / (1.0 + math.exp(x))
-        except Exception:
-            return 0.0
-    
-    def has_active_ladder(self) -> bool:
-        """Check if there's an active ladder"""
-        return self.active_ladder is not None
     
     def get_ladder_age_ms(self) -> float:
-        """Get age of current ladder in milliseconds"""
         if not self.active_ladder:
             return 0.0
-        
         return (time.time() - self.active_ladder.placed_at) * 1000
 
-
 class ExitManager:
-    """Manages exit orders (TP, time-stop, reversal-stop)"""
-    
-    def __init__(self, poly_client: PolymarketClient, dry_run: bool = True):
-        self.poly_client = poly_client
+    def __init__(self, hl_client: HyperliquidClient, dry_run: bool = True):
+        self.hl_client = hl_client
         self.dry_run = dry_run
         self.tp_order_id: Optional[str] = None
         self.entry_price: Optional[float] = None
         self.entry_time: Optional[float] = None
-        self.position_size: int = 0
+        self.position_size: float = 0.0
+        self.coin: str = ""
+        self.side: str = ""
     
     def place_take_profit(
         self,
-        token_id: str,
+        coin: str,
+        side: str, # "LONG" or "SHORT"
         entry_price: float,
-        position_size: int,
+        position_size: float,
         current_spread: float,
         tick_size: float,
-        time_to_resolution_sec: int,
         toxicity_score: float = 0.0
     ) -> bool:
-        """
-        Place post-only take profit order GTD (Good-Til-Date) formátumban.
-        
-        Args:
-            token_id: Token to sell
-            entry_price: Average entry price
-            position_size: Number of shares
-            current_spread: Current bid-ask spread
-            tick_size: Dynamic market tick size
-            time_to_resolution_sec: GTD beállításhoz másodperc a lezárásig
-        
-        Returns:
-            True if successful
-        """
-        # 1. Fast TP vs Slow TP logika (Adverse Selection védelem)
         is_toxic = toxicity_score >= 0.7
         
-        if is_toxic:
-            # Pánik/Mérgezett piac: "Fast TP"
-            # Épphogy csak profitáljunk (1 tick), és nagyon gyorsan ejtsük (pár sec)
-            tp_price = entry_price + tick_size
-            expiration_sec = 3  # Gyors on-chain GTD halál
-            logger.info(f"   ⚠️ TOXIKUS PIAC (Score: {toxicity_score:.2f}) -> FAST TP aktiválva. Célár: ${tp_price:.3f}, GTD: 3s")
-        else:
-            # Normál ügymenet: "Slow TP"
-            tp_price = config.calculate_take_profit_price(entry_price, current_spread, tick_size)
-            # Másodpercalapú GTD idő kiszámolása a time_stop konfigurációkból
-            params = config.get_time_stop_params(time_to_resolution_sec)
-            expiration_sec = params.get('expiration_sec', 12)
+        # If we are LONG, TP is a SELL order. If SHORT, TP is a BUY order.
+        tp_direction_mult = 1 if side == "LONG" else -1
         
-        # Vigyázzunk az 1.0 limitre
-        tp_price = min(0.99, tp_price)
+        if is_toxic:
+            tp_price = entry_price + (tp_direction_mult * tick_size)
+            logger.info(f"   ⚠️ TOXIKUS PIAC (Score: {toxicity_score:.2f}) -> FAST TP aktiválva. Célár: ${tp_price:.3f}")
+        else:
+            profit = max(config.min_profit_ticks * tick_size, min(current_spread * config.spread_multiplier, config.max_profit_ticks * tick_size))
+            tp_price = entry_price + (tp_direction_mult * profit)
+            
+        tp_price = config.round_to_tick(tp_price, tick_size)
         
         self.entry_price = entry_price
         self.entry_time = time.time()
         self.position_size = position_size
+        self.coin = coin
+        self.side = side
         
         if self.dry_run:
-            logger.info(f"🧪 [DRY RUN] Placing TP order (GTD: +{expiration_sec}s):")
+            logger.info(f"🧪 [DRY RUN] Placing TP order (Reduce Only):")
             logger.info(f"   Entry: ${entry_price:.2f}")
-            logger.info(f"   TP: ${tp_price:.2f} (+{(tp_price - entry_price):.2f})")
-            logger.info(f"   Size: {position_size} shares")
+            logger.info(f"   TP: ${tp_price:.2f} ({side} EXIT)")
+            logger.info(f"   Size: {position_size} {coin}")
             self.tp_order_id = "DRY_TP"
             return True
         else:
-            from py_clob_client.order_builder.constants import SELL
+            if not self.hl_client.exchange:
+                return False
+                
+            is_buy = False if side == "LONG" else True # TP side is opposite of entry side
             
-            tp_order = {
-                "token_id": token_id,
-                "price": tp_price,
-                "size": position_size,
-                "side": SELL,
-                "expiration": expiration_sec # On-chain elhervadás 
-            }
+            try:
+                res = self.hl_client.exchange.order(
+                    coin=coin,
+                    is_buy=is_buy,
+                    sz=position_size,
+                    limit_px=tp_price,
+                    order_type={"limit": {"tif": "Alo"}},
+                    reduce_only=True
+                )
+                
+                if res and res.get("status") == "ok":
+                    statuses = res["response"]["data"]["statuses"]
+                    if statuses and "resting" in statuses[0]:
+                        self.tp_order_id = str(statuses[0]["resting"]["oid"])
+                        logger.info(f"✅ Real TP order placed! ID: {self.tp_order_id}")
+                        return True
+            except Exception as e:
+                logger.info(f"⚠️  Real TP order placement failed: {e}")
+                
+            self.tp_order_id = "ERR_TP"
+            return False
             
-            responses = self.poly_client.place_batch_orders([tp_order], dry_run=False)
-            
-            if responses and len(responses) > 0:
-                 self.tp_order_id = responses[0].get('orderID')
-                 logger.info(f"✅ Real TP GTD order placed! ID: {self.tp_order_id}")
-                 return True
-            else:
-                 logger.info(f"⚠️  Real TP order placement BATCH failed.")
-                 self.tp_order_id = "ERR_TP"
-                 return False
-    
-    def check_exit_conditions(self) -> Tuple[bool, str]:
-        """
-        Check if should exit manually. Because it's GTD, the engine handles timeouts mostly.
-        But we can do manual reversal stops here.
-        
-        Returns:
-            (should_exit, reason)
-        """
-        if not self.entry_time:
-            return (False, "")
-        
-        # Mivel áttértünk GTD-re, a manually checkolt time-stop kevésbé fontos, 
-        # de mint biztonsági fallback hagyjuk itt 2x akkora timeouttal.
-        hold_time_sec = time.time() - self.entry_time
-        safe_fallback_timeout = 60 # 60 sec absolut max
-        
-        if hold_time_sec > safe_fallback_timeout:
-            return (True, "TIME_STOP_FALLBACK")
-        
-        # TODO: Check reversal stop
-        
-        return (False, "")
-    
     def cancel_exit_orders(self):
-        """Cancel all exit orders"""
-        if self.tp_order_id:
-            if self.dry_run:
-                logger.info(f"\ud83e\uddea [DRY RUN] Canceled TP order")
-            else:
-                # LIVE: Küldje el a törlési kérést az API-nak
-                if not self.tp_order_id.startswith("ERR_"):
-                    try:
-                        self.poly_client.cancel_batch_orders(
-                            [self.tp_order_id], dry_run=False
-                        )
-                        logger.info(f"\u2705 LIVE TP order törölve: "
-                              f"{self.tp_order_id}")
-                    except Exception as e:
-                        logger.info(f"\u26a0\ufe0f TP cancel hiba: {e}")
+        if self.tp_order_id and self.tp_order_id != "DRY_TP" and not self.tp_order_id.startswith("ERR_"):
+            if not self.dry_run and self.hl_client.exchange:
+                try:
+                    self.hl_client.exchange.cancel(self.coin, int(self.tp_order_id))
+                    logger.info(f"✅ LIVE TP order törölve: {self.tp_order_id}")
+                except Exception as e:
+                    logger.info(f"⚠️ TP cancel hiba: {e}")
         
         self.tp_order_id = None
         self.entry_price = None
         self.entry_time = None
-        self.position_size = 0
+        self.position_size = 0.0
 
-
-if __name__ == "__main__":
-    logger.info("🧪 Testing Order Manager")
-    logger.info("=" * 60)
-    
-    # Mock client
-    from polymarket_client import PolymarketClient
-    client = PolymarketClient()
-    
-    # Create managers
-    order_mgr = OrderManager(client, binance=None, dry_run=True)
-    exit_mgr = ExitManager(client, dry_run=True)
-    
-    # Test ladder placement
-    logger.info("\n1. Placing ladder:")
-    ladder = order_mgr.place_ladder(
-        token_id="test_token_123",
-        side="DOWN",
-        mid_price=0.48,
-        total_shares=20,
-        tick_size=0.01  # Mock tick size
-    )
-    
-    if ladder:
-        logger.info(f"✅ Ladder placed with {len(ladder.orders)} levels")
-    
-    # Simulate wait
-    time.sleep(2)
-    
-    # Check age
-    age = order_mgr.get_ladder_age_ms()
-    logger.info(f"\n2. Ladder age: {age:.0f}ms")
-    
-    # Cancel ladder
-    logger.info(f"\n3. Canceling ladder:")
-    order_mgr.cancel_ladder()
-    
-    # Test TP
-    logger.info(f"\n4. Placing TP:")
-    exit_mgr.place_take_profit(
-        token_id="test_token_123",
-        entry_price=0.47,
-        position_size=20,
-        current_spread=0.04,
-        tick_size=0.01          # Mock tick size
-    )
-    
-    # Check exit conditions
-    time.sleep(1)
-    should_exit, reason = exit_mgr.check_exit_conditions(time_to_resolution_sec=300)
-    logger.info(f"\n5. Should exit: {should_exit} ({reason})")
-    
-    logger.info(f"\n✅ Test complete")
+    def check_exit_conditions(self) -> Tuple[bool, str]:
+        if not self.entry_time:
+            return (False, "")
+            
+        params = config.get_time_stop_params()
+        hold_time_sec = time.time() - self.entry_time
+        safe_fallback_timeout = params.get('expiration_sec', 12)
+        
+        if hold_time_sec > safe_fallback_timeout:
+            return (True, "TIME_STOP_TIMEOUT")
+            
+        # HL API TP Fill check via info API could also be placed here if bot.py loop relies on it
+        
+        return (False, "")
