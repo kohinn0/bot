@@ -326,6 +326,52 @@ class ExitManager:
                     logger.info(f"⚠️ TP cancel hiba: {e}")
         
         self.tp_order_id = None
+        
+    def close_position_at_market(self):
+        if self.dry_run:
+            logger.info("🧪 [DRY RUN] Zárás piaci áron/simulált P&L elérése...")
+            self.cancel_exit_orders()
+            self._reset_state()
+            return
+
+        self.cancel_exit_orders()
+        
+        # Determine actual size from API to handle partial fills
+        actual_size = 0.0
+        if self.hl_client.wallet and self.hl_client.info:
+            try:
+                state = self.hl_client.info.user_state(self.hl_client.wallet.address)
+                positions = state.get("assetPositions", [])
+                for pos in positions:
+                    if pos["position"]["coin"] == self.coin:
+                        actual_size = float(pos["position"]["szi"])
+                        break
+            except Exception as e:
+                logger.info(f"⚠️ Nem sikerült a pozíció méretét lekérdezni: {e}")
+                
+        if abs(actual_size) > 0:
+            is_buy = actual_size < 0  # if short, we buy to close
+            sz = abs(actual_size)
+            logger.info(f"🔥 MARKET CLOSE INDÍTÁSA - {self.coin} | Irány: {'BUY' if is_buy else 'SELL'} | Méret: {sz}")
+            
+            if self.hl_client.exchange:
+                try:
+                    res = self.hl_client.exchange.market_open(
+                        coin=self.coin,
+                        is_buy=is_buy,
+                        sz=sz,
+                        px=None, # Market open API allows sending None/0 for limit px but relies on slippage internally or uses `order` with generic market.
+                        slippage=0.05
+                    )
+                    logger.info(f"✅ Market Close sikeres: {res}")
+                except Exception as e:
+                    logger.error(f"❌ Market Close hiba: {e}")
+        else:
+             logger.info("ℹ️ Nincs nyitott pozíció a hálózaton. Nincs mit zárni.")
+             
+        self._reset_state()
+        
+    def _reset_state(self):
         self.entry_price = None
         self.entry_time = None
         self.position_size = 0.0
@@ -342,5 +388,14 @@ class ExitManager:
             return (True, "TIME_STOP_TIMEOUT")
             
         # HL API TP Fill check via info API could also be placed here if bot.py loop relies on it
+        if not self.dry_run and self.tp_order_id and not self.tp_order_id.startswith("ERR_"):
+            try:
+                open_orders = self.hl_client.info.open_orders(self.hl_client.wallet.address)
+                open_oids = {str(o["oid"]) for o in open_orders}
+                if self.tp_order_id not in open_oids:
+                    # Missing from open orders -> filled
+                    return (True, "TAKE_PROFIT_REACHED")
+            except Exception as e:
+                logger.info(f"⚠️ Open orders ellenőrzése sikertelen az Exit checks-nél: {e}")
         
         return (False, "")

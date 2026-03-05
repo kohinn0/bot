@@ -188,6 +188,13 @@ class HyperliquidFeed:
             pass
         return None
     
+    def is_feed_stale(self, max_staleness_sec: float = 3.0) -> bool:
+        """Ellenőrzi, hogy a WebSocket adatok frissek-e."""
+        if not self._last_update:
+            return True
+        return (time.time() - self._last_update) > max_staleness_sec
+    
+    
     def get_last_tick(self) -> Optional[TickEvent]:
         return self._last_tick
     

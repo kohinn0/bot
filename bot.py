@@ -110,6 +110,10 @@ class SebessegBot:
                     continue
                 self.last_tick_time = now
                 
+                # Biztonsági védelem: Vakság ellenőrzése
+                if self._check_feed_health():
+                    continue
+                    
                 # --- State Machine ---
                 if self.state == "ARMED":
                     self._armed_tick()
@@ -119,15 +123,28 @@ class SebessegBot:
                     self._in_position_tick()
                 elif self.state == "EXITING":
                     self._exiting_tick()
-                elif self.state == "COOLDOWN":
-                    self._cooldown_tick()
-                    
         except KeyboardInterrupt:
             logger.info("\n🛑 JELZÉS (Ctrl+C). Bot leállítása...")
             self.shutdown()
         except Exception as e:
             logger.error(f"💥 KRITIKUS HIBA A FŐ CIKLUSBAN: {e}")
             self.shutdown()
+
+    def _check_feed_health(self) -> bool:
+        """Ellenőrzi a WebSocket L2 Book kapcsolat él-e még. Ha nem, töröl minden ordert."""
+        if self.feed_engine and self.feed_engine.is_feed_stale(max_staleness_sec=5.0):
+            logger.error("🚨 FEED STALE: A WebSocket kapcsolat elvesztette a szinkront (Vakság)!")
+            logger.error("   Azonnali PANIC CANCEL indítása...")
+            if not self.dry_run and self.hl_client:
+                self.hl_client.cancel_all_orders()
+            if self.order_manager:
+                self.order_manager.cancel_ladder()
+            if self.exit_manager:
+                self.exit_manager.cancel_exit_orders()
+                
+            self.state = "HALT"
+            return True
+        return False
 
     # ================= ÁLLAPOT CIKLUSOK =================
     
@@ -275,13 +292,14 @@ class SebessegBot:
         
         if time_to_close:
             logger.info(f"🚪 EXIT KIVÁLTVA: {reason}")
-            self.exit_manager.cancel_exit_orders()
-            # Valójában itt meg kellene küldeni egy Market Ordert befelé, 
-            # de egyelőre sima kilépésként szimuláljuk P&L-el
             
-            # Pnl Update
-            self.daily_pnl += 5.0 # Dummy P&L for Dry Run Demo 
-            logger.info(f"💰 BECSÜLT PNL: $5.00 -> DAILY PNL: ${self.daily_pnl:.2f}")
+            if reason == "TAKE_PROFIT_REACHED":
+                logger.info("✅ Sikeres TP kilépés a hálózaton!")
+                self.daily_pnl += 5.0 # Dummy
+                self.exit_manager._reset_state()
+            else:
+                logger.info("⚠️ Hálózati Market Close kikényszerítése...")
+                self.exit_manager.close_position_at_market()
             
             self._start_cooldown(reason)
             
