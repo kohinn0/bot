@@ -6,6 +6,7 @@ Használja a py-clob-client könyvtárat
 
 import os
 import asyncio
+import requests
 from dotenv import load_dotenv
 
 # Betölti a .env fájlból a kulcsokat
@@ -25,8 +26,8 @@ except ImportError:
 
 class PolymarketClient:
     def __init__(self):
-        self.private_key = os.getenv("PRIVATE_KEY")
-        self.funder_address = os.getenv("FUNDER_ADDRESS") # NEW: For Proxy Wallet
+        self.private_key = os.getenv("PRIVATE_KEY", "")
+        self.funder_address = os.getenv("FUNDER_ADDRESS", "") # NEW: For Proxy Wallet
         self.host = "https://clob.polymarket.com"
         self.chain_id = 137  # Polygon mainnet
         
@@ -50,7 +51,7 @@ class PolymarketClient:
             self.creds = None
         
         # Persistent session for high-speed reads
-        self.session = __import__('requests').Session()
+        self.session = requests.Session()
         self.session.headers.update({
             "User-Agent": "Mozilla/5.0",
             "Accept": "application/json"
@@ -104,7 +105,7 @@ class PolymarketClient:
         
         try:
             # Orderbook lekérdezése
-            order_book = self.client.get_order_book(token_id)
+            order_book = self.client.get_order_book(token_id)  # type: ignore
             bids = order_book.bids if hasattr(order_book, 'bids') else []
             if bids:
                 # Legjobb vételi ár
@@ -156,7 +157,7 @@ class PolymarketClient:
         
         if dry_run:
             logger.info(f"🧪 [DRY RUN] Vennék IGEN-t:")
-            logger.info(f"   Token: {token_id[:20]}...")
+            logger.info(f"   Token: {token_id[:20]}...")  # type: ignore
             logger.info(f"   Ár: ${price}")
             logger.info(f"   Összeg: ${size} USDC")
             return {"status": "simulated", "price": price, "size": size}
@@ -178,7 +179,7 @@ class PolymarketClient:
                 expiration=expiration_timestamp
             )
             
-            response = self.client.create_and_post_order(order_args)
+            response = self.client.create_and_post_order(order_args)  # type: ignore
             logger.info(f"DEBUG - API Response: {response}")
             
             # Hibakezelés: A válasz lehet lista vagy dict
@@ -217,7 +218,7 @@ class PolymarketClient:
         if dry_run:
             logger.info(f"🧪 [DRY RUN] BATCH ({len(orders)} db order) küldése:")
             for o in orders:
-                logger.info(f"   - {o['side']} Token: {o['token_id'][:15]}... | Ár: ${o['price']} | Összeg: ${o['size']} USDC")
+                logger.info(f"   - {o['side']} Token: {o['token_id'][:15]}... | Ár: ${o['price']} | Összeg: ${o['size']} USDC")  # type: ignore
             return [{"status": "simulated", **o} for o in orders]
             
         try:
@@ -236,13 +237,13 @@ class PolymarketClient:
                     side=o["side"],
                     expiration=expiration_timestamp
                 )
-                signed_order = self.client.create_order(order_args)
+                signed_order = self.client.create_order(order_args)  # type: ignore
                 signed_orders.append(signed_order)
             
             # Batch API call a CLOB klienssel
             response = []
             if signed_orders:
-                response = self.client.post_orders(signed_orders)
+                response = self.client.post_orders(signed_orders)  # type: ignore
             
             # Hibakezelés batch listára
             if isinstance(response, list):
@@ -277,7 +278,7 @@ class PolymarketClient:
             return True
             
         try:
-            response = self.client.cancel_orders(order_ids)
+            response = self.client.cancel_orders(order_ids)  # type: ignore
             logger.info(f"✅ Törlés sikeres ({len(order_ids)} order).")
             return True
         except Exception as e:
@@ -295,7 +296,7 @@ async def test_connection():
     client = PolymarketClient()
     
     if client.private_key and client.funder_address:
-        success = await client.initialize()
+        success = client.initialize()
         if success:
             logger.info("✅ Polymarket kliens működik (Gasless mode)!")
         else:

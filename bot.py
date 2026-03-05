@@ -52,15 +52,15 @@ class TradingBot:
         self.stats = BotStats()
         
         # Components
-        self.binance: Optional[BinanceFeed] = None
-        self.finder: Optional[MarketFinder] = None
-        self.poly_client: Optional[PolymarketClient] = None
-        self.signal_engine: Optional[SignalEngine] = None
-        self.order_mgr: Optional[OrderManager] = None
-        self.exit_mgr: Optional[ExitManager] = None
-        self.toxicity_engine: Optional[ToxicityEngine] = None
+        self.binance: BinanceFeed = None  # type: ignore
+        self.finder: MarketFinder = None  # type: ignore
+        self.poly_client: PolymarketClient = None  # type: ignore
+        self.signal_engine: SignalEngine = None  # type: ignore
+        self.order_mgr: OrderManager = None  # type: ignore
+        self.exit_mgr: ExitManager = None  # type: ignore
+        self.toxicity_engine: ToxicityEngine = None  # type: ignore
         
-        self.market: Optional[MarketContext] = None
+        self.market: MarketContext = None  # type: ignore
         
         # Inventory tracking
         self.inventory_yes, self.inventory_no = read_inventory()
