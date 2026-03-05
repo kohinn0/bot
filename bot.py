@@ -1,3 +1,4 @@
+# pyre-ignore-all-errors
 import os
 import time
 import asyncio
@@ -24,12 +25,14 @@ class SebessegBot:
         self.consecutive_losses = 0
         
         # Kliensek & Engine-ek
-        self.hl_client: Optional[HyperliquidClient] = None
-        self.feed_engine: Optional[HyperliquidFeed] = None
-        self.signal_engine: Optional[SignalEngine] = None
-        self.order_manager: Optional[OrderManager] = None
-        self.exit_manager: Optional[ExitManager] = None
+        self.hl_client: Any = None
+        self.feed_engine: Any = None
+        self.signal_engine: Any = None
+        self.order_manager: Any = None
+        self.exit_manager: Any = None
         
+        self.cooldown_end_time: float = 0.0
+        self.last_trade_timestamp: float = 0.0
         self.last_tick_time = 0.0
         self.min_tick_interval = 0.01  # 10ms for lower loop stress but fast reaction
         

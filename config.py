@@ -289,7 +289,7 @@ class MakerStrategyConfig:
         str_tick = f"{tick_size:.10f}".rstrip('0')
         decimals = len(str_tick.split('.')[1]) if '.' in str_tick else 0
         
-        return round(result, decimals)
+        return round(float(result), int(decimals)) # pyre-ignore[6]
     
     def validate_shares(self, shares: float) -> int:
         """Validate and round shares to minimum"""

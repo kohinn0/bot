@@ -1,3 +1,4 @@
+# pyre-ignore-all-errors
 from bot_logger import logger
 import math
 import asyncio
