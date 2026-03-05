@@ -10,7 +10,7 @@ from dataclasses import dataclass
 
 import websockets
 
-from binance_feed import BinanceFeed
+from hyperliquid_feed import HyperliquidFeed
 from config import config
 
 
@@ -111,14 +111,13 @@ class PolymarketWS:
 
 
 class SignalEngine:
-    """Detects momentum signals from Binance price feed and Auto-Halts from Polymarket"""
+    """Detects momentum signals from Hyperliquid L2 feed"""
     
-    def __init__(self, binance: BinanceFeed):
-        self.binance = binance
+    def __init__(self, hl_feed: HyperliquidFeed):
+        self.hl_feed = hl_feed
         self.last_signal_time = 0
         # Árfolyam történet (ms, price)
         self.price_history: Deque[Tuple[float, float]] = deque(maxlen=500)
-        self.poly_ws = None
         
         # Dinamikus Z-score alapú triggerhez
         # Az elmúlt ~60s hozamait tartjuk egy mozgó ablakban
@@ -134,16 +133,8 @@ class SignalEngine:
         self.max_duration_ms = 1000  # 1 second
         self.min_time_between_signals_ms = 3000  # 3 seconds
     
-    def attach_polymarket_ws(self, token_ids: list[str]):
-        """Csatlakoztatja az in-memory Polymarket WebSocket monitort a kért tokenekre"""
-        if self.poly_ws:
-            self.poly_ws.stop()
-        self.poly_ws = PolymarketWS(token_ids)
-        self.poly_ws.start()
-        
     def check_auto_halt(self) -> bool:
-        if self.poly_ws:
-            return self.poly_ws.check_halt()
+        # TODO: Hyperliquid L2 trade info based auto-halt logic can be placed here
         return False
 
     def update(self) -> Optional[PriceMove]:
@@ -153,7 +144,7 @@ class SignalEngine:
         Returns:
             PriceMove if signal detected, None otherwise
         """
-        current_price = self.binance.get_current_price()
+        current_price = self.hl_feed.get_current_price()
         if not current_price:
             return None
         
@@ -332,11 +323,11 @@ if __name__ == "__main__":
     logger.info("=" * 60)
     
     # Initialize
-    binance = BinanceFeed()
-    binance.start()
+    hl = HyperliquidFeed()
+    hl.start()
     time.sleep(2)
     
-    engine = SignalEngine(binance)
+    engine = SignalEngine(hl)
     
     logger.info(f"Monitoring for signals...")
     logger.info(f"  Trigger range: {config.bearish_trigger_pct_range[0]:.2f}% - {config.bearish_trigger_pct_range[1]:.2f}%")
@@ -356,5 +347,5 @@ if __name__ == "__main__":
 
         time.sleep(0.1)  # 100ms
     
-    binance.stop()
+    hl.stop()
     logger.info("✅ Test complete")
