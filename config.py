@@ -130,6 +130,32 @@ class MakerStrategyConfig:
         return (velocity_pct_per_sec >= tf.binance_velocity_threshold_pct_per_sec and 
                 duration_ms >= tf.sustained_duration_ms)
     
+    def is_toxic_flow_advanced(
+        self,
+        dprice_per_sec_pct: float,
+        volume_spike: float,
+        atr: float,
+        theta: float,
+    ) -> bool:
+        """
+        Adaptív Toxic Flow filter a dokumentumban leírt formula szerint:
+
+            |ΔP/Δt| * Volume_spike > Θ * ATR
+
+        ahol:
+            - dprice_per_sec_pct: árfolyamsebesség %/sec-ben
+            - volume_spike: aktuális volumen / átlagos volumen
+            - atr: Average True Range (átlagos gyertya/mozgás mérete)
+            - theta (Θ): dinamikus küszöb szorzó
+        """
+        if not self.toxic_flow_detection.enabled:
+            return False
+        if atr <= 0:
+            return False
+        lhs = abs(dprice_per_sec_pct) * max(volume_spike, 0.0)
+        rhs = theta * atr
+        return lhs > rhs
+    
     # === Ladder Configuration ===
     @property
     def ladder_levels(self) -> List[LadderLevel]:
