@@ -611,10 +611,6 @@ if __name__ == "__main__":
     if not dry_run:
         logger.info("⚠️  WARNING: LIVE MODE!")
         logger.info("   Real orders will be placed!")
-        response = input("   Type 'YES' to confirm: ")
-        if response != "YES":
-            logger.info("   Aborted")
-            sys.exit(0)
     
     bot = TradingBot(dry_run=dry_run)
     bot.run()
