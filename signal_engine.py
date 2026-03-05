@@ -126,12 +126,17 @@ class SignalEngine:
         self.returns: Deque[Tuple[float, float]] = deque(maxlen=1200)
         # Z-score paraméterek
         self.z_threshold = 2.5
-        self.Z_WARMUP = 150  # Min. adatpont a Z-score megbízhatóságához (mentor: min 100-200)
+        self.Z_WARMUP = 150  # Min. adatpont a stabil szóráshoz
 
-        # Welford O(1) futó statisztika – nem kell az egész ablakot újraszámolni
-        self._n: int = 0          # eddigi minták száma
-        self._run_mean: float = 0.0   # futó átlag
-        self._run_M2: float = 0.0     # futó négyzeteltérés-összeg (Welford)
+        # EWMV – Exponentially Weighted Moving Variance
+        # Az alfa meghatározza a "felejtési" sebességet:
+        #   alfa = 0.05  → ~20 ticknyi "félévezet" (100ms-es ticknél ~2 másodperc)
+        # Ez biztosítja, hogy a bot mindig a FRISS volatilitásra reagál,
+        # nem az óráival ezelőtti piaci állapotra. (Mentor kritika: "Hol a felejtés?")
+        self._ewm_alpha: float = 0.05
+        self._ewm_mean: float = 0.0    # exponenciálisan súlyozott átlag
+        self._ewm_var: float = 0.0     # exponenciálisan súlyozott variancia
+        self._ewm_n: int = 0           # warmup számláló
 
         # Legacy paraméterek (fallback-nak megtartva)
         self.min_change_pct = 0.12
@@ -246,25 +251,26 @@ class SignalEngine:
         while self.returns and self.returns[0][0] < cutoff:
             self.returns.popleft()
 
-        # Welford online algoritmus – O(1) futó átlag és szórás frissítése
-        # Forrás: Welford (1962) – numerikusan stabil, nem kell az egész ablakot összeadni
-        self._n += 1
-        delta = r_t - self._run_mean
-        self._run_mean += delta / self._n
-        delta2 = r_t - self._run_mean
-        self._run_M2 += delta * delta2
+        # EWMV – Exponentially Weighted Moving Variance (O(1), és FELEJT!)
+        # Frissítés képlet:
+        #   mean_t = (1 - α) * mean_{t-1} + α * r_t
+        #   var_t  = (1 - α) * var_{t-1}  + α * (r_t - mean_{t-1})²
+        # A négyzet ELŐTTI mean értékével számolunk (Welford-kompatibilis forma).
+        alpha = self._ewm_alpha
+        prev_mean = self._ewm_mean
+        self._ewm_mean = (1 - alpha) * self._ewm_mean + alpha * r_t
+        self._ewm_var  = (1 - alpha) * self._ewm_var  + alpha * (r_t - prev_mean) ** 2
+        self._ewm_n   += 1
 
-        # Meleg-up: legalább Z_WARMUP minta kell a megbízható szóráshoz (mentor: 100-200)
-        if self._n < self.Z_WARMUP:
+        # Warm-up: legalább Z_WARMUP tick kell a stabil becsléshez
+        if self._ewm_n < self.Z_WARMUP:
             return r_t, None
 
-        var = self._run_M2 / max(self._n - 1, 1)
-        sigma_r = math.sqrt(max(var, 1e-18))
-
+        sigma_r = math.sqrt(max(self._ewm_var, 1e-18))
         if sigma_r <= 0:
             return r_t, None
 
-        z_t = (r_t - self._run_mean) / sigma_r
+        z_t = (r_t - self._ewm_mean) / sigma_r
         return r_t, z_t
     
     def _detect_move(self, now: float, current_price: float) -> Optional[PriceMove]:
@@ -326,7 +332,10 @@ class SignalEngine:
           duration > 300ms    →  tartós mozgás (nem flash-zajj)
         """
         VELOCITY_THRESHOLD = 0.25  # %/sec
-        DURATION_THRESHOLD_MS = 300  # ms
+        # 600ms: elkerüli a WebSocket batch-jitter miatti téves riasztást,
+        # de még mindig időben reagál a valódi bálnamozgásokra.
+        # (Mentor: 300ms túl agresszív, javasolt: 500-800ms)
+        DURATION_THRESHOLD_MS = 600  # ms
 
         if velocity_pct_per_sec > VELOCITY_THRESHOLD and duration_ms > DURATION_THRESHOLD_MS:
             logger.warning(
