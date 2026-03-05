@@ -336,36 +336,56 @@ class ExitManager:
 
         self.cancel_exit_orders()
         
-        # Determine actual size from API to handle partial fills
+        # Determine actual size from API to handle partial fills with RETRY logic
         actual_size = 0.0
+        state_success = False
+        
         if self.hl_client.wallet and self.hl_client.info:
-            try:
-                state = self.hl_client.info.user_state(self.hl_client.wallet.address)
-                positions = state.get("assetPositions", [])
-                for pos in positions:
-                    if pos["position"]["coin"] == self.coin:
-                        actual_size = float(pos["position"]["szi"])
-                        break
-            except Exception as e:
-                logger.info(f"⚠️ Nem sikerült a pozíció méretét lekérdezni: {e}")
+            for attempt in range(1, 4):
+                try:
+                    state = self.hl_client.info.user_state(self.hl_client.wallet.address)
+                    positions = state.get("assetPositions", [])
+                    for pos in positions:
+                        if pos["position"]["coin"] == self.coin:
+                            actual_size = float(pos["position"]["szi"])
+                            break
+                    state_success = True
+                    break # Success, exit retry loop
+                except Exception as e:
+                    logger.warning(f"⚠️ Hiba a pozíció lekérdezésében (attempt {attempt}/3): {e}")
+                    if attempt < 3:
+                        time.sleep(0.3 * (2 ** (attempt - 1))) # 0.3s, 0.6s
+                    else:
+                        logger.error("❌ Pozíció állapot lekérése TARTÓSAN sikertelen a panic alatt.")
                 
+        if not state_success:
+            logger.error("⚠️ Nem futtatható le a Market Close megerősített méret hiányában. Manuális beavatkozás szükséges!")
+            self._reset_state()
+            return
+            
         if abs(actual_size) > 0:
             is_buy = actual_size < 0  # if short, we buy to close
             sz = abs(actual_size)
             logger.info(f"🔥 MARKET CLOSE INDÍTÁSA - {self.coin} | Irány: {'BUY' if is_buy else 'SELL'} | Méret: {sz}")
             
             if self.hl_client.exchange:
-                try:
-                    res = self.hl_client.exchange.market_open(
-                        coin=self.coin,
-                        is_buy=is_buy,
-                        sz=sz,
-                        px=None, # Market open API allows sending None/0 for limit px but relies on slippage internally or uses `order` with generic market.
-                        slippage=0.05
-                    )
-                    logger.info(f"✅ Market Close sikeres: {res}")
-                except Exception as e:
-                    logger.error(f"❌ Market Close hiba: {e}")
+                for attempt in range(1, 4):
+                    try:
+                        res = self.hl_client.exchange.market_open(
+                            coin=self.coin,
+                            is_buy=is_buy,
+                            sz=sz,
+                            px=None,
+                            slippage=0.05
+                        )
+                        logger.info(f"✅ Market Close sikeres: {res}")
+                        break # Success
+                    except Exception as e:
+                        logger.warning(f"⚠️ Market Close hiba (attempt {attempt}/3): {e}")
+                        if attempt < 3:
+                            time.sleep(0.5 * (2 ** (attempt - 1))) # 0.5s, 1.0s
+                        else:
+                            logger.error("❌ Market Close (Pánik gomb) VÉGLEGESEN ELSZÁLLT! Kézi zárás kell.")
         else:
              logger.info("ℹ️ Nincs nyitott pozíció a hálózaton. Nincs mit zárni.")
              

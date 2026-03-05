@@ -131,19 +131,36 @@ class SebessegBot:
             self.shutdown()
 
     def _check_feed_health(self) -> bool:
-        """Ellenőrzi a WebSocket L2 Book kapcsolat él-e még. Ha nem, töröl minden ordert."""
-        if self.feed_engine and self.feed_engine.is_feed_stale(max_staleness_sec=5.0):
-            logger.error("🚨 FEED STALE: A WebSocket kapcsolat elvesztette a szinkront (Vakság)!")
-            logger.error("   Azonnali PANIC CANCEL indítása...")
+        """Ellenőrzi a WebSocket L2 Book kapcsolat él-e még. Kétlépcsős védelem."""
+        if not self.feed_engine:
+            return False
+            
+        staleness = self.feed_engine.get_staleness_sec()
+        
+        # 2. lépcső: Panic Cancel & Pozíció zárása (3 másodperc felett)
+        if staleness > 3.0:
+            logger.error(f"🚨 KRITIKUS FEED STALE ({staleness:.1f}s): Vakság! Panic Cancel & Market Close!")
             if not self.dry_run and self.hl_client:
                 self.hl_client.cancel_all_orders()
             if self.order_manager:
                 self.order_manager.cancel_ladder()
             if self.exit_manager:
-                self.exit_manager.cancel_exit_orders()
+                logger.error("   Azonnali Piaci Zárás indítása a beragadás elkerülésére...")
+                self.exit_manager.close_position_at_market()
                 
             self.state = "HALT"
             return True
+            
+        # 1. lépcső: Warning (1-3 másodperc között)
+        if staleness > 1.0:
+            if self.state == "ARMED":
+                logger.warning(f"⚠️ FEED STALE WARNING ({staleness:.1f}s): Nincs új belépés, várakozás...")
+                return True # Skip the tick, prevent new orders, but don't halt
+            else:
+                # In LADDER_PLACED or IN_POSITION
+                logger.warning(f"⚠️ FEED STALE WARNING ({staleness:.1f}s): Létra/Pozíció aktív, várakozás a helyreállásra mielőtt piacit zárunk...")
+                return False
+                
         return False
 
     # ================= ÁLLAPOT CIKLUSOK =================
