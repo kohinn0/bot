@@ -66,11 +66,18 @@ class OrderManager:
         seen_prices: set = set()
         for level, price, size_pct in ladder_prices:
             size_raw = total_shares * size_pct
-            size = max(float(config.min_shares), float(size_raw))
 
             szDecimals = 4
             factor = 10 ** szDecimals
-            size = math.floor(size * factor) / factor
+            size_floored = math.floor(size_raw * factor) / factor
+
+            # Alkalmazzuk a min_shares-t csak ha 0-ra kerekitodne
+            min_sz = float(config.min_shares)
+            if size_floored < min_sz:
+                logger.debug(f"  Szint {level}: size_raw={size_raw:.6f} -> min_shares floor alkalmazva ({min_sz})")
+                size = min_sz
+            else:
+                size = size_floored
 
             # ── Dedup: ha két szint azonos áron landol (nagy tick_size esetén) ──
             # Összevonjuk az első szintbe és kihagyjuk a dupát.

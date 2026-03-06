@@ -192,10 +192,10 @@
     },
     "technical_precision": {
         "tick_size": 0.01,
-        "min_shares": 5,
+        "min_shares": 0.001,
         "rounding": {
             "price_formula": "round(price / tick_size) * tick_size",
-            "size_formula": "max(min_shares, floor(size))"
+            "size_formula": "max(min_shares, floor(size * 1e4) / 1e4)"
         },
         "post_only_validation": {
             "check_before_place": true,
