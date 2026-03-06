@@ -39,7 +39,7 @@ class SebessegBot:
         self.min_tick_interval = 0.025  # 25ms (40 tick/s) – elég gyors, nem terheli az I/O-t
         self._last_stale_warn: float = 0.0   # log throttle: max 1 stale warning / 5s
         
-        self.cached_account_value: float = 1000.0  # Fallback fallback
+        self.cached_account_value: float = 100.0  # Fallback override for demo
         
         self.trade_params = {
             "current_mid": 0.0,
