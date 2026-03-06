@@ -159,12 +159,53 @@ class OrderManager:
         self.active_ladder = ladder
         return ladder
     
+    def check_virtual_fills(self, current_mid: float) -> Tuple[bool, float, float]:
+        """
+        Dry Run módban szimulálja a kitöltést a WebSocket ár alapján.
+        """
+        if not self.dry_run or not self.active_ladder:
+            return (False, 0.0, 0.0)
+
+        ladder = self.active_ladder
+        side = ladder.side
+        filled_levels = 0
+        total_qty = 0.0
+        total_cost = 0.0
+
+        for level in ladder.orders:
+            if not level.filled:
+                # LONG esetén: ha az ár lemegy a limitig vagy alá -> FILL
+                if side == "LONG" and current_mid <= level.price:
+                    level.filled = True
+                    level.filled_size = level.size
+                    logger.info(f"👻 GHOST FILL: LONG szint kitöltve @ ${level.price:.2f}")
+                
+                # SHORT esetén: ha az ár felmegy a limitig vagy fölé -> FILL
+                elif side == "SHORT" and current_mid >= level.price:
+                    level.filled = True
+                    level.filled_size = level.size
+                    logger.info(f"👻 GHOST FILL: SHORT szint kitöltve @ ${level.price:.2f}")
+
+            if level.filled:
+                filled_levels += 1
+                total_qty += level.size
+                total_cost += level.size * level.price
+
+        if filled_levels > 0:
+            avg_price = total_cost / total_qty
+            ladder.total_size_filled = total_qty
+            ladder.avg_fill_price = avg_price
+            return (True, total_qty, avg_price)
+        
+        return (False, 0.0, 0.0)
+
     def check_fills(self) -> Tuple[bool, float, float]:
         if not self.active_ladder:
             return (False, 0.0, 0.0)
         
         if self.dry_run:
-            return (False, 0.0, 0.0) # bot.py shadows this
+            # A szimuláció hívását a fő bot hurok vezérli (check_virtual_fills)
+            return (False, 0.0, 0.0)
         
         total_filled: float = 0.0
         weighted_price_sum: float = 0.0
