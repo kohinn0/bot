@@ -93,6 +93,8 @@ sudo tee /etc/systemd/system/${SERVICE_NAME}.service > /dev/null <<EOF
 Description=SebessegBot – Hyperliquid Maker Bot
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=120
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -103,8 +105,6 @@ Environment=PYTHONUNBUFFERED=1
 ExecStart=$BOT_DIR/venv/bin/python $BOT_DIR/bot.py
 Restart=always
 RestartSec=5s
-StartLimitIntervalSec=120
-StartLimitBurst=5
 KillMode=mixed
 TimeoutStopSec=20
 

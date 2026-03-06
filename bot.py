@@ -35,6 +35,7 @@ class SebessegBot:
         self.last_trade_timestamp: float = 0.0
         self.last_tick_time = 0.0
         self.min_tick_interval = 0.01  # 10ms for lower loop stress but fast reaction
+        self._last_stale_warn: float = 0.0   # log throttle: max 1 stale warning / 5s
         
         self.trade_params = {
             "current_mid": 0.0,
@@ -168,14 +169,20 @@ class SebessegBot:
             
         # 1. lépcső: Warning (1.5-3 másodperc között)
         # 1.0s → 1.5s: Tokió VPS-en normál csúcslatencia 1.1-1.3s lehet
+        # Log throttle: max 1 figyelmeztetés / 5 másodperc (elnémítja a spam-et)
         if staleness > 1.5:
+            now_w = time.time()
             if self.state == "ARMED":
-                logger.warning(f"⚠️ FEED STALE WARNING ({staleness:.1f}s): Nincs új belépés, várakozás...")
+                if now_w - self._last_stale_warn >= 5.0:
+                    logger.warning(f"⚠️ FEED STALE WARNING ({staleness:.1f}s): Nincs új belépés, várakozás...")
+                    self._last_stale_warn = now_w
                 return True  # Skip the tick, prevent new orders, but don't halt
             else:
                 # In LADDER_PLACED or IN_POSITION
 
-                logger.warning(f"⚠️ FEED STALE WARNING ({staleness:.1f}s): Létra/Pozíció aktív, várakozás a helyreállásra mielőtt piacit zárunk...")
+                if now_w - self._last_stale_warn >= 5.0:
+                    logger.warning(f"⚠️ FEED STALE WARNING ({staleness:.1f}s): Létra/Pozíció aktív, várakozás a helyreállásra mielőtt piacit zárunk...")
+                    self._last_stale_warn = now_w
                 return False
                 
         return False
