@@ -101,33 +101,24 @@ class SebessegBot:
         self.state = "ARMED"
         return True
 
-    def run(self):
-        """Fő ciklus (Run Loop) – systemd-biztos, SIGTERM-kezelt"""
-        import signal
-
-        def _handle_sigterm(signum, frame):
-            """systemd stop: SIGTERM → clean shutdown"""
-            logger.warning("📨 SIGTERM fogadva (systemd stop). Leállítás...")
-            self.state = "HALT"
-
-        signal.signal(signal.SIGTERM, _handle_sigterm)
-        signal.signal(signal.SIGINT, _handle_sigterm)  # Ctrl+C is
-
+    async def run_async(self, stop_event: asyncio.Event):
+        """Aszinkron fő ciklus – az asyncio event loop tartja életben a háttérszálakat"""
         RUNNING_STATES = {"ARMED", "LADDER_PLACED", "IN_POSITION",
                           "EXITING", "COOLDOWN", "RECOVERING"}
 
-        logger.info("🟢 BOT INDÍTÁSA - Fő ciklus fut... (leállítás: Ctrl+C vagy systemctl stop)")
+        logger.info("🟢 BOT INDÍTÁSA - Aszinkron hurok fut... (leállítás: Ctrl+C vagy systemctl stop)")
 
         try:
-            while self.state in RUNNING_STATES:
+            while self.state in RUNNING_STATES and not stop_event.is_set():
                 now = time.time()
                 if now - self.last_tick_time < self.min_tick_interval:
-                    time.sleep(0.001)
+                    await asyncio.sleep(0.001)  # ← async sleep: nem blokkolja az event loopot!
                     continue
                 self.last_tick_time = now
 
-                # Biztonsági védelem: Vakság ellenőrzése
+                # Feed egészség – kétlépcsős staléness védelem
                 if self._check_feed_health():
+                    await asyncio.sleep(0.01)
                     continue
 
                 # --- State Machine ---
@@ -145,10 +136,11 @@ class SebessegBot:
                     self._recovering_tick()
 
         except Exception as e:
-            logger.error(f"💥 KRITÍKUS HIBA A FŐ CIKLUSBAN: {e}", exc_info=True)
+            logger.error(f"💥 KRITÍKUS HIBA: {e}", exc_info=True)
         finally:
-            # Garantált takarítás – legyen szó HALT-ról, hibáról vagy SIGTERM-ről
+            # Garantált takarítás
             self.shutdown()
+
 
     def _check_feed_health(self) -> bool:
         """Ellenőrzi a WebSocket L2 Book kapcsolat él-e még. Kétlépcsős védelem."""
@@ -439,23 +431,52 @@ class SebessegBot:
             
         logger.info("✅ LEÁLLÍTÁS SIKERES. Good Night!")
 
+async def _bot_shutdown(bot: SebessegBot, stop_event: asyncio.Event) -> None:
+    """Aszinkron leállítási jel kezelése (SIGTERM / SIGINT)"""
+    logger.warning("📨 Leállítási jelérkezett. Takarítás folyamatban...")
+    bot.state = "HALT"
+    stop_event.set()
+
+
+async def main_async(is_live: bool) -> None:
+    """
+    Aszinkron fő belépési pont. Az asyncio event loop tartja életben
+    a háttérszálakat (WebSocket asyncio loop), így nem zavarodik
+    össze a leállításkor.
+    """
+    import signal as _signal
+
+    bot = SebessegBot(dry_run=not is_live)
+
+    if not bot.initialize():
+        logger.error("❌ INICIALIZÁLÁS SIKERTELEN.")
+        raise SystemExit(1)
+
+    stop_event = asyncio.Event()
+
+    # Aszinkron jel kezelés – ez a helyes mód asyncio programban!
+    # (A szinkron signal.signal nem játszik jól az event looppal)
+    loop = asyncio.get_running_loop()
+    for sig in (_signal.SIGINT, _signal.SIGTERM):
+        loop.add_signal_handler(
+            sig,
+            lambda: asyncio.ensure_future(_bot_shutdown(bot, stop_event))
+        )
+
+    await bot.run_async(stop_event)
+
+
 if __name__ == "__main__":
+    import signal  # noqa
     parser = argparse.ArgumentParser(description="Sebesseg Crypto Maker Bot")
     parser.add_argument('--live', action='store_true', help='ÉLES KERESKEDÉS (pénzt kockáztatsz!)')
     args = parser.parse_args()
 
-    is_dry_run = not args.live
-
-    if is_dry_run:
+    if not args.live:
         print("🧪 DRY RUN mód aktiválva. Valós orderek NEM kerülnek kiállításra.")
     else:
         print("🚨 LIVE mód! Valódi tőke kockán!")
-        print("   töröld a dóbot ha nem vagy biztos: Ctrl+C")
-        import time as _t; _t.sleep(3)  # 3 másodperces fék live módban
+        print("   Ctrl+C = leállítás. 3 másodperc múlva indul...")
+        time.sleep(3)
 
-    bot = SebessegBot(dry_run=is_dry_run)
-    if bot.initialize():
-        bot.run()
-    else:
-        logger.error("❌ INICIALIZÁLÁS SIKERTELEN.")
-        raise SystemExit(1)  # systemd restart-ot triggerel
+    asyncio.run(main_async(args.live))
