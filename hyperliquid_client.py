@@ -113,10 +113,10 @@ class HyperliquidClient:
 
     # ================= EXCHANGE API =================
     
-    def cancel_all_orders(self) -> bool:
+    def cancel_all_orders(self, coin_filter: Optional[str] = None) -> bool:
         """Mindent azonnal töröl."""
         if self.dry_run:
-            logger.info("🧪 [DRY RUN] BATCH CANCEL ALL végrehajtva.")
+            logger.info(f"🧪 [DRY RUN] BATCH CANCEL ALL végrehajtva. ({coin_filter or 'MINDEN'})")
             return True
             
         if not self.exchange or not self.wallet:
@@ -126,6 +126,8 @@ class HyperliquidClient:
             open_orders = self.info.open_orders(self.wallet.address)
             cancels = []
             for o in open_orders:
+                if coin_filter and o["coin"] != coin_filter:
+                    continue
                 cancels.append({"coin": o["coin"], "o": o["oid"]})
             
             if not cancels:

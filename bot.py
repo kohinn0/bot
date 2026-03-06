@@ -13,12 +13,12 @@ from signal_engine import SignalEngine
 from order_manager import OrderManager, ExitManager
 
 class SebessegBot:
-    def __init__(self, dry_run: bool = True):
+    def __init__(self, active_coin: str = "BTC", dry_run: bool = True):
         self.dry_run = dry_run
         
         # Állapotgépi Változók
         self.state = "IDLE"
-        self.active_coin: Optional[str] = "BTC" # Default coin to trade
+        self.active_coin: str = active_coin
         
         # Risk Management - Hyperliquid Perpetual specific (LONG / SHORT margin)
         self.daily_pnl = 0.0
@@ -59,7 +59,7 @@ class SebessegBot:
         
         # Cancel any leftover open orders from previous crash
         if not self.dry_run:
-            self.hl_client.cancel_all_orders()
+            self.hl_client.cancel_all_orders(self.active_coin)
             # Fetch real account value
             ac_val = self.hl_client.get_account_value()
             if ac_val > 0:
@@ -246,7 +246,9 @@ class SebessegBot:
         self.trade_params["current_mid"] = mid_price
         self.trade_params["target_side"] = side
         self.trade_params["sz_usd"] = target_usd
-        
+        self.trade_params["signal_time"] = time.time()  # Ezt a repricing miatt fixként tartsuk meg
+        self.trade_params["skew_penalty"] = 1.0  # Kezdetben nincs skew
+
         # Inventory Skew Logic: védekezés trend esetén
         skew_penalty = 1.0
         if len(self.inventory_history) >= 2:
@@ -263,6 +265,7 @@ class SebessegBot:
                     skew_penalty = 0.5
                     logger.warning(f"📈 INVENTORY SKEW: Utolso 2 {losing_side} bukott. Következő {side} könnyebben töltődik (0.5x táv)!")
 
+        self.trade_params["skew_penalty"] = skew_penalty
         base_sigma_r = metadata.get('sigma_r') if metadata.get('sigma_r') is not None else (metadata.get('pct_change', 0) / 100.0)
         self.trade_params["sigma_r"] = base_sigma_r  # Elmentjük a TP-nek
 
@@ -305,19 +308,36 @@ class SebessegBot:
         else:
             has_fills, filled_size, avg_price = self.order_manager.check_fills()
 
-        # --- Smart Repricing: ha az ar elmozdult tol a letratol, torolje es ujrarad ---
+        # --- PING-PONG Repricing Engine ---
+        # Ha az ár elmozdult a pihentetett letrától, törölje és azonnal rakja fel az új mid alapján
         DRIFT_TICKS = 5
-        if current_mid and not has_fills:
+        if not has_fills and current_mid:
             placed_mid = self.trade_params.get("current_mid", current_mid)
             drift = abs(current_mid - placed_mid)
             if drift > (DRIFT_TICKS * tick_size):
-                logger.info(f"PING-PONG REPRICE: Ar {drift:.2f} USD-t mozdult el a letratol (>{DRIFT_TICKS} tick). Torles es ujraindulas.")
+                logger.info(f"🔄 PING-PONG REPRICE: Ár {drift:.2f} USD-t mozdult el a letrától. Újrahúzás a jelenlegi középárhoz...")
                 self.order_manager.cancel_ladder()
-                self.state = "ARMED"
+                
+                # Újrahúzás ugyanazokkal a paraméterekkel, csak az új `current_mid`-del
+                self.trade_params["current_mid"] = current_mid
+                ladder = self.order_manager.place_ladder(
+                    coin=self.active_coin,
+                    side=self.trade_params["target_side"],
+                    mid_price=current_mid,
+                    total_usd_notional=self.trade_params["sz_usd"],
+                    tick_size=tick_size,
+                    sigma_r=self.trade_params["sigma_r"] * self.trade_params.get("skew_penalty", 1.0)
+                )
+                
+                if ladder:
+                    logger.info("✅ Ping-Pong reprice létra betöltve!")
+                else:
+                    logger.info("❌ Ping-Pong reprice elbukott, visszatérés ARMED-be.")
+                    self.state = "ARMED"
                 return
 
-        age_ms = self.order_manager.get_ladder_age_ms()
-        if age_ms > config.wait_for_fill_ms:
+        signal_age_ms = (time.time() - self.trade_params.get("signal_time", time.time())) * 1000.0
+        if signal_age_ms > config.wait_for_fill_ms:
             # TIMEOUTS
             if has_fills:
                 logger.info(f"LETRA IDOTULLEPES, de VOLT RESZLEGES FILL. Torles es EXITING ciklus.")
@@ -325,7 +345,7 @@ class SebessegBot:
                 self.state = "EXITING"
                 self._setup_take_profit(filled_size, avg_price)
             else:
-                logger.info(f"LETRA IDOTULLEPES ({age_ms:.0f}ms). NO EDGE SKIP. Torles.")
+                logger.info(f"LETRA IDOTULLEPES ({signal_age_ms:.0f}ms). NO EDGE SKIP. Torles.")
                 self.order_manager.cancel_ladder()
                 self.state = "ARMED"
             return
@@ -558,14 +578,15 @@ class SebessegBot:
             
         logger.info("✅ LEÁLLÍTÁS SIKERES. Good Night!")
 
-async def _bot_shutdown(bot: SebessegBot, stop_event: asyncio.Event) -> None:
+async def _bot_shutdown(bots: list['SebessegBot'], stop_event: asyncio.Event) -> None:
     """Aszinkron leállítási jel kezelése (SIGTERM / SIGINT)"""
     logger.warning("📨 Leállítási jelérkezett. Takarítás folyamatban...")
-    bot.state = "HALT"
+    for bot in bots:
+        bot.state = "HALT"
     stop_event.set()
 
 
-async def main_async(is_live: bool) -> None:
+async def main_async(is_live: bool, coins: list[str]) -> None:
     """
     Aszinkron fő belépési pont. Az asyncio event loop tartja életben
     a háttérszálakat (WebSocket asyncio loop), így nem zavarodik
@@ -573,30 +594,41 @@ async def main_async(is_live: bool) -> None:
     """
     import signal as _signal
 
-    bot = SebessegBot(dry_run=not is_live)
+    bots = []
+    for coin in coins:
+        bot = SebessegBot(active_coin=coin, dry_run=not is_live)
+        if not bot.initialize():
+            logger.error(f"❌ INICIALIZÁLÁS SIKERTELEN: {coin}")
+            continue
+        bots.append(bot)
 
-    if not bot.initialize():
-        logger.error("❌ INICIALIZÁLÁS SIKERTELEN.")
+    if not bots:
+        logger.error("❌ Egyetlen bot sem tudott elindulni.")
         raise SystemExit(1)
 
     stop_event = asyncio.Event()
 
     # Aszinkron jel kezelés – ez a helyes mód asyncio programban!
-    # (A szinkron signal.signal nem játszik jól az event looppal)
     loop = asyncio.get_running_loop()
     for sig in (_signal.SIGINT, _signal.SIGTERM):
-        loop.add_signal_handler(
-            sig,
-            lambda: asyncio.ensure_future(_bot_shutdown(bot, stop_event))
-        )
+        try:
+            loop.add_signal_handler(
+                sig,
+                lambda: asyncio.ensure_future(_bot_shutdown(bots, stop_event))
+            )
+        except NotImplementedError:
+            pass # Windows local testing (ProactorEventLoop doesn't support signals)
 
-    await bot.run_async(stop_event)
+    # Indítjuk az összes bot hurokját párhuzamosan
+    tasks = [bot.run_async(stop_event) for bot in bots]
+    await asyncio.gather(*tasks)
 
 
 if __name__ == "__main__":
     import signal  # noqa
     parser = argparse.ArgumentParser(description="Sebesseg Crypto Maker Bot")
     parser.add_argument('--live', action='store_true', help='ÉLES KERESKEDÉS (pénzt kockáztatsz!)')
+    parser.add_argument('--coins', type=str, default='BTC', help='Vesszővel elválasztott coin lista (pl. BTC,ETH,SOL)')
     args = parser.parse_args()
 
     if not args.live:
@@ -606,4 +638,5 @@ if __name__ == "__main__":
         print("   Ctrl+C = leállítás. 3 másodperc múlva indul...")
         time.sleep(3)
 
-    asyncio.run(main_async(args.live))
+    coin_list = [c.strip().upper() for c in args.coins.split(',') if c.strip()]
+    asyncio.run(main_async(args.live, coin_list))
