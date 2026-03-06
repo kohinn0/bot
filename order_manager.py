@@ -299,9 +299,6 @@ class OrderManager:
         if sigma_r < SIGMA_R_FLOOR:
             logger.debug(f"sigma_r {sigma_r:.6f} -> floor applied ({SIGMA_R_FLOOR})")
 
-        # 2 tick slippage buffer to prevent ALO rejection at mid
-        slippage_penalty = tick_size * 2
-
         direction_mult = -1 if side == "LONG" else 1
 
         ladder: List[Tuple[int, float, float]] = []
@@ -315,7 +312,9 @@ class OrderManager:
             # Use whichever is larger
             offset = max(vol_offset, min_offset)
 
-            raw_price = mid_price + (direction_mult * (-offset)) - (direction_mult * slippage_penalty)
+            # LONG (-1): we want mid - offset -> mid + (-1 * offset)
+            # SHORT (1): we want mid + offset -> mid + (1 * offset)
+            raw_price = mid_price + (direction_mult * offset)
             price = config.round_to_tick(raw_price, tick_size)
             ladder.append((level_cfg.level, price, level_cfg.size_pct))
 
