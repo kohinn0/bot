@@ -57,26 +57,33 @@
             "type": "dynamic_vol_ladder",
             "reference_price": "mid",
             "sigma_multiplier": 1.5,
+            "min_level_gap_ticks": 5,
             "ladder_config": [
                 {
                     "level": 1,
-                    "offset_from_mid_ticks": -2,
+                    "offset_from_mid_ticks": -5,
                     "size_pct": 0.5,
-                    "comment": "mid - 2 ticks: biztonságos távolság, elég közel a középárhoz"
+                    "comment": "mid - 5 ticks"
                 },
                 {
                     "level": 2,
-                    "offset_from_mid_ticks": -4,
+                    "offset_from_mid_ticks": -10,
                     "size_pct": 0.3,
-                    "comment": "mid - 4 ticks: közép szünet, nagyobb paraméterérték"
+                    "comment": "mid - 10 ticks"
                 },
                 {
                     "level": 3,
-                    "offset_from_mid_ticks": -6,
+                    "offset_from_mid_ticks": -15,
                     "size_pct": 0.2,
-                    "comment": "mid - 6 ticks: legmélyebb csápképző szint (alacsonyabb valószínűség)"
+                    "comment": "mid - 15 ticks (leglentebb, legalacsonyabb toltesi valsz.)"
                 }
             ],
+            "signal_params": {
+                "z_threshold": 3.5,
+                "min_time_between_signals_ms": 8000,
+                "returns_window_ms": 120000,
+                "comment": "3.5 sigma = ritkabb de tisztabb jel; 8s debounce; 2 perces ablak"
+            },
             "execution": {
                 "post_only": true,
                 "time_in_force": "GTX",
@@ -84,7 +91,7 @@
                 "wait_for_fill_ms": 15000,
                 "cancel_unfilled_after_ms": 15000,
                 "partial_fill_min_pct": 0.3,
-                "partial_fill_min_absolute_shares": 5
+                "partial_fill_min_absolute_shares": 0.001
             },
             "no_chase_discipline": {
                 "never_requote_higher": true,

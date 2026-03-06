@@ -119,22 +119,25 @@ class SignalEngine:
         self.last_signal_time: float = 0.0
         # Árfolyam történet (ms, price)
         self.price_history: Deque[Tuple[float, float]] = deque(maxlen=500)
-        
-        # Dinamikus Z-score alapú triggerhez
-        # Az elmúlt ~60s hozamait tartjuk egy mozgó ablakban
-        self.returns_window_ms = 60_000
+
+        # --- Paraméterek betöltése a strategy_maker.json-ból ---
+        _sig_cfg = (
+            config._config
+            .get("order_management", {})
+            .get("entry", {})
+            .get("signal_params", {})
+        )
+        self.returns_window_ms: float = float(_sig_cfg.get("returns_window_ms", 120_000))
+        self.z_threshold: float = float(_sig_cfg.get("z_threshold", 3.5))
+        self.min_time_between_signals_ms: float = float(_sig_cfg.get("min_time_between_signals_ms", 8_000))
+        # --------------------------------------------------------
+
         # (timestamp_ms, r_t) párok
-        self.returns: Deque[Tuple[float, float]] = deque(maxlen=1200)
-        # Z-score paraméterek
-        self.z_threshold = 2.5
+        self.returns: Deque[Tuple[float, float]] = deque(maxlen=2400)  # 2x buffer for 2min window
         self.Z_WARMUP = 150  # Min. adatpont a stabil szóráshoz
 
         # EWMV – Exponentially Weighted Moving Variance
-        # Az alfa meghatározza a "felejtési" sebességet:
-        #   alfa = 0.05  → ~20 tick (~2s) – túl rövid, lassú esnél "normálisnak" látja
-        #   alfa = 0.01  → ~100 tick (~10s) – stabil viszonyítási alap (mentor javaslat)
-        #   alfa = 0.005 → ~200 tick (~20s) – még stabilabb, lassabb reakciójú
-        # α = 0.01 választva: nem "felejt" el egy 5-10 másodperces lassabb esnél sem
+        # α = 0.01: ~100 tick (~10s) felejtési sebesség – stabil viszonyítási alap
         self._ewm_alpha: float = 0.01
         self._ewm_mean: float = 0.0
         self._ewm_var: float = 0.0
@@ -144,7 +147,13 @@ class SignalEngine:
         self.min_change_pct = 0.12
         self.max_change_pct = 0.20
         self.max_duration_ms = 1000
-        self.min_time_between_signals_ms = 3000
+
+        logger.info(
+            f"📡 SignalEngine init: z_threshold={self.z_threshold}, "
+            f"debounce={self.min_time_between_signals_ms}ms, "
+            f"window={self.returns_window_ms/1000:.0f}s"
+        )
+
     
     def check_auto_halt(self) -> bool:
         # TODO: Hyperliquid L2 trade info based auto-halt logic can be placed here

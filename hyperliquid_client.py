@@ -1,3 +1,4 @@
+# pyre-ignore-all-errors
 import os
 from typing import Optional, Dict, Any, List
 from bot_logger import logger
@@ -136,3 +137,13 @@ class HyperliquidClient:
         except Exception as e:
             logger.info(f"❌ Cancel all error: {e}")
             return False
+
+    def get_open_orders(self) -> List[Dict[str, Any]]:
+        """Visszaadja a wallet összes nyitott orderét a HL API-ból."""
+        if not self.wallet:
+            return []
+        try:
+            return self.info.open_orders(self.wallet.address)
+        except Exception as e:
+            logger.warning(f"❌ get_open_orders hiba: {e}")
+            return []

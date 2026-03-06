@@ -288,27 +288,39 @@ class OrderManager:
         tick_size: float,
         sigma_r: float,
     ) -> List[Tuple[int, float, float]]:
-        # Fetch multiplier from config (e.g. 1.5)
         entry_cfg = config._config.get("order_management", {}).get("entry", {})
         sigma_multiplier = entry_cfg.get("sigma_multiplier", 1.5)
-        
-        slippage_penalty = tick_size * 2 # To prevent ALO rejection, pad by 2 ticks off mid
+        # Minimum gap between levels in ticks (safety against sigma_r -> 0)
+        min_gap_ticks = entry_cfg.get("min_level_gap_ticks", 5)
+
+        # sigma_r floor: never assume less than 0.05% move as baseline volatility
+        SIGMA_R_FLOOR = 0.0005
+        effective_sigma_r = max(sigma_r, SIGMA_R_FLOOR)
+        if sigma_r < SIGMA_R_FLOOR:
+            logger.debug(f"sigma_r {sigma_r:.6f} -> floor applied ({SIGMA_R_FLOOR})")
+
+        # 2 tick slippage buffer to prevent ALO rejection at mid
+        slippage_penalty = tick_size * 2
+
+        direction_mult = -1 if side == "LONG" else 1
 
         ladder: List[Tuple[int, float, float]] = []
         for level_cfg in config.ladder_levels:
             i = level_cfg.level
-            
-            # If LONG (BUY), price should be lower than mid
-            # If SHORT (SELL), price should be higher than mid
-            direction_mult = -1 if side == "LONG" else 1
-            
-            # raw_price = mid +/- (level * \sigma_multiplier * \sigma_r * mid) - penalty
-            # i = level (1, 2, 3...)
-            raw_price = mid_price * (1.0 + (direction_mult * i * sigma_multiplier * sigma_r)) - (direction_mult * slippage_penalty)
+
+            # Vol-based offset (in price units)
+            vol_offset = i * sigma_multiplier * effective_sigma_r * mid_price
+            # Minimum guaranteed offset (i levels * min_gap_ticks ticks each)
+            min_offset = i * min_gap_ticks * tick_size
+            # Use whichever is larger
+            offset = max(vol_offset, min_offset)
+
+            raw_price = mid_price + (direction_mult * (-offset)) - (direction_mult * slippage_penalty)
             price = config.round_to_tick(raw_price, tick_size)
             ladder.append((level_cfg.level, price, level_cfg.size_pct))
 
         return ladder
+
     
     def get_ladder_age_ms(self) -> float:
         if not self.active_ladder:
