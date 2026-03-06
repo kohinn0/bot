@@ -149,75 +149,68 @@ class SignalEngine:
         # TODO: Hyperliquid L2 trade info based auto-halt logic can be placed here
         return False
 
-    def update(self) -> Optional[PriceMove]:
+    def update(self) -> Tuple[Optional[str], dict]:
         """
-        Check for signals. Call this frequently (every ~100ms).
-        
+        Jel frissítés – hívd minden ~10-100ms-ban.
+
         Returns:
-            PriceMove if signal detected, None otherwise
+            (direction, metadata) tuple, ahol:
+              direction: "BEARISH" | "BULLISH" | None (ha nincs jel)
+              metadata:  {z_score, velocity_pct_sec, duration_ms, pct_change}
         """
         current_price = self.hl_feed.get_current_price()
         if not current_price:
-            return None
-        
+            return None, {}
+
         now = time.time() * 1000  # milliseconds
 
-        # Frissítjük az árfolyam- és hozamtörténetet, kiszámoljuk az aktuális Z-score-t
         r_t, z_t = self._update_returns_and_z(now, current_price)
-        
+
         # Debounce – túl sűrű jelek tiltása
         if now - self.last_signal_time < self.min_time_between_signals_ms:
-            return None
-        
-        # 1) DINAMIKUS Z-SCORE TRIGGER
-        # Bearish: Z_t < -k  (anomális esés)
+            return None, {}
+
+        def _build_meta(direction: str, r_t: float, z_t: float, duration_ms: float) -> dict:
+            velocity = abs(r_t * 1000.0 / max(duration_ms, 1)) * 100.0  # %/s becsült
+            return {
+                "z_score": round(z_t, 4),
+                "velocity_pct_sec": round(velocity, 5),
+                "duration_ms": round(duration_ms, 1),
+                "pct_change": round(r_t * 100.0, 4),
+                "direction": direction,
+            }
+
+        def _get_duration() -> Tuple[float, float, float]:
+            if len(self.price_history) >= 2:
+                ots, op = self.price_history[-2]
+                nts, np_ = self.price_history[-1]
+                return ots, op, nts - ots
+            return now - 1000, current_price, 1.0
+
+        # 1) Z-SCORE TRIGGER
         if z_t is not None and z_t <= -self.z_threshold:
             self.last_signal_time = now
-            pct_change = (r_t or 0.0) * 100.0
-            # A legutóbbi két ár alapján becsült start/end
-            if len(self.price_history) >= 2:
-                oldest_ts, oldest_price = self.price_history[-2]
-                newest_ts, newest_price = self.price_history[-1]
-            else:
-                oldest_ts, oldest_price = now - 1000, current_price
-                newest_ts, newest_price = now, current_price
-            duration_ms = newest_ts - oldest_ts
-            return PriceMove(
-                direction="BEARISH",
-                start_price=oldest_price,
-                end_price=newest_price,
-                pct_change=pct_change,
-                duration_ms=duration_ms,
-                timestamp=now,
-            )
+            _, _, dur = _get_duration()
+            return "BEARISH", _build_meta("BEARISH", r_t or 0.0, z_t, dur)
 
-        # Bullish: Z_t > +k  (anomális emelkedés)
         if z_t is not None and z_t >= self.z_threshold:
             self.last_signal_time = now
-            pct_change = (r_t or 0.0) * 100.0
-            if len(self.price_history) >= 2:
-                oldest_ts, oldest_price = self.price_history[-2]
-                newest_ts, newest_price = self.price_history[-1]
-            else:
-                oldest_ts, oldest_price = now - 1000, current_price
-                newest_ts, newest_price = now, current_price
-            duration_ms = newest_ts - oldest_ts
-            return PriceMove(
-                direction="BULLISH",
-                start_price=oldest_price,
-                end_price=newest_price,
-                pct_change=pct_change,
-                duration_ms=duration_ms,
-                timestamp=now,
-            )
-        
-        # 2) Fallback: régi, fix %-os trigger (ha még nincs elég adat a Z-score-hoz)
-        signal = self._detect_move(now, current_price)
-        
-        if signal:
+            _, _, dur = _get_duration()
+            return "BULLISH", _build_meta("BULLISH", r_t or 0.0, z_t, dur)
+
+        # 2) Fallback: fix %-os trigger (warm-up alatt nincs Z-score)
+        move = self._detect_move(now, current_price)
+        if move:
             self.last_signal_time = now
-        
-        return signal
+            return move.direction, {
+                "z_score": 0.0,
+                "velocity_pct_sec": abs(move.pct_change / max(move.duration_ms / 1000.0, 0.001)),
+                "duration_ms": move.duration_ms,
+                "pct_change": move.pct_change,
+                "direction": move.direction,
+            }
+
+        return None, {}
 
     def _update_returns_and_z(
         self,
@@ -365,16 +358,17 @@ if __name__ == "__main__":
 
     # Monitor for 30 seconds
     for i in range(300):  # 30 seconds at 100ms intervals
-        signal = engine.update()
-        
-        if signal:
+        direction, meta = engine.update()
+
+        if direction:
             logger.info(f"🚨 SIGNAL DETECTED!")
-            logger.info(f"   Direction: {signal.direction}")
-            logger.info(f"   Change: {signal.pct_change:+.3f}%")
-            logger.info(f"   Duration: {signal.duration_ms:.0f}ms")
-            logger.info(f"   Price: ${signal.start_price:,.2f} → ${signal.end_price:,.2f}")
+            logger.info(f"   Direction: {direction}")
+            logger.info(f"   Z-score:   {meta.get('z_score', 0):.4f}")
+            logger.info(f"   Change:    {meta.get('pct_change', 0):+.3f}%")
+            logger.info(f"   Duration:  {meta.get('duration_ms', 0):.0f}ms")
+            logger.info(f"   Velocity:  {meta.get('velocity_pct_sec', 0):.4f}%/s")
 
         time.sleep(0.1)  # 100ms
-    
+
     hl.stop()
     logger.info("✅ Test complete")

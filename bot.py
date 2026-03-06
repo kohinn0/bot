@@ -182,14 +182,13 @@ class SebessegBot:
     
     def _armed_tick(self):
         """Jelzések figyelése és Ladder elhelyezése"""
-        signal, metadata = self.signal_engine.update()
-        
-        # Ticks only happen when queue yields items inside signal engine, but we continuously poll
+        signal, metadata = self.signal_engine.update()  # mindig Tuple[Optional[str], dict]
+
         if not signal:
             return
-            
-        logger.info(f"⚡ JELZÉS ÉRKEZETT: {signal} (Z-Score: {metadata.get('z_score', 0):.2f})")
-        
+
+        logger.info(f"⚡ JELZÉS ÉRKEZETT: {signal} (Z-Score: {metadata.get('z_score', 0):.4f})")
+
         # Toxic Flow Check!
         v_pct = metadata.get("velocity_pct_sec", 0)
         dur = metadata.get("duration_ms", 0)
