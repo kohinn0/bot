@@ -32,7 +32,7 @@ class PolymarketWS:
         self.token_ids = token_ids
         self.ws_url = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
         self.is_running = False
-        self.thread = None
+        self.thread: Optional[threading.Thread] = None
         self.halt_signal = False
         
         # Volume tracking map {token_id: [(timestamp, size_added)]}
@@ -44,7 +44,8 @@ class PolymarketWS:
         self.is_running = True
         self.thread = threading.Thread(target=self._run_loop, daemon=True)
         self.thread.start()
-        
+
+
     def stop(self):
         self.is_running = False
         if self.thread:
@@ -115,7 +116,7 @@ class SignalEngine:
     
     def __init__(self, hl_feed: HyperliquidFeed):
         self.hl_feed = hl_feed
-        self.last_signal_time = 0
+        self.last_signal_time: float = 0.0
         # Árfolyam történet (ms, price)
         self.price_history: Deque[Tuple[float, float]] = deque(maxlen=500)
         

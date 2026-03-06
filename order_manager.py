@@ -328,12 +328,12 @@ class ExitManager:
         
         self.tp_order_id = None
         
-    def close_position_at_market(self):
+    def close_position_at_market(self) -> bool:
         if self.dry_run:
             logger.info("🧪 [DRY RUN] Zárás piaci áron/simulált P&L elérése...")
             self.cancel_exit_orders()
             self._reset_state()
-            return
+            return True
 
         self.cancel_exit_orders()
         
@@ -362,7 +362,7 @@ class ExitManager:
         if not state_success:
             logger.error("⚠️ Nem futtatható le a Market Close megerősített méret hiányában. Manuális beavatkozás szükséges!")
             self._reset_state()
-            return
+            return False
             
         if abs(actual_size) > 0:
             is_buy = actual_size < 0  # if short, we buy to close
@@ -391,7 +391,8 @@ class ExitManager:
              logger.info("ℹ️ Nincs nyitott pozíció a hálózaton. Nincs mit zárni.")
              
         self._reset_state()
-        
+        return True
+
     def _reset_state(self):
         self.entry_price = None
         self.entry_time = None
