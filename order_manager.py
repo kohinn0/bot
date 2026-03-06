@@ -346,7 +346,8 @@ class ExitManager:
         position_size: float,
         current_spread: float,
         tick_size: float,
-        toxicity_score: float = 0.0
+        toxicity_score: float = 0.0,
+        sigma_r: float = 0.0
     ) -> bool:
         is_toxic = toxicity_score >= 0.7
         
@@ -355,9 +356,21 @@ class ExitManager:
         
         if is_toxic:
             tp_price = entry_price + (tp_direction_mult * tick_size)
-            logger.info(f"   ⚠️ TOXIKUS PIAC (Score: {toxicity_score:.2f}) -> FAST TP aktiválva. Célár: ${tp_price:.3f}")
+            logger.info(f"   ⚠️ TOXIKUS PIAC -> FAST TP aktiválva. Célár: ${tp_price:.3f}")
         else:
-            profit = max(config.min_profit_ticks * tick_size, min(current_spread * config.spread_multiplier, config.max_profit_ticks * tick_size))
+            # 1. Spread alapú profit cél (boring piacokra kiváló)
+            spread_profit = current_spread * config.spread_multiplier
+            # 2. Volatilitás alapú cél (ha nagy a mozgás, ne zárjuk el a trend felét gombokért)
+            vol_profit = sigma_r * entry_price * 0.8 
+            
+            # Választjuk az optimistábbat, hiszen ha nagy a vola, többet mozog az ár is
+            best_profit_target = max(spread_profit, vol_profit)
+            
+            # Korlátozzuk a min/max tickekkel (ne legyen se too small, se irreális)
+            profit = max(
+                config.min_profit_ticks * tick_size, 
+                min(best_profit_target, config.max_profit_ticks * tick_size)
+            )
             tp_price = entry_price + (tp_direction_mult * profit)
             
         tp_price = config.round_to_tick(tp_price, tick_size)

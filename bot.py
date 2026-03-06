@@ -247,16 +247,24 @@ class SebessegBot:
         self.trade_params["target_side"] = side
         self.trade_params["sz_usd"] = target_usd
         
-        # Inventory Skew Logic: ha 2x vesztes ugyanolyan iranyon, dupla tavol rakja a letrat
+        # Inventory Skew Logic: védekezés trend esetén
         skew_penalty = 1.0
         if len(self.inventory_history) >= 2:
             last_2 = self.inventory_history[-2:]
-            if last_2[0][0] == side and last_2[1][0] == side:
-                if not last_2[0][1] and not last_2[1][1]:
+            # Ha az utolsó két trade ugyanaz az irány volt és mindkettő bukott
+            if last_2[0][0] == last_2[1][0] and not last_2[0][1] and not last_2[1][1]:
+                losing_side = last_2[0][0]
+                if side == losing_side:
+                    # Ugyanabba a vesztő irányba akar belépni -> toljuk el 2x távolabbra (védekezés)
                     skew_penalty = 2.0
-                    logger.warning(f"INVENTORY SKEW: Utolso 2 {side} trade veszteseg volt. Szintek 2x tavolabbra tolva!")
+                    logger.warning(f"🛡️ INVENTORY SKEW: Utolso 2 {losing_side} bukott. {side} szintek 2x távolabbra tolva!")
+                else:
+                    # Ellenkező (nyerő) irányba akar belépni -> húzzuk közelebb (trendkövetés)
+                    skew_penalty = 0.5
+                    logger.warning(f"📈 INVENTORY SKEW: Utolso 2 {losing_side} bukott. Következő {side} könnyebben töltődik (0.5x táv)!")
 
         base_sigma_r = metadata.get('sigma_r') if metadata.get('sigma_r') is not None else (metadata.get('pct_change', 0) / 100.0)
+        self.trade_params["sigma_r"] = base_sigma_r  # Elmentjük a TP-nek
 
         ladder = self.order_manager.place_ladder(
             coin=self.active_coin,
@@ -347,7 +355,8 @@ class SebessegBot:
             position_size=position_size,
             current_spread=spread,
             tick_size=self.trade_params['tick_size'],
-            toxicity_score=toxicity
+            toxicity_score=toxicity,
+            sigma_r=self.trade_params.get("sigma_r", 0.0)
         )
         
         if placed:
