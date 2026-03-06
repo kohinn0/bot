@@ -171,7 +171,7 @@ class SignalEngine:
         if now - self.last_signal_time < self.min_time_between_signals_ms:
             return None, {}
 
-        def _build_meta(direction: str, r_t: float, z_t: float, duration_ms: float) -> dict:
+        def _build_meta(direction: str, r_t: float, z_t: float, duration_ms: float, sigma_r: float = 0.0) -> dict:
             velocity = abs(r_t * 1000.0 / max(duration_ms, 1)) * 100.0  # %/s becsült
             return {
                 "z_score": round(z_t, 4),
@@ -179,6 +179,7 @@ class SignalEngine:
                 "duration_ms": round(duration_ms, 1),
                 "pct_change": round(r_t * 100.0, 4),
                 "direction": direction,
+                "sigma_r": sigma_r
             }
 
         def _get_duration() -> Tuple[float, float, float]:
@@ -188,16 +189,19 @@ class SignalEngine:
                 return ots, op, nts - ots
             return now - 1000, current_price, 1.0
 
+        # Szórást kivesszük
+        sigma_r = math.sqrt(max(self._ewm_var, 1e-10))
+        
         # 1) Z-SCORE TRIGGER
         if z_t is not None and z_t <= -self.z_threshold:
             self.last_signal_time = now
             _, _, dur = _get_duration()
-            return "BEARISH", _build_meta("BEARISH", r_t or 0.0, z_t, dur)
+            return "BEARISH", _build_meta("BEARISH", r_t or 0.0, z_t, dur, sigma_r)
 
         if z_t is not None and z_t >= self.z_threshold:
             self.last_signal_time = now
             _, _, dur = _get_duration()
-            return "BULLISH", _build_meta("BULLISH", r_t or 0.0, z_t, dur)
+            return "BULLISH", _build_meta("BULLISH", r_t or 0.0, z_t, dur, sigma_r)
 
         # 2) Fallback: fix %-os trigger (warm-up alatt nincs Z-score)
         move = self._detect_move(now, current_price)

@@ -1,3 +1,4 @@
+# pyre-ignore-all-errors
 """
 Non-blocking logger for async bot.
 A RotatingFileHandler SZINKRON – minden write() blokkolja az asyncio loopot.

@@ -23,6 +23,8 @@ class SebessegBot:
         # Risk Management - Hyperliquid Perpetual specific (LONG / SHORT margin)
         self.daily_pnl = 0.0
         self.consecutive_losses = 0
+        # Trade history: list of (side, was_profitable). Max 20 entries.
+        self.inventory_history = []  # [(str, bool)]
         
         # Kliensek & Engine-ek
         self.hl_client: Any = None
@@ -36,6 +38,8 @@ class SebessegBot:
         self.last_tick_time = 0.0
         self.min_tick_interval = 0.025  # 25ms (40 tick/s) – elég gyors, nem terheli az I/O-t
         self._last_stale_warn: float = 0.0   # log throttle: max 1 stale warning / 5s
+        
+        self.cached_account_value: float = 1000.0  # Fallback fallback
         
         self.trade_params = {
             "current_mid": 0.0,
@@ -56,6 +60,11 @@ class SebessegBot:
         # Cancel any leftover open orders from previous crash
         if not self.dry_run:
             self.hl_client.cancel_all_orders()
+            # Fetch real account value
+            ac_val = self.hl_client.get_account_value()
+            if ac_val > 0:
+                self.cached_account_value = ac_val
+                logger.info(f"💰 Induló Egyenleg: ${self.cached_account_value:.2f}")
 
         # Update Leverage
         lev_cfg = config.risk_management.leverage
@@ -217,8 +226,16 @@ class SebessegBot:
         side = "SHORT" if signal == "BULLISH" else "LONG"
         mid_price = self.feed_engine.get_current_price()
         
-        # Max Size Limit
-        target_usd = config.risk_management.max_notional_usd_per_trade
+        # Max Size Limit & Dynamic Percentage Calculation
+        pct = config.risk_management.balance_pct_per_trade
+        if pct and pct > 0:
+            target_usd = self.cached_account_value * pct
+            # Constrain to hard limit if necessary
+            if target_usd > config.risk_management.max_notional_usd_per_trade:
+                logger.info(f"⚠️ Dinamikus méret (${target_usd:.2f}) túllépi a maximumot (${config.risk_management.max_notional_usd_per_trade}), korlátozva.")
+                target_usd = config.risk_management.max_notional_usd_per_trade
+        else:
+            target_usd = config.risk_management.max_notional_usd_per_trade
         
         logger.info(f"🎯 LÉTRA INDÍTÁSA:")
         logger.info(f"   Irány: {side} {self.active_coin}")
@@ -230,12 +247,24 @@ class SebessegBot:
         self.trade_params["target_side"] = side
         self.trade_params["sz_usd"] = target_usd
         
+        # Inventory Skew Logic: ha 2x vesztes ugyanolyan iranyon, dupla tavol rakja a letrat
+        skew_penalty = 1.0
+        if len(self.inventory_history) >= 2:
+            last_2 = self.inventory_history[-2:]
+            if last_2[0][0] == side and last_2[1][0] == side:
+                if not last_2[0][1] and not last_2[1][1]:
+                    skew_penalty = 2.0
+                    logger.warning(f"INVENTORY SKEW: Utolso 2 {side} trade veszteseg volt. Szintek 2x tavolabbra tolva!")
+
+        base_sigma_r = metadata.get('sigma_r') if metadata.get('sigma_r') is not None else (metadata.get('pct_change', 0) / 100.0)
+
         ladder = self.order_manager.place_ladder(
             coin=self.active_coin,
             side=side,
             mid_price=mid_price,
             total_usd_notional=target_usd,
-            tick_size=self.trade_params["tick_size"]
+            tick_size=self.trade_params["tick_size"],
+            sigma_r=base_sigma_r * skew_penalty
         )
         
         if ladder:
@@ -257,41 +286,54 @@ class SebessegBot:
             logger.info("❌ Létra elhelyezése SIKERTELEN. Vissza ARMED állapotba.")
 
     def _ladder_placed_tick(self):
-        """Várakozás a részleges / teljes fill-re"""
+        """Varakozas a reszleges / teljes fill-re"""
         
-        has_fills, filled_size, avg_price = self.order_manager.check_fills()
-        
+        tick_size = self.trade_params["tick_size"]
+        current_mid = self.feed_engine.get_current_price()
+
+        # Ghost fill check (dry run) with trade-through logic
+        if self.dry_run and current_mid:
+            has_fills, filled_size, avg_price = self.order_manager.check_virtual_fills(current_mid, tick_size)
+        else:
+            has_fills, filled_size, avg_price = self.order_manager.check_fills()
+
+        # --- Smart Repricing: ha az ar elmozdult tol a letratol, torolje es ujrarad ---
+        DRIFT_TICKS = 5
+        if current_mid and not has_fills:
+            placed_mid = self.trade_params.get("current_mid", current_mid)
+            drift = abs(current_mid - placed_mid)
+            if drift > (DRIFT_TICKS * tick_size):
+                logger.info(f"PING-PONG REPRICE: Ar {drift:.2f} USD-t mozdult el a letratol (>{DRIFT_TICKS} tick). Torles es ujraindulas.")
+                self.order_manager.cancel_ladder()
+                self.state = "ARMED"
+                return
+
         age_ms = self.order_manager.get_ladder_age_ms()
         if age_ms > config.wait_for_fill_ms:
-            # IDŐTÚLLÉPÉS
+            # TIMEOUTS
             if has_fills:
-                logger.info(f"⏳ LÉTRA IDŐTÚLLÉPÉS, de VOLT RÉSZLEGES FILL. Törlés és EXITING ciklus.")
+                logger.info(f"LETRA IDOTULLEPES, de VOLT RESZLEGES FILL. Torles es EXITING ciklus.")
                 self.order_manager.cancel_ladder()
-                # Pass data to exit manager
                 self.state = "EXITING"
-                # Call immediately to setup TP
                 self._setup_take_profit(filled_size, avg_price)
             else:
-                logger.info(f"⏳ LÉTRA IDŐTÚLLÉPÉS ({age_ms:.0f}ms). NO EDGE SKIP. Törlés.")
+                logger.info(f"LETRA IDOTULLEPES ({age_ms:.0f}ms). NO EDGE SKIP. Torles.")
                 self.order_manager.cancel_ladder()
-                self.state = "ARMED"  # Vissza vadászni
+                self.state = "ARMED"
             return
 
-        # Ha MINDEN kitöltődött a MAX TTR elérése előtt...
-        # HL-nél lehet gyors is.
+        # Ha kitoltodott a MAX TTR elott
         if has_fills:
-            # OCO Behavior: on_any_ladder_fill = cancel_all_other
-            # Strategy requests to cancel unfilled!
             if config._config['order_management']['oco_behavior']['on_any_ladder_fill'] == "cancel_all_other_ladder_levels":
-                logger.info("⚡ OCO TRIGGERED: Canceled resting levels because we got a fill!")
+                logger.info("OCO TRIGGERED: Canceled resting levels because we got a fill!")
                 self.order_manager.cancel_ladder()
                 self._setup_take_profit(filled_size, avg_price)
                 self.state = "IN_POSITION"
-            
+        
 
     def _setup_take_profit(self, position_size: float, avg_price: float):
         # 1 lépés: Spread kinyerése
-        spread = 0.0 # TODO: Feed-ben most nincs spread proxy, fix tick size * x
+        spread = self.feed_engine.get_current_spread() or (self.trade_params['tick_size'] * 2)
         
         # Optional: Toxicity
         toxicity = 0.0 # self.signal_engine.last_sig_score ha lenne
@@ -383,6 +425,16 @@ class SebessegBot:
                 except Exception:
                     pass
             
+            # Inventory History frissites (utolso 20 trade)
+            try:
+                trade_side = str(self.exit_manager.side or self.trade_params.get("target_side", "LONG"))
+                was_win = reason == "TAKE_PROFIT_REACHED"
+                self.inventory_history.append((trade_side, was_win))
+                if len(self.inventory_history) > 20:
+                    self.inventory_history.pop(0)
+            except Exception:
+                pass
+            
             self._start_cooldown(reason)
             
 
@@ -415,6 +467,22 @@ class SebessegBot:
             self.state = "ARMED"
             # Signal Engine-ben debouncer bypass vagy reset
             self.signal_engine.last_trade_timestamp = time.time()
+            if not self.dry_run:
+                asyncio.create_task(self._update_account_value_async())
+
+    async def _update_account_value_async(self):
+        """Aszinkron háttér frissítés az egyenleghez (hogy ne akassza az event loop-ot egy API HTTP request)"""
+        def _fetch():
+            return self.hl_client.get_account_value()
+        
+        try:
+            loop = asyncio.get_running_loop()
+            ac_val = await loop.run_in_executor(None, _fetch)
+            if ac_val > 0:
+                self.cached_account_value = ac_val
+                logger.debug(f"💰 Egyenleg frissítve a háttérben: ${self.cached_account_value:.2f}")
+        except Exception as e:
+            logger.warning(f"Failed to update account value: {e}")
 
     def _recovering_tick(self):
         """Hálózati szakadás utáni talpraállás és ellenőrzés"""

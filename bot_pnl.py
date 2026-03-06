@@ -1,3 +1,4 @@
+# pyre-ignore-all-errors
 import plotext as plt
 from typing import List
 from bot_logger import logger

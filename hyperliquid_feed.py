@@ -46,6 +46,7 @@ class HyperliquidFeed:
         
         # Állapotok
         self._current_price: Optional[float] = None
+        self._current_spread: Optional[float] = None
         self._last_update: float = 0
         self._last_tick: Optional[TickEvent] = None
         
@@ -133,6 +134,7 @@ class HyperliquidFeed:
                 best_bid = float(levels[0][0]["px"])
                 best_ask = float(levels[1][0]["px"])
                 mid_price = (best_bid + best_ask) / 2.0
+                spread = best_ask - best_bid
                 
                 # Valós latency (NTP kompenzáció itt nincs a HL saját timestampjeit használjuk feltehetőleg)
                 latency_ms = local_time_ms - event_time_ms if event_time_ms else 0
@@ -146,6 +148,7 @@ class HyperliquidFeed:
                 
                 # State frissítés – csak az async loop írja, nincs lock szükséges
                 self._current_price = mid_price
+                self._current_spread = spread
                 self._last_update = local_time_ms / 1000
                 self._last_tick = tick
 
@@ -191,6 +194,22 @@ class HyperliquidFeed:
                 levels = resp.json().get("levels", [])
                 if len(levels) == 2 and levels[0] and levels[1]:
                     return (float(levels[0][0]["px"]) + float(levels[1][0]["px"])) / 2.0
+        except Exception:
+            pass
+        return None
+
+    def get_current_spread(self) -> Optional[float]:
+        """Aktuális spread (Ask - Bid)"""
+        if self._current_spread and (time.time() - self._last_update) < 5:
+            return self._current_spread
+            
+        # Fallback
+        try:
+            resp = self.session.post(HL_REST_URL + "/info", json={"type": "l2Book", "coin": self.coin}, timeout=2)
+            if resp.status_code == 200:
+                levels = resp.json().get("levels", [])
+                if len(levels) == 2 and levels[0] and levels[1]:
+                    return float(levels[1][0]["px"]) - float(levels[0][0]["px"])
         except Exception:
             pass
         return None

@@ -159,9 +159,12 @@ class OrderManager:
         self.active_ladder = ladder
         return ladder
     
-    def check_virtual_fills(self, current_mid: float) -> Tuple[bool, float, float]:
+    def check_virtual_fills(self, current_mid: float, tick_size: float = 0.01) -> Tuple[bool, float, float]:
         """
         Dry Run módban szimulálja a kitöltést a WebSocket ár alapján.
+        GHOST FILL (Trade-Through logika): nem elég "megérinteni" (<=), 
+        hanem teljesen át kell rajta mennie az árnak legalább 1 tickkel, 
+        hogy azt feltételezzük, a mi rendelésünk a sorban is teljesült.
         """
         if not self.dry_run or not self.active_ladder:
             return (False, 0.0, 0.0)
@@ -174,17 +177,18 @@ class OrderManager:
 
         for level in ladder.orders:
             if not level.filled:
-                # LONG esetén: ha az ár lemegy a limitig vagy alá -> FILL
-                if side == "LONG" and current_mid <= level.price:
+                # LONG esetén: ha az ár LEMEGY a limit alá legalább 1 tickkel -> FILL
+                # TRADE-THROUGH LOGIC (Queue simulation without real L2 trades)
+                if side == "LONG" and current_mid <= (level.price - tick_size):
                     level.filled = True
                     level.filled_size = level.size
-                    logger.info(f"👻 GHOST FILL: LONG szint kitöltve @ ${level.price:.2f}")
+                    logger.info(f"👻 GHOST FILL: LONG szint kitöltve (Trade-through) @ ${level.price:.2f} (Mid: ${current_mid:.2f})")
                 
-                # SHORT esetén: ha az ár felmegy a limitig vagy fölé -> FILL
-                elif side == "SHORT" and current_mid >= level.price:
+                # SHORT esetén: ha az ár FELMEGY a limit fölé legalább 1 tickkel -> FILL
+                elif side == "SHORT" and current_mid >= (level.price + tick_size):
                     level.filled = True
                     level.filled_size = level.size
-                    logger.info(f"👻 GHOST FILL: SHORT szint kitöltve @ ${level.price:.2f}")
+                    logger.info(f"👻 GHOST FILL: SHORT szint kitöltve (Trade-through) @ ${level.price:.2f} (Mid: ${current_mid:.2f})")
 
             if level.filled:
                 filled_levels += 1
@@ -204,7 +208,7 @@ class OrderManager:
             return (False, 0.0, 0.0)
         
         if self.dry_run:
-            # A szimuláció hívását a fő bot hurok vezérli (check_virtual_fills)
+            # A szimuláció hívását a fő bot hurok vezérli (check_virtual_fills) közvetlenül a paraméterekkel
             return (False, 0.0, 0.0)
         
         total_filled: float = 0.0
@@ -277,7 +281,10 @@ class OrderManager:
         tick_size: float,
         sigma_r: float,
     ) -> List[Tuple[int, float, float]]:
-        gamma = 1.0  
+        # Fetch multiplier from config (e.g. 1.5)
+        entry_cfg = config._config.get("order_management", {}).get("entry", {})
+        sigma_multiplier = entry_cfg.get("sigma_multiplier", 1.5)
+        
         slippage_penalty = tick_size * 2 # To prevent ALO rejection, pad by 2 ticks off mid
 
         ladder: List[Tuple[int, float, float]] = []
@@ -288,7 +295,9 @@ class OrderManager:
             # If SHORT (SELL), price should be higher than mid
             direction_mult = -1 if side == "LONG" else 1
             
-            raw_price = mid_price * (1.0 + (direction_mult * i * gamma * sigma_r)) - (direction_mult * slippage_penalty)
+            # raw_price = mid +/- (level * \sigma_multiplier * \sigma_r * mid) - penalty
+            # i = level (1, 2, 3...)
+            raw_price = mid_price * (1.0 + (direction_mult * i * sigma_multiplier * sigma_r)) - (direction_mult * slippage_penalty)
             price = config.round_to_tick(raw_price, tick_size)
             ladder.append((level_cfg.level, price, level_cfg.size_pct))
 

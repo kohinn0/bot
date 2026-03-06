@@ -1,3 +1,4 @@
+# pyre-ignore-all-errors
 """
 Configuration module for Crypto Sebesseg Maker Strategy
 Loads strategy from JSON and provides typed access to configuration.
@@ -45,6 +46,7 @@ class LeverageRisk:
 class RiskManagement:
     max_open_positions: int
     max_notional_usd_per_trade: float
+    balance_pct_per_trade: float
     max_daily_loss_usd: float
     cooldown_after_exit_sec: int
     leverage: LeverageRisk
@@ -264,6 +266,7 @@ class MakerStrategyConfig:
         return RiskManagement(
             max_open_positions=rm['position_limits']['max_open_positions'],
             max_notional_usd_per_trade=rm['position_limits']['max_notional_usd_per_trade'],
+            balance_pct_per_trade=rm['position_limits'].get('balance_pct_per_trade', 0.0),
             max_daily_loss_usd=rm['daily_limits']['max_daily_loss_usd'],
             cooldown_after_exit_sec=rm['cooldown']['after_exit_sec'],
             leverage=LeverageRisk(

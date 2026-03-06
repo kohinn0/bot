@@ -76,6 +76,21 @@ class HyperliquidClient:
             logger.info(f"❌ User state lekérdezési hiba: {e}")
             return None
 
+    def get_account_value(self) -> float:
+        """
+        Retrieves the total account value (margin + unrealized PnL) from the Hyperliquid API.
+        Returns 0.0 if not available.
+        """
+        state = self.get_user_state()
+        if not state:
+            return 0.0
+        try:
+            # Margin summary contains total margin value
+            return float(state.get("marginSummary", {}).get("accountValue", 0.0))
+        except Exception as e:
+            logger.info(f"❌ Account value feldolgozási hiba: {e}")
+            return 0.0
+
     def update_leverage(self, coin: str, leverage: int, is_cross: bool = True) -> bool:
         if self.dry_run:
             logger.info(f"🧪 [DRY RUN] HL Leverage -> {coin} {leverage}x ({'Cross' if is_cross else 'Isolated'})")
