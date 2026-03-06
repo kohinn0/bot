@@ -4,6 +4,7 @@ Loads strategy from JSON and provides typed access to configuration.
 """
 import os
 import json
+import math
 from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass
 from pathlib import Path
@@ -167,31 +168,33 @@ class MakerStrategyConfig:
         """
         Calculate ladder prices based on mid price.
         
-        Args:
-            mid_price: Current mid price (bid + ask) / 2
-            side: "BUY" or "SELL"
-            tick_size: Dynamic minimum price increment for the market
-        
-        Returns:
-            List of (level, price, size_pct) tuples
+        A lebegőpontos hibák elkerülése érdekében az árak alapja mindig
+        floor(mid_price / tick_size) * tick_size, azaz a "rugóponthoz"
+        legközelebbi érvényes tick. Az offseteket erre adjuk rá egész tickekben.
         """
         ladder = []
-        
+
+        # Az alap tick: a mid_price-t leráccsükjük az előző tick-re (float hiba-mentes alap)
+        ticks_in_mid = math.floor(mid_price / tick_size)
+        base_price = ticks_in_mid * tick_size
+
+        # Decimals száma a tick_size-ból (pl. tick=1.0 → 0, tick=0.5 → 1, tick=0.1 → 1)
+        str_tick = f"{tick_size:.10f}".rstrip('0')
+        decimals = len(str_tick.split('.')[1]) if '.' in str_tick else 0
+
         for level_cfg in self.ladder_levels:
             offset_ticks = level_cfg.offset_from_mid_ticks
-            
-            # For BUY: negative offset means lower price (mid - 1, mid - 2, etc.)
-            # For SELL: positive offset means higher price (mid + 1, mid + 2, etc.)
+
             if side == "BUY":
-                price = mid_price + (offset_ticks * tick_size)
+                raw_price = base_price + (offset_ticks * tick_size)
             else:  # SELL
-                price = mid_price + (-offset_ticks * tick_size)
-            
-            # Round to tick
-            price = round(price / tick_size) * tick_size
-            
+                raw_price = base_price + (-offset_ticks * tick_size)
+
+            # Utolsó preciziós kerekítés a float artéfaktumok ellen
+            price = round(raw_price, decimals)
+
             ladder.append((level_cfg.level, price, level_cfg.size_pct))
-        
+
         return ladder
     
     @property

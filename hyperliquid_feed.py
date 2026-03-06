@@ -144,15 +144,21 @@ class HyperliquidFeed:
                     latency_ms=latency_ms
                 )
                 
-                # State frissítés
+                # State frissítés – csak az async loop írja, nincs lock szükséges
                 self._current_price = mid_price
                 self._last_update = local_time_ms / 1000
                 self._last_tick = tick
-                
-                # Buffer frissítés a volatilitáshoz
-                with self._lock:
-                    self._buf.append(PricePoint(self._last_update, mid_price))
-                    self._trim(self._last_update)
+
+                # Buffer frissítés a volatilitáshoz.
+                # Lock: a fő szál olvas (_buf), az async loop ír – minimális lock idő
+                self._buf.append(PricePoint(self._last_update, mid_price))
+                # Trim csak szükség esetén (ne futtassuk minden tick-nél)
+                if len(self._buf) > 400:
+                    with self._lock:
+                        cutoff = self._last_update - (VOL_WINDOW_SEC + 5)
+                        while self._buf and self._buf[0].t < cutoff:
+                            self._buf.popleft()
+
                 
                 try:
                     self._tick_queue.put_nowait(tick)
