@@ -34,7 +34,7 @@ class SebessegBot:
         self.cooldown_end_time: float = 0.0
         self.last_trade_timestamp: float = 0.0
         self.last_tick_time = 0.0
-        self.min_tick_interval = 0.01  # 10ms for lower loop stress but fast reaction
+        self.min_tick_interval = 0.025  # 25ms (40 tick/s) – elég gyors, nem terheli az I/O-t
         self._last_stale_warn: float = 0.0   # log throttle: max 1 stale warning / 5s
         
         self.trade_params = {
