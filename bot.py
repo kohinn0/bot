@@ -166,13 +166,15 @@ class SebessegBot:
             self.state = "RECOVERING"
             return True
             
-        # 1. lépcső: Warning (1-3 másodperc között)
-        if staleness > 1.0:
+        # 1. lépcső: Warning (1.5-3 másodperc között)
+        # 1.0s → 1.5s: Tokió VPS-en normál csúcslatencia 1.1-1.3s lehet
+        if staleness > 1.5:
             if self.state == "ARMED":
                 logger.warning(f"⚠️ FEED STALE WARNING ({staleness:.1f}s): Nincs új belépés, várakozás...")
-                return True # Skip the tick, prevent new orders, but don't halt
+                return True  # Skip the tick, prevent new orders, but don't halt
             else:
                 # In LADDER_PLACED or IN_POSITION
+
                 logger.warning(f"⚠️ FEED STALE WARNING ({staleness:.1f}s): Létra/Pozíció aktív, várakozás a helyreállásra mielőtt piacit zárunk...")
                 return False
                 

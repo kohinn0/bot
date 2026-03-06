@@ -59,21 +59,21 @@
             "ladder_config": [
                 {
                     "level": 1,
-                    "offset_from_mid_ticks": -1,
+                    "offset_from_mid_ticks": -2,
                     "size_pct": 0.5,
-                    "comment": "mid - 1 tick (most likely fill, still good price)"
+                    "comment": "mid - 2 ticks: biztonságos távolság, elég közel a középárhoz"
                 },
                 {
                     "level": 2,
-                    "offset_from_mid_ticks": -2,
+                    "offset_from_mid_ticks": -4,
                     "size_pct": 0.3,
-                    "comment": "mid - 2 ticks (better price, moderate fill chance)"
+                    "comment": "mid - 4 ticks: közép szünet, nagyobb paraméterérték"
                 },
                 {
                     "level": 3,
-                    "offset_from_mid_ticks": -3,
+                    "offset_from_mid_ticks": -6,
                     "size_pct": 0.2,
-                    "comment": "mid - 3 ticks (best price, lower fill chance)"
+                    "comment": "mid - 6 ticks: legmélyebb csápképző szint (alacsonyabb valószínűség)"
                 }
             ],
             "execution": {

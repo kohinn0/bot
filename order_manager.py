@@ -63,24 +63,41 @@ class OrderManager:
         total_shares = total_usd_notional / mid_price
         
         orders = []
+        seen_prices: set = set()
         for level, price, size_pct in ladder_prices:
             size_raw = total_shares * size_pct
             size = max(float(config.min_shares), float(size_raw))
-            
-            # HL typically requires specific size step formats (szDecimals). Usually 4 for BTC, 2 for ETH, etc.
-            # Assuming 4 for now until dynamic loading is passed deeply, avoiding round() up to prevent exceeding margin.
+
             szDecimals = 4
             factor = 10 ** szDecimals
             size = math.floor(size * factor) / factor
-            
-            order = LadderOrder(
-                level=level,
-                price=price,
-                size=size,
-            )
+
+            # ── Dedup: ha két szint azonos áron landol (nagy tick_size esetén) ──
+            # Összevonjuk az első szintbe és kihagyjuk a dupát.
+            # Ez megakadályozza, hogy 2 identikus ordert küldjünk az API-ra.
+            if price in seen_prices:
+                # Keressük az első szintet ezen az áron, és növeljük a méretét
+                for existing in orders:
+                    if existing.price == price:
+                        existing.size = math.floor((existing.size + size) * factor) / factor
+                        logger.warning(
+                            f"⚠️ DEDUP: Level {level} (${price:.2f}) ütközik Level {existing.level}-vel! "
+                            f"Összevont méret: {existing.size}"
+                        )
+                        break
+                continue
+            seen_prices.add(price)
+
+            order = LadderOrder(level=level, price=float(price), size=size)
             orders.append(order)
-        
+
+
+        if not orders:
+            logger.error("❌ place_ladder: Nincs érvényes szint az árak dedup után! Visszatérés.")
+            return None
+
         ladder = LadderPosition(
+
             side=side,
             coin=coin,
             orders=orders,
