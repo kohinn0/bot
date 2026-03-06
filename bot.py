@@ -102,21 +102,34 @@ class SebessegBot:
         return True
 
     def run(self):
-        """Fő ciklus (Run Loop)"""
-        logger.info("🟢 BOT INDÍTÁSA - Fő ciklus fut...")
-        
+        """Fő ciklus (Run Loop) – systemd-biztos, SIGTERM-kezelt"""
+        import signal
+
+        def _handle_sigterm(signum, frame):
+            """systemd stop: SIGTERM → clean shutdown"""
+            logger.warning("📨 SIGTERM fogadva (systemd stop). Leállítás...")
+            self.state = "HALT"
+
+        signal.signal(signal.SIGTERM, _handle_sigterm)
+        signal.signal(signal.SIGINT, _handle_sigterm)  # Ctrl+C is
+
+        RUNNING_STATES = {"ARMED", "LADDER_PLACED", "IN_POSITION",
+                          "EXITING", "COOLDOWN", "RECOVERING"}
+
+        logger.info("🟢 BOT INDÍTÁSA - Fő ciklus fut... (leállítás: Ctrl+C vagy systemctl stop)")
+
         try:
-            while self.state != "HALT":
+            while self.state in RUNNING_STATES:
                 now = time.time()
                 if now - self.last_tick_time < self.min_tick_interval:
                     time.sleep(0.001)
                     continue
                 self.last_tick_time = now
-                
+
                 # Biztonsági védelem: Vakság ellenőrzése
                 if self._check_feed_health():
                     continue
-                    
+
                 # --- State Machine ---
                 if self.state == "ARMED":
                     self._armed_tick()
@@ -126,11 +139,15 @@ class SebessegBot:
                     self._in_position_tick()
                 elif self.state == "EXITING":
                     self._exiting_tick()
-        except KeyboardInterrupt:
-            logger.info("\n🛑 JELZÉS (Ctrl+C). Bot leállítása...")
-            self.shutdown()
+                elif self.state == "COOLDOWN":
+                    self._cooldown_tick()
+                elif self.state == "RECOVERING":
+                    self._recovering_tick()
+
         except Exception as e:
-            logger.error(f"💥 KRITIKUS HIBA A FŐ CIKLUSBAN: {e}")
+            logger.error(f"💥 KRITÍKUS HIBA A FŐ CIKLUSBAN: {e}", exc_info=True)
+        finally:
+            # Garantált takarítás – legyen szó HALT-ról, hibáról vagy SIGTERM-ről
             self.shutdown()
 
     def _check_feed_health(self) -> bool:
@@ -427,11 +444,18 @@ if __name__ == "__main__":
     parser.add_argument('--live', action='store_true', help='ÉLES KERESKEDÉS (pénzt kockáztatsz!)')
     args = parser.parse_args()
 
-    # HA --live argumentummal indítod: dry_run=False
     is_dry_run = not args.live
+
+    if is_dry_run:
+        print("🧪 DRY RUN mód aktiválva. Valós orderek NEM kerülnek kiállításra.")
+    else:
+        print("🚨 LIVE mód! Valódi tőke kockán!")
+        print("   töröld a dóbot ha nem vagy biztos: Ctrl+C")
+        import time as _t; _t.sleep(3)  # 3 másodperces fék live módban
 
     bot = SebessegBot(dry_run=is_dry_run)
     if bot.initialize():
         bot.run()
     else:
-        logger.error("❌ INICIALIZÁLÁS SIKERTELEN. KILÉPÉS.")
+        logger.error("❌ INICIALIZÁLÁS SIKERTELEN.")
+        raise SystemExit(1)  # systemd restart-ot triggerel

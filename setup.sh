@@ -99,11 +99,14 @@ Type=simple
 User=$USER
 WorkingDirectory=$BOT_DIR
 EnvironmentFile=$BOT_DIR/.env
+Environment=PYTHONUNBUFFERED=1
 ExecStart=$BOT_DIR/venv/bin/python $BOT_DIR/bot.py
-Restart=on-failure
-RestartSec=15s
+Restart=always
+RestartSec=5s
 StartLimitIntervalSec=120
 StartLimitBurst=5
+KillMode=mixed
+TimeoutStopSec=20
 
 # Naplózás journald-ba (lekérdezés: journalctl -u sebessegbot -f)
 StandardOutput=journal
