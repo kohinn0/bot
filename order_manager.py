@@ -309,6 +309,7 @@ class ExitManager:
         self.position_size: float = 0.0
         self.coin: str = ""
         self.side: str = ""
+        self.target_tp_price: float = 0.0
     
     def place_take_profit(
         self,
@@ -339,6 +340,7 @@ class ExitManager:
         self.position_size = position_size
         self.coin = coin
         self.side = side
+        self.target_tp_price = tp_price
         
         if self.dry_run:
             logger.info(f"🧪 [DRY RUN] Placing TP order (Reduce Only):")
@@ -374,6 +376,23 @@ class ExitManager:
                 
             self.tp_order_id = "ERR_TP"
             return False
+
+    def check_virtual_tp_fill(self, current_mid: float) -> bool:
+        """GHOST FILL check for Take Profit in dry run mode"""
+        if not self.dry_run or not self.target_tp_price:
+            return False
+            
+        # Ha a pozíció LONG volt (side=LONG), akkor a TP a jelenlegi ár FELETT van. El kell érni vagy fölé menni.
+        if self.side == "LONG" and current_mid >= self.target_tp_price:
+            logger.info(f"👻 GHOST FILL: Élő piaci ár ({current_mid}) elérte a LONG TP-t ({self.target_tp_price})!")
+            return True
+            
+        # Ha a pozíció SHORT volt, a TP a jelenlegi ár ALATT van.
+        if self.side == "SHORT" and current_mid <= self.target_tp_price:
+            logger.info(f"👻 GHOST FILL: Élő piaci ár ({current_mid}) elérte a SHORT TP-t ({self.target_tp_price})!")
+            return True
+            
+        return False
             
     def cancel_exit_orders(self):
         if self.tp_order_id and str(self.tp_order_id) != "DRY_TP" and not str(self.tp_order_id).startswith("ERR_"):

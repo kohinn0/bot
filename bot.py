@@ -325,21 +325,63 @@ class SebessegBot:
             pass # TODO: call info.open_orders and see if TP exists
             
         if self.dry_run:
-            # Simulate FAST fill
-            time.sleep(2)
-            time_to_close = True
-            reason = "DRY_RUN_SIMULATION_TP_REACHED"
+            mid = self.feed_engine.get_current_price()
+            if mid and self.exit_manager.check_virtual_tp_fill(mid):
+                time_to_close = True
+                reason = "TAKE_PROFIT_REACHED"
         
         if time_to_close:
             logger.info(f"🚪 EXIT KIVÁLTVA: {reason}")
             
             if reason == "TAKE_PROFIT_REACHED":
-                logger.info("✅ Sikeres TP kilépés a hálózaton!")
-                self.daily_pnl += 5.0 # Dummy
+                logger.info("✅ Sikeres TP kilépés szimulálva/lefutott!")
+                
+                # PnL kalkuláció
+                try:
+                    import bot_pnl
+                    entry = self.exit_manager.entry_price
+                    tp_price = self.exit_manager.target_tp_price
+                    sz = self.exit_manager.position_size
+                    
+                    # Profit: (TP - Entry) * Size
+                    # Ha short, entry > TP, profit = (Entry - TP) * Size
+                    if self.exit_manager.side == "LONG":
+                        profit = (tp_price - entry) * sz
+                    else:
+                        profit = (entry - tp_price) * sz
+                        
+                    # Taker fee szimuláció (0.025% belépő + 0.025% kilépő)
+                    # Elhanyagoljuk, hogy Makerünk Maker-only (0% fee), mert biztosra megyünk (vagy Maker lett, vagy Taker vészhelyzetben)
+                    # A szigorúbb ellenőrzés szerint legyen Taker feltételezve
+                    fee = (entry * sz * 0.00025) + (tp_price * sz * 0.00025)
+                    
+                    bot_pnl.pnl_tracker.add_trade(profit, fee)
+                    bot_pnl.pnl_tracker.print_summary()
+                except Exception as e:
+                    logger.error(f"⚠️ PnL Tracker hiba: {e}")
+                
                 self.exit_manager._reset_state()
             else:
-                logger.info("⚠️ Hálózati Market Close kikényszerítése...")
+                logger.info("⚠️ Hálózati Market Close kikényszerítése (vagy Time Stop)...")
                 self.exit_manager.close_position_at_market()
+                
+                # Market Close esetén is kiszámolhatnánk a loss-t PnL-be
+                try:
+                    import bot_pnl
+                    entry = self.exit_manager.entry_price
+                    sz = self.exit_manager.position_size
+                    mid = self.feed_engine.get_current_price() or entry
+                    
+                    if self.exit_manager.side == "LONG":
+                        profit = (mid - entry) * sz
+                    else:
+                        profit = (entry - mid) * sz
+                        
+                    fee = (entry * sz * 0.00025) + (mid * sz * 0.00025)
+                    bot_pnl.pnl_tracker.add_trade(profit, fee)
+                    bot_pnl.pnl_tracker.print_summary()
+                except Exception:
+                    pass
             
             self._start_cooldown(reason)
             
