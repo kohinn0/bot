@@ -53,9 +53,11 @@ class SebessegBot:
         
         if config.strategy_name != "pm_ambush_ladder_maker_v2":
             logger.warning(f"Strategy name mismatch! Found: {config.strategy_name}")
-            
         # 1. HL Client
-        self.hl_client = HyperliquidClient(dry_run=self.dry_run)
+        self.hl_client = HyperliquidClient(
+            dry_run=self.dry_run,
+            user_events_callback=lambda msg: self._handle_user_event(msg)
+        )
         
         # Cancel any leftover open orders from previous crash
         if not self.dry_run:

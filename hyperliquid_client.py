@@ -1,6 +1,6 @@
 # pyre-ignore-all-errors
 import os
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Callable
 from bot_logger import logger
 from dotenv import load_dotenv
 
@@ -18,8 +18,9 @@ class HyperliquidClient:
     Hyperliquid API Kliens (Official Python SDK Wrapper)
     """
     
-    def __init__(self, dry_run: bool = True):
+    def __init__(self, dry_run: bool = True, user_events_callback: Optional[Callable[[Dict[str, Any]], None]] = None):
         self.dry_run = dry_run
+        self.user_events_callback = user_events_callback
         
         # Keys
         self.wallet: Optional[LocalAccount] = None
@@ -36,9 +37,22 @@ class HyperliquidClient:
         # SDK instances (Testnet for dry_run? Or Mainnet without sending orders?)
         # Let's stick to mainnet but simply not call exchange.order if dry_run.
         self.base_url = constants.MAINNET_API_URL
-        self.info = Info(self.base_url, skip_ws=True)
         # Exchange only needs wallet if we sign
+        # Note: If we need WebSocket userEvents, we must set skip_ws=False
+        skip_ws = self.user_events_callback is None
+        self.info = Info(self.base_url, skip_ws=skip_ws)
         self.exchange = Exchange(self.wallet, self.base_url) if self.wallet else None
+        
+        # Subscribe to userEvents if requested
+        if not skip_ws and self.wallet and self.user_events_callback:
+            logger.info("📡 Csatlakozás a HL WebSocket 'userEvents' csatornához...")
+            self.info.subscribe(
+                {"type": "userEvents", "user": self.wallet.address},
+                self.user_events_callback
+            )
+        
+        if getattr(self, "base_url", None) is None:
+            self.base_url = constants.MAINNET_API_URL
         
         self.metaCache = self.info.meta()
         self.coin_to_idx: Dict[str, int] = {}

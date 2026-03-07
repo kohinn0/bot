@@ -226,6 +226,7 @@ class OrderManager:
             
         try:
             # Info API polling open orders helps, but user_fills is better for exact details
+            # If we received WebSocket updates, order.filled might already be True!
             open_orders = self.hl_client.info.open_orders(self.hl_client.wallet.address)
             # Find which of our ladder orders are NO LONGER in open_orders
             open_oids = {str(o["oid"]) for o in open_orders}
