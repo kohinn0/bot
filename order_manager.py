@@ -180,9 +180,9 @@ class OrderManager:
             return (False, 0.0, 0.0)
 
         side = ladder.side
-        filled_levels: int = 0
-        total_qty: float = 0.0
-        total_cost: float = 0.0
+        acc_filled_levels: int = 0
+        acc_total_qty: float = 0.0
+        acc_total_cost: float = 0.0
 
         orders_list: List[LadderOrder] = ladder.orders
         for level in orders_list:
@@ -201,15 +201,15 @@ class OrderManager:
                     logger.info(f"👻 GHOST FILL: SHORT szint kitöltve (Trade-through) @ ${level.price:.2f} (Mid: ${current_mid:.2f})")
 
             if level.filled:
-                filled_levels += 1
-                total_qty += level.size
-                total_cost += level.size * level.price
+                acc_filled_levels = acc_filled_levels + 1
+                acc_total_qty = acc_total_qty + float(level.size)
+                acc_total_cost = acc_total_cost + (float(level.size) * float(level.price))
 
-        if filled_levels > 0:
-            avg_price = total_cost / total_qty
-            ladder.total_size_filled = total_qty
+        if acc_filled_levels > 0:
+            avg_price = acc_total_cost / acc_total_qty
+            ladder.total_size_filled = acc_total_qty
             ladder.avg_fill_price = avg_price
-            return (True, total_qty, avg_price)
+            return (True, acc_total_qty, avg_price)
         
         return (False, 0.0, 0.0)
 
@@ -222,8 +222,8 @@ class OrderManager:
             # A szimuláció hívását a fő bot hurok vezérli (check_virtual_fills) közvetlenül a paraméterekkel
             return (False, 0.0, 0.0)
         
-        total_filled: float = 0.0
-        weighted_price_sum: float = 0.0
+        acc_total_filled: float = 0.0
+        acc_weighted_price_sum: float = 0.0
         
         if not self.hl_client.wallet:
             return (False, 0.0, 0.0)
@@ -246,22 +246,22 @@ class OrderManager:
                     # For Sebesseg, missing from book = filled.
                     order.filled = True
                     order.filled_size = order.size
-                    total_filled += float(order.size)
-                    weighted_price_sum += float(order.price) * float(order.size)
+                    acc_total_filled = acc_total_filled + float(order.size)
+                    acc_weighted_price_sum = acc_weighted_price_sum + (float(order.price) * float(order.size))
                     
         except Exception as e:
             logger.info(f"⚠️ Bulk fill check error: {e}")
         
-        if total_filled > 0:
-            avg = weighted_price_sum / total_filled
-            ladder.total_size_filled += total_filled
+        if acc_total_filled > 0:
+            avg = acc_weighted_price_sum / acc_total_filled
+            ladder.total_size_filled += acc_total_filled
             # Moving avg approximation
             if ladder.avg_fill_price == 0:
                 ladder.avg_fill_price = avg
             else:
                 ladder.avg_fill_price = (ladder.avg_fill_price + avg) / 2.0
                 
-            return (True, total_filled, avg)
+            return (True, acc_total_filled, avg)
         
         return (False, 0.0, 0.0)
     
@@ -566,14 +566,16 @@ class ExitManager:
         offset_ticks = int(ts_cfg.get('aggressive_limit_offset_ticks', 1))
         wait_ms = int(ts_cfg.get('aggressive_limit_wait_ms', 800))
         # Ha long pozíciónk van, szállunk ki SELL limit állal bid+1 tickre
-        closing_price = round(float(current_price + tick_size * offset_ticks), 2)
+        format_str = "{:.2f}"
+        closing_price = float(format_str.format(current_price + tick_size * offset_ticks))
         logger.info(
             f"[TWO_STAGE] TIME_STOP: agresszív limit kizárási árasánt → ${closing_price} ({wait_ms}ms várakozás)"
         )
         aggressive_oid = None
         try:
             if self.hl_client.exchange:
-                sz = round(float(self.position_size), 4)
+                sz_str = "{:.4f}"
+                sz = float(sz_str.format(self.position_size))
                 res = self.hl_client.exchange.order(
                     self.coin, False, sz, closing_price,
                     {"limit": {"tif": "Alo"}}

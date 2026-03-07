@@ -58,7 +58,8 @@ class HyperliquidFeed:
         self._tick_queue: Queue[TickEvent] = Queue(maxsize=1000)
         
     def start(self) -> None:
-        if self._thread and self._thread.is_alive():
+        t = self._thread
+        if t is not None and t.is_alive():
             return
         
         self._stop.clear()
@@ -71,10 +72,18 @@ class HyperliquidFeed:
     
     def stop(self) -> None:
         self._stop.set()
-        if self._loop:
-            self._loop.call_soon_threadsafe(self._loop.stop)
-        if self._thread:
-            self._thread.join(timeout=2)
+        
+        lp = self._loop
+        if lp is not None:
+            from typing import Any
+            def _stop_loop(*args: Any, **kwargs: Any) -> None:
+                if lp is not None:
+                    lp.stop()
+            lp.call_soon_threadsafe(_stop_loop)
+            
+        t = self._thread
+        if t is not None:
+            t.join(timeout=2)
         logger.info("🛑 Hyperliquid Feed Stopped")
     
     def _run_async_loop(self) -> None:
@@ -86,8 +95,9 @@ class HyperliquidFeed:
         except Exception as e:
             if not self._stop.is_set():
                 logger.info(f"⚠️ Async loop error: {e}")
-        finally:
-            self._loop.close()
+        lp = self._loop
+        if lp is not None:
+            lp.close()
     
     async def _ws_handler(self) -> None:
         while not self._stop.is_set():

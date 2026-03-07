@@ -88,7 +88,11 @@ class PolymarketWS:
         now = time.time()
         
         # Spike detektáláshoz csak az első 10 bid-et nézzük (gyorsabb, nem blokkol)
-        for bid in list(data.get('bids', []))[:10]:
+        bids = data.get('bids', [])
+        count = 0
+        for bid in bids:
+            if count >= 10: break
+            count += 1
             try:
                 size = float(bid.get('size', 0))
                 if size > 100:
@@ -191,11 +195,11 @@ class SignalEngine:
         def _build_meta(direction: str, r_t: float, z_t: float, duration_ms: float, sigma_r: float = 0.0) -> dict:
             velocity = abs(r_t * 1000.0 / max(duration_ms, 1)) * 100.0  # %/s becsült
             return {
-                "z_score": round(float(z_t), 4) if z_t is not None else 0.0,
-                "obi_bias": round(float(self._last_obi_bias), 3),
-                "velocity_pct_sec": round(float(velocity), 5),
-                "duration_ms": round(float(duration_ms), 1),
-                "pct_change": round(float(r_t) * 100.0, 4) if r_t is not None else 0.0,
+                "z_score": float(f"{z_t:.4f}") if z_t is not None else 0.0,
+                "obi_bias": float(f"{self._last_obi_bias:.3f}"),
+                "velocity_pct_sec": float(f"{velocity:.5f}"),
+                "duration_ms": float(f"{duration_ms:.1f}"),
+                "pct_change": float(f"{r_t * 100.0:.4f}") if r_t is not None else 0.0,
                 "direction": direction,
                 "sigma_r": sigma_r
             }

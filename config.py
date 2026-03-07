@@ -193,7 +193,8 @@ class MakerStrategyConfig:
                 raw_price = base_price + (-offset_ticks * tick_size)
 
             # Utolsó preciziós kerekítés a float artéfaktumok ellen
-            price = round(float(raw_price), int(decimals))
+            format_str = f"{{:.{int(decimals)}f}}"
+            price = float(format_str.format(raw_price))
 
             ladder.append((level_cfg.level, price, level_cfg.size_pct))
 

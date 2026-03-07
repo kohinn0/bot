@@ -57,7 +57,9 @@ def get_logger(name: str = "CryptoBot") -> logging.Logger:
 
     # A listener leállítása a folyamat végén
     import atexit
-    atexit.register(lambda: listener.stop())
+    def _stop_listener() -> None:
+        listener.stop()
+    atexit.register(_stop_listener)
 
     return logger
 

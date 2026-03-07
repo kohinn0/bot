@@ -56,7 +56,7 @@ class SebessegBot:
         # 1. HL Client
         self.hl_client = HyperliquidClient(
             dry_run=self.dry_run,
-            user_events_callback=lambda msg: self._handle_user_event(msg)
+            user_events_callback=self._handle_user_event
         )
         
         # Cancel any leftover open orders from previous crash
@@ -153,6 +153,22 @@ class SebessegBot:
             # Garantált takarítás
             self.shutdown()
 
+
+    def _handle_user_event(self, msg: dict) -> None:
+        """Kezeli a WebSockettől érkező user eseményeket (fill, cancel, error stb.)"""
+        try:
+            if "data" in msg and "fills" in msg["data"]:
+                for fill in msg["data"]["fills"]:
+                    # Process fill event
+                    logger.info(f"✅ FILL EVENT: {fill}")
+                    # Example: Update order manager with fill
+                    if self.order_manager:
+                        self.order_manager.process_fill(fill)
+                    if self.exit_manager:
+                        self.exit_manager.process_fill(fill)
+            # Add other event types if necessary (e.g., cancels, order status updates)
+        except Exception as e:
+            logger.error(f"Error processing user event: {e}", exc_info=True)
 
     def _check_feed_health(self) -> bool:
         """Ellenőrzi a WebSocket L2 Book kapcsolat él-e még. Kétlépcsős védelem."""
@@ -509,7 +525,8 @@ class SebessegBot:
 
     async def _update_account_value_async(self):
         """Aszinkron háttér frissítés az egyenleghez (hogy ne akassza az event loop-ot egy API HTTP request)"""
-        def _fetch() -> float:
+        from typing import Any
+        def _fetch(*args: Any, **kwargs: Any) -> float:
             val = self.hl_client.get_account_value()
             return float(val) if val is not None else 0.0
         
@@ -619,8 +636,9 @@ async def main_async(is_live: bool, coins: list[str]) -> None:
 
     # Aszinkron jel kezelés – ez a helyes mód asyncio programban!
     loop = asyncio.get_running_loop()
+    from typing import Any
     for sig in (_signal.SIGINT, _signal.SIGTERM):
-        def _shutdown_handler():
+        def _shutdown_handler(*args: Any, **kwargs: Any) -> None:
             asyncio.ensure_future(_bot_shutdown(bots, stop_event))
             
         try:

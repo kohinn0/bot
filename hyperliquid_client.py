@@ -45,10 +45,11 @@ class HyperliquidClient:
         self.exchange = Exchange(self.wallet, self.base_url) if self.wallet else None
         
         # Subscribe to userEvents if requested
-        if not skip_ws and self.wallet and self.user_events_callback:
+        w = self.wallet
+        if not skip_ws and w is not None and self.user_events_callback:
             logger.info("📡 Csatlakozás a HL WebSocket 'userEvents' csatornához...")
             self.info.subscribe(
-                {"type": "userEvents", "user": self.wallet.address},
+                {"type": "userEvents", "user": w.address},
                 self.user_events_callback
             )
         
@@ -84,10 +85,11 @@ class HyperliquidClient:
         return None
 
     def get_user_state(self) -> Optional[Dict[str, Any]]:
-        if not self.wallet:
+        w = self.wallet
+        if w is None:
             return None
         try:
-            return self.info.user_state(self.wallet.address)
+            return self.info.user_state(w.address)
         except Exception as e:
             logger.info(f"❌ User state lekérdezési hiba: {e}")
             return None
@@ -108,18 +110,24 @@ class HyperliquidClient:
             return 0.0
 
     def update_leverage(self, coin: str, leverage: int, is_cross: bool = True) -> bool:
+        """Beállítja a tőkeáttételt a megadott érmére."""
         if self.dry_run:
-            logger.info(f"🧪 [DRY RUN] HL Leverage -> {coin} {leverage}x ({'Cross' if is_cross else 'Isolated'})")
+            logger.info(f"🧪 [DRY RUN] Tőkeáttétel szimulálva: {coin} - {leverage}x {'Cross' if is_cross else 'Isolated'}")
             return True
             
-        if not self.exchange or coin not in self.coin_to_idx:
-            logger.info("❌ Nincs SDK Exchange vagy ismeretlen HL coin.")
+        ex = self.exchange
+        if ex is None:
+            logger.info("❌ Nincs SDK Exchange példányosítva.")
+            return False
+        
+        if coin not in self.coin_to_idx:
+            logger.info(f"❌ Ismeretlen HL coin: {coin}.")
             return False
             
         logger.info(f"🔗 HL Leverage beállítása: {coin} -> {leverage}x {'Cross' if is_cross else 'Isolated'}")
         
         try:
-            res = self.exchange.update_leverage(leverage, coin, is_cross)
+            res = ex.update_leverage(leverage, coin, is_cross)
             logger.info(f"   Lev. frissítve: {res}")
             return True
         except Exception as e:
@@ -134,11 +142,13 @@ class HyperliquidClient:
             logger.info(f"🧪 [DRY RUN] BATCH CANCEL ALL végrehajtva. ({coin_filter or 'MINDEN'})")
             return True
             
-        if not self.exchange or not self.wallet:
+        ex = self.exchange
+        w = self.wallet
+        if ex is None or w is None:
             return False
             
         try:
-            open_orders = self.info.open_orders(self.wallet.address)
+            open_orders = self.info.open_orders(w.address)
             cancels = []
             for o in open_orders:
                 if coin_filter and o["coin"] != coin_filter:
@@ -148,7 +158,7 @@ class HyperliquidClient:
             if not cancels:
                 return True
                 
-            res = self.exchange.cancel(cancels)
+            res = ex.cancel(cancels)
             logger.info(f"🗑️ HL Törlés ({len(cancels)} order): {res}")
             return True
         except Exception as e:
@@ -157,10 +167,11 @@ class HyperliquidClient:
 
     def get_open_orders(self) -> List[Dict[str, Any]]:
         """Visszaadja a wallet összes nyitott orderét a HL API-ból."""
-        if not self.wallet:
+        w = self.wallet
+        if w is None:
             return []
         try:
-            return self.info.open_orders(self.wallet.address)
+            return self.info.open_orders(w.address)
         except Exception as e:
             logger.warning(f"❌ get_open_orders hiba: {e}")
             return []
