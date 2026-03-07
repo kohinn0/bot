@@ -310,11 +310,15 @@ class SebessegBot:
 
         # --- PING-PONG Repricing Engine ---
         # Ha az ár elmozdult a pihentetett letrától, törölje és azonnal rakja fel az új mid alapján
-        DRIFT_TICKS = 5
         if not has_fills and current_mid:
             placed_mid = self.trade_params.get("current_mid", current_mid)
             drift = abs(current_mid - placed_mid)
-            if drift > (DRIFT_TICKS * tick_size):
+            
+            # Dinamikus Drift: a volatilitás (sigma_r) 40%-a, de minimum 5 tick. 
+            # Ezzel elkerüljük az 5 dolláros BTC reprice-okat.
+            drift_limit_usd = max((self.trade_params.get("sigma_r", 0) * current_mid) * 0.4, 5.0 * tick_size)
+            
+            if drift > drift_limit_usd:
                 logger.info(f"🔄 PING-PONG REPRICE: Ár {drift:.2f} USD-t mozdult el a letrától. Újrahúzás a jelenlegi középárhoz...")
                 self.order_manager.cancel_ladder()
                 
