@@ -29,8 +29,9 @@ class HyperliquidClient:
             logger.info("⚠️ FIGYELEM: PRIVATE_KEY nincs beállítva az .env-ben!")
         else:
             try:
-                self.wallet = Account.from_key(priv_key)
-                logger.info(f"✅ HL Wallet betöltve: {self.wallet.address[:6]}...{self.wallet.address[-4:]}")
+                wallet = Account.from_key(priv_key)
+                self.wallet = wallet
+                logger.info(f"✅ HL Wallet betöltve: {wallet.address[:6]}...{wallet.address[-4:]}")
             except Exception as e:
                 logger.info(f"❌ Privát kulcs betöltési hiba: {e}")
         

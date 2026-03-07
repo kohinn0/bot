@@ -24,7 +24,7 @@ class SebessegBot:
         self.daily_pnl = 0.0
         self.consecutive_losses = 0
         # Trade history: list of (side, was_profitable). Max 20 entries.
-        self.inventory_history = []  # [(str, bool)]
+        self.inventory_history: list[tuple[str, bool]] = []
         
         # Kliensek & Engine-ek
         self.hl_client: Any = None
@@ -254,7 +254,7 @@ class SebessegBot:
         # Inventory Skew Logic: védekezés trend esetén
         skew_penalty = 1.0
         if len(self.inventory_history) >= 2:
-            last_2 = self.inventory_history[-2:]
+            last_2 = [self.inventory_history[-2], self.inventory_history[-1]]
             # Ha az utolsó két trade ugyanaz az irány volt és mindkettő bukott
             if last_2[0][0] == last_2[1][0] and not last_2[0][1] and not last_2[1][1]:
                 losing_side = last_2[0][0]
@@ -318,8 +318,8 @@ class SebessegBot:
             
             # Dinamikus Drift: Szinkronba hozzuk a létra 0.0005-ös padlójával (SIGMA_R_FLOOR)
             # Ha a létra 50$-ra van, ne re-price-oljunk 5$-onként. Kb a létra táv felénél (0.5x) húzzuk utána.
-            effective_sigma = max(self.trade_params.get("sigma_r", 0), 0.0005)
-            drift_limit_usd = max(effective_sigma * current_mid * 0.5, 10.0 * tick_size)
+            effective_sigma = max(float(self.trade_params.get("sigma_r", 0.0)), 0.0005)
+            drift_limit_usd = max(effective_sigma * current_mid * 0.5, 10.0 * float(tick_size))
             
             if drift > drift_limit_usd:
                 logger.info(f"🔄 PING-PONG REPRICE: Ár {drift:.2f} USD-t mozdult el a letrától (Limit: {drift_limit_usd:.2f}). Újrahúzás a jelenlegi középárhoz...")
@@ -329,11 +329,11 @@ class SebessegBot:
                 self.trade_params["current_mid"] = current_mid
                 ladder = self.order_manager.place_ladder(
                     coin=self.active_coin,
-                    side=self.trade_params["target_side"],
+                    side=str(self.trade_params["target_side"]),
                     mid_price=current_mid,
-                    total_usd_notional=self.trade_params["sz_usd"],
-                    tick_size=tick_size,
-                    sigma_r=self.trade_params["sigma_r"] * self.trade_params.get("skew_penalty", 1.0)
+                    total_usd_notional=float(self.trade_params["sz_usd"]),
+                    tick_size=float(tick_size),
+                    sigma_r=float(self.trade_params["sigma_r"]) * float(self.trade_params.get("skew_penalty", 1.0))
                 )
                 
                 if ladder:
@@ -343,7 +343,8 @@ class SebessegBot:
                     self.state = "ARMED"
                 return
 
-        signal_age_ms = (time.time() - self.trade_params.get("signal_time", time.time())) * 1000.0
+        signal_time = float(self.trade_params.get("signal_time", time.time()))
+        signal_age_ms = (time.time() - signal_time) * 1000.0
         if signal_age_ms > config.wait_for_fill_ms:
             # TIMEOUTS
             if has_fills:
@@ -508,8 +509,9 @@ class SebessegBot:
 
     async def _update_account_value_async(self):
         """Aszinkron háttér frissítés az egyenleghez (hogy ne akassza az event loop-ot egy API HTTP request)"""
-        def _fetch():
-            return self.hl_client.get_account_value()
+        def _fetch() -> float:
+            val = self.hl_client.get_account_value()
+            return float(val) if val is not None else 0.0
         
         try:
             loop = asyncio.get_running_loop()
@@ -618,11 +620,11 @@ async def main_async(is_live: bool, coins: list[str]) -> None:
     # Aszinkron jel kezelés – ez a helyes mód asyncio programban!
     loop = asyncio.get_running_loop()
     for sig in (_signal.SIGINT, _signal.SIGTERM):
+        def _shutdown_handler():
+            asyncio.ensure_future(_bot_shutdown(bots, stop_event))
+            
         try:
-            loop.add_signal_handler(
-                sig,
-                lambda: asyncio.ensure_future(_bot_shutdown(bots, stop_event))
-            )
+            loop.add_signal_handler(sig, _shutdown_handler)
         except NotImplementedError:
             pass # Windows local testing (ProactorEventLoop doesn't support signals)
 

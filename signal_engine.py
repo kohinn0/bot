@@ -191,11 +191,11 @@ class SignalEngine:
         def _build_meta(direction: str, r_t: float, z_t: float, duration_ms: float, sigma_r: float = 0.0) -> dict:
             velocity = abs(r_t * 1000.0 / max(duration_ms, 1)) * 100.0  # %/s becsült
             return {
-                "z_score": round(z_t, 4),
-                "obi_bias": round(self._last_obi_bias, 3),
-                "velocity_pct_sec": round(velocity, 5),
-                "duration_ms": round(duration_ms, 1),
-                "pct_change": round(r_t * 100.0, 4),
+                "z_score": round(float(z_t), 4) if z_t is not None else 0.0,
+                "obi_bias": round(float(self._last_obi_bias), 3),
+                "velocity_pct_sec": round(float(velocity), 5),
+                "duration_ms": round(float(duration_ms), 1),
+                "pct_change": round(float(r_t) * 100.0, 4) if r_t is not None else 0.0,
                 "direction": direction,
                 "sigma_r": sigma_r
             }

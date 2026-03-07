@@ -37,7 +37,7 @@ class OrderManager:
     ):
         self.hl_client = hl_client
         self.dry_run = dry_run
-        self.active_ladder: Any = None
+        self.active_ladder: Optional[LadderPosition] = None
     
     def place_ladder(
         self,
@@ -173,16 +173,19 @@ class OrderManager:
         hanem teljesen át kell rajta mennie az árnak legalább 1 tickkel, 
         hogy azt feltételezzük, a mi rendelésünk a sorban is teljesült.
         """
-        if not self.dry_run or not self.active_ladder:
+        ladder = self.active_ladder
+        if ladder is None:
+            return (False, 0.0, 0.0)
+        if not self.dry_run:
             return (False, 0.0, 0.0)
 
-        ladder = self.active_ladder
         side = ladder.side
-        filled_levels = 0
-        total_qty = 0.0
-        total_cost = 0.0
+        filled_levels: int = 0
+        total_qty: float = 0.0
+        total_cost: float = 0.0
 
-        for level in ladder.orders:
+        orders_list: List[LadderOrder] = ladder.orders
+        for level in orders_list:
             if not level.filled:
                 # LONG esetén: ha az ár LEMEGY a limit alá legalább 1 tickkel -> FILL
                 # TRADE-THROUGH LOGIC (Queue simulation without real L2 trades)
@@ -211,7 +214,8 @@ class OrderManager:
         return (False, 0.0, 0.0)
 
     def check_fills(self) -> Tuple[bool, float, float]:
-        if not self.active_ladder:
+        ladder = self.active_ladder
+        if ladder is None:
             return (False, 0.0, 0.0)
         
         if self.dry_run:
@@ -231,8 +235,9 @@ class OrderManager:
             # Find which of our ladder orders are NO LONGER in open_orders
             open_oids = {str(o["oid"]) for o in open_orders}
             
-            for order in self.active_ladder.orders:
-                if order.filled or not order.order_id or order.order_id.startswith("ERR_"):
+            orders_list: List[LadderOrder] = ladder.orders
+            for order in orders_list:
+                if order.filled or not order.order_id or str(order.order_id).startswith("ERR_"):
                     continue
                     
                 if order.order_id not in open_oids:
@@ -249,28 +254,30 @@ class OrderManager:
         
         if total_filled > 0:
             avg = weighted_price_sum / total_filled
-            self.active_ladder.total_size_filled += total_filled
+            ladder.total_size_filled += total_filled
             # Moving avg approximation
-            if self.active_ladder.avg_fill_price == 0:
-                self.active_ladder.avg_fill_price = avg
+            if ladder.avg_fill_price == 0:
+                ladder.avg_fill_price = avg
             else:
-                self.active_ladder.avg_fill_price = (self.active_ladder.avg_fill_price + avg) / 2.0
+                ladder.avg_fill_price = (ladder.avg_fill_price + avg) / 2.0
                 
             return (True, total_filled, avg)
         
         return (False, 0.0, 0.0)
     
     def cancel_ladder(self) -> bool:
-        if not self.active_ladder:
+        ladder = self.active_ladder
+        if ladder is None:
             return False
             
-        unfilled_ids = [o.order_id for o in self.active_ladder.orders if not o.filled and o.order_id and not o.order_id.startswith("ERR_")]
+        orders_list: List[LadderOrder] = ladder.orders
+        unfilled_ids = [o.order_id for o in orders_list if not o.filled and o.order_id and not str(o.order_id).startswith("ERR_")]
         
         if self.dry_run:
             logger.info(f"🧪 [DRY RUN] Canceling {len(unfilled_ids)} ladder orders")
         else:
             if unfilled_ids and self.hl_client.exchange:
-                cancels = [{"coin": str(self.active_ladder.coin), "o": int(str(oid))} for oid in unfilled_ids]
+                cancels = [{"coin": str(ladder.coin), "o": int(str(oid))} for oid in unfilled_ids]
                 try:
                     res = self.hl_client.exchange.cancel(cancels)
                     logger.info(f"✅ Successfully canceled {len(unfilled_ids)} BATCH: {res}")
@@ -323,9 +330,10 @@ class OrderManager:
 
     
     def get_ladder_age_ms(self) -> float:
-        if not self.active_ladder:
+        ladder = self.active_ladder
+        if ladder is None:
             return 0.0
-        return (time.time() - self.active_ladder.placed_at) * 1000
+        return (time.time() - ladder.placed_at) * 1000
 
 class ExitManager:
     def __init__(self, hl_client: HyperliquidClient, dry_run: bool = True):
@@ -555,10 +563,10 @@ class ExitManager:
             return self.close_position_at_market()
 
         # --- 1. Lépés: Agresszív limit ---
-        offset_ticks = ts_cfg.get('aggressive_limit_offset_ticks', 1)
-        wait_ms = ts_cfg.get('aggressive_limit_wait_ms', 800)
+        offset_ticks = int(ts_cfg.get('aggressive_limit_offset_ticks', 1))
+        wait_ms = int(ts_cfg.get('aggressive_limit_wait_ms', 800))
         # Ha long pozíciónk van, szállunk ki SELL limit állal bid+1 tickre
-        closing_price = round(current_price + tick_size * offset_ticks, 2)
+        closing_price = round(float(current_price + tick_size * offset_ticks), 2)
         logger.info(
             f"[TWO_STAGE] TIME_STOP: agresszív limit kizárási árasánt → ${closing_price} ({wait_ms}ms várakozás)"
         )
