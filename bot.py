@@ -314,12 +314,13 @@ class SebessegBot:
             placed_mid = self.trade_params.get("current_mid", current_mid)
             drift = abs(current_mid - placed_mid)
             
-            # Dinamikus Drift: a volatilitás (sigma_r) 40%-a, de minimum 5 tick. 
-            # Ezzel elkerüljük az 5 dolláros BTC reprice-okat.
-            drift_limit_usd = max((self.trade_params.get("sigma_r", 0) * current_mid) * 0.4, 5.0 * tick_size)
+            # Dinamikus Drift: Szinkronba hozzuk a létra 0.0005-ös padlójával (SIGMA_R_FLOOR)
+            # Ha a létra 50$-ra van, ne re-price-oljunk 5$-onként. Kb a létra táv felénél (0.5x) húzzuk utána.
+            effective_sigma = max(self.trade_params.get("sigma_r", 0), 0.0005)
+            drift_limit_usd = max(effective_sigma * current_mid * 0.5, 10.0 * tick_size)
             
             if drift > drift_limit_usd:
-                logger.info(f"🔄 PING-PONG REPRICE: Ár {drift:.2f} USD-t mozdult el a letrától. Újrahúzás a jelenlegi középárhoz...")
+                logger.info(f"🔄 PING-PONG REPRICE: Ár {drift:.2f} USD-t mozdult el a letrától (Limit: {drift_limit_usd:.2f}). Újrahúzás a jelenlegi középárhoz...")
                 self.order_manager.cancel_ladder()
                 
                 # Újrahúzás ugyanazokkal a paraméterekkel, csak az új `current_mid`-del
