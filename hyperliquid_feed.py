@@ -29,6 +29,7 @@ class TickEvent:
     event_time_ms: float
     price: float
     latency_ms: float
+    imbalance: float = 0.5  # 0.5 = neutrális (50-50%), >0.5 vevői túlsúly, <0.5 eladói túlsúly
 
 
 class HyperliquidFeed:
@@ -139,11 +140,23 @@ class HyperliquidFeed:
                 # Valós latency (NTP kompenzáció itt nincs a HL saját timestampjeit használjuk feltehetőleg)
                 latency_ms = local_time_ms - event_time_ms if event_time_ms else 0
                 
+                # --- Order Book Imbalance (OBI) számítás ---
+                # A levels[0] a bids (vevők), levels[1] az asks (eladók).
+                # Megnézzük a legfelső N szint volumenét a nyomás megállapításához.
+                depth_levels = 5
+                bid_vol = sum(float(level["sz"]) for level in levels[0][:depth_levels])
+                ask_vol = sum(float(level["sz"]) for level in levels[1][:depth_levels])
+                
+                total_vol = bid_vol + ask_vol
+                # Ha véletlen üres lenne a könyv, 0.5-t adunk vissza (neutrális)
+                imbalance = (bid_vol / total_vol) if total_vol > 0 else 0.5
+                
                 tick = TickEvent(
                     local_time_ms=local_time_ms,
                     event_time_ms=event_time_ms,
                     price=mid_price,
-                    latency_ms=latency_ms
+                    latency_ms=latency_ms,
+                    imbalance=imbalance
                 )
                 
                 # State frissítés – csak az async loop írja, nincs lock szükséges

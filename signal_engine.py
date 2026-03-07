@@ -119,6 +119,9 @@ class SignalEngine:
         self.last_signal_time: float = 0.0
         # Árfolyam történet (ms, price)
         self.price_history: Deque[Tuple[float, float]] = deque(maxlen=500)
+        # OBI történet (ms, imbalance_ratio) - 5 sec window ~ 200 ticks
+        self.obi_history: Deque[Tuple[float, float]] = deque(maxlen=200)
+        self._last_obi_bias: float = 0.0
 
         # --- Paraméterek betöltése a strategy_maker.json-ból ---
         _sig_cfg = (
@@ -130,6 +133,7 @@ class SignalEngine:
         self.returns_window_ms: float = float(_sig_cfg.get("returns_window_ms", 120_000))
         self.z_threshold: float = float(_sig_cfg.get("z_threshold", 3.5))
         self.min_time_between_signals_ms: float = float(_sig_cfg.get("min_time_between_signals_ms", 8_000))
+        self.imbalance_weight: float = float(_sig_cfg.get("imbalance_weight", 1.0)) # OBI rásegítő
         # --------------------------------------------------------
 
         # (timestamp_ms, r_t) párok
@@ -173,8 +177,12 @@ class SignalEngine:
             return None, {}
 
         now = time.time() * 1000  # milliseconds
+        
+        # OBI Kiolvasása az utolsó feed tickből (ha létezik)
+        last_tick = self.hl_feed._last_tick
+        current_imbalance = last_tick.imbalance if last_tick else 0.5
 
-        r_t, z_t = self._update_returns_and_z(now, current_price)
+        r_t, z_t = self._update_returns_and_z(now, current_price, current_imbalance)
 
         # Debounce – túl sűrű jelek tiltása
         if now - self.last_signal_time < self.min_time_between_signals_ms:
@@ -184,6 +192,7 @@ class SignalEngine:
             velocity = abs(r_t * 1000.0 / max(duration_ms, 1)) * 100.0  # %/s becsült
             return {
                 "z_score": round(z_t, 4),
+                "obi_bias": round(self._last_obi_bias, 3),
                 "velocity_pct_sec": round(velocity, 5),
                 "duration_ms": round(duration_ms, 1),
                 "pct_change": round(r_t * 100.0, 4),
@@ -230,6 +239,7 @@ class SignalEngine:
         self,
         now_ms: float,
         price: float,
+        imbalance: float = 0.5
     ) -> Tuple[Optional[float], Optional[float]]:
         """
         Másodperces (ill. tick-közi) hozam és Z-score számítása
@@ -238,6 +248,7 @@ class SignalEngine:
         # Ha még nincs előző ár, csak inicializáljuk a history-t
         if not self.price_history:
             self.price_history.append((now_ms, price))
+            self.obi_history.append((now_ms, imbalance))
             return None, None
 
         last_ts, last_price = self.price_history[-1]
@@ -245,6 +256,7 @@ class SignalEngine:
         if dt_ms <= 0 or last_price <= 0:
             # Degenerált adat – csak frissítjük az árfolyamot
             self.price_history.append((now_ms, price))
+            self.obi_history.append((now_ms, imbalance))
             return None, None
 
         # Diszkrét hozam
@@ -252,6 +264,14 @@ class SignalEngine:
 
         # Árfolyam history frissítése
         self.price_history.append((now_ms, price))
+        
+        # OBI (Imbalance) History frissítése és "smooth" OBI számítás (pl utolsó 5 másodperc)
+        self.obi_history.append((now_ms, imbalance))
+        obi_cutoff = now_ms - 5000  # 5 másodperces simítás
+        while self.obi_history and self.obi_history[0][0] < obi_cutoff:
+            self.obi_history.popleft()
+            
+        avg_obi = sum(o[1] for o in self.obi_history) / max(len(self.obi_history), 1)
 
         # Hozamtörténet bővítése és ablak tisztítása
         self.returns.append((now_ms, r_t))
@@ -278,8 +298,21 @@ class SignalEngine:
         if sigma_r <= 0:
             return r_t, None
 
-        z_t = (r_t - self._ewm_mean) / sigma_r
-        return r_t, z_t
+        base_z_t = (r_t - self._ewm_mean) / sigma_r
+        
+        # --- OBI Bias Beépítése ---
+        # Ha az avg_obi > 0.5, akkor a könyv "long-ra áll". Ezt hozzáadjuk a Z-scorehoz,
+        # hogy egy kisebb kiugrás is elég legyen a triggerhez (felgyorsítva a belépést).
+        # Normalizáljuk az [0.0 - 1.0] OBI-t [-1.0 - +1.0] skálára.
+        obi_normalized = (avg_obi - 0.5) * 2.0 
+        
+        # Bias kiszámítása az elvárt súllyal. Pl imbalance_weight = 1.0 esetén max +/- 1.0 Z-score módosítást ad.
+        obi_bias = obi_normalized * self.imbalance_weight
+        self._last_obi_bias = obi_bias # Eltároljuk a metadatákhoz
+        
+        final_z_t = base_z_t + obi_bias
+        
+        return r_t, final_z_t
     
     def _detect_move(self, now: float, current_price: float) -> Optional[PriceMove]:
         """Detect significant price moves"""
