@@ -109,11 +109,11 @@
                 "enabled": true,
                 "mode": "small_fast_profit",
                 "formula": "filled_price + max(2 * tick_size, 0.7 * current_spread)",
-                "min_profit_ticks": 2,
-                "max_profit_ticks": 4,
-                "spread_multiplier": 0.7,
+                "min_profit_ticks": 4,
+                "max_profit_ticks": 10,
+                "spread_multiplier": 0.8,
                 "post_only": true,
-                "comment": "Small profit (2-4 ticks), fast exit - harvest repricing, not settlement"
+                "comment": "Megemelt TP célár a 1-2% nap profitcélhoz (4-10 tick SOL esetében)"
             },
             "time_stop": {
                 "enabled": true,
@@ -167,14 +167,14 @@
         "position_limits": {
             "max_open_positions": 1,
             "max_notional_usd_per_trade": 1000,
-            "balance_pct_per_trade": 0.20
+            "balance_pct_per_trade": 0.30
         },
         "leverage": {
             "max_leverage": 10,
             "cross_margin": false
         },
         "daily_limits": {
-            "max_daily_loss_usd": 100,
+            "max_daily_loss_usd": 30,
             "max_daily_trades": 50
         },
         "partial_fill_handling": {
