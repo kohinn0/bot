@@ -453,10 +453,8 @@ class SebessegBot:
                     else:
                         profit = (entry - tp_price) * sz
                         
-                    # Taker fee szimuláció (0.025% belépő + 0.025% kilépő)
-                    # Elhanyagoljuk, hogy Makerünk Maker-only (0% fee), mert biztosra megyünk (vagy Maker lett, vagy Taker vészhelyzetben)
-                    # A szigorúbb ellenőrzés szerint legyen Taker feltételezve
-                    fee = (entry * sz * 0.00025) + (tp_price * sz * 0.00025)
+                    # MAKER_ONLY stratégia esetén a limit belépés ÉS TP kilépés díja HL-en: 0.0%
+                    fee = 0.0
                     
                     bot_pnl.pnl_tracker.add_trade(profit, fee, current_account_value=self.cached_account_value)
                     bot_pnl.pnl_tracker.print_summary()
@@ -480,7 +478,8 @@ class SebessegBot:
                     else:
                         profit = (entry - mid) * sz
                         
-                    fee = (entry * sz * 0.00025) + (mid * sz * 0.00025)
+                    # Maker belépő = 0%, Market kilépő (veszély!) = 0.025% (Taker fee)
+                    fee = mid * sz * 0.00025
                     bot_pnl.pnl_tracker.add_trade(profit, fee, current_account_value=self.cached_account_value)
                     bot_pnl.pnl_tracker.print_summary()
                 except Exception:

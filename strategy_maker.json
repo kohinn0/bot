@@ -61,21 +61,21 @@
             "ladder_config": [
                 {
                     "level": 1,
-                    "offset_from_mid_ticks": -5,
+                    "offset_from_mid_ticks": -30,
                     "size_pct": 0.5,
-                    "comment": "mid - 5 ticks"
+                    "comment": "mid - 30 ticks"
                 },
                 {
                     "level": 2,
-                    "offset_from_mid_ticks": -10,
+                    "offset_from_mid_ticks": -60,
                     "size_pct": 0.3,
-                    "comment": "mid - 10 ticks"
+                    "comment": "mid - 60 ticks"
                 },
                 {
                     "level": 3,
-                    "offset_from_mid_ticks": -15,
+                    "offset_from_mid_ticks": -90,
                     "size_pct": 0.2,
-                    "comment": "mid - 15 ticks (leglentebb, legalacsonyabb toltesi valsz.)"
+                    "comment": "mid - 90 ticks (leglentebb)"
                 }
             ],
             "signal_params": {
@@ -109,8 +109,8 @@
                 "enabled": true,
                 "mode": "small_fast_profit",
                 "formula": "filled_price + max(2 * tick_size, 0.7 * current_spread)",
-                "min_profit_ticks": 4,
-                "max_profit_ticks": 10,
+                "min_profit_ticks": 40,
+                "max_profit_ticks": 200,
                 "spread_multiplier": 0.8,
                 "post_only": true,
                 "comment": "Megemelt TP célár a 1-2% nap profitcélhoz (4-10 tick SOL esetében)"
