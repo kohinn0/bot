@@ -525,27 +525,31 @@ class ExitManager:
         self.position_size = 0.0
 
     def check_exit_conditions(self) -> Tuple[bool, str]:
-        if not self.entry_time:
+        try:
+            if not self.entry_time:
+                return (False, "")
+
+            params = config.get_time_stop_params()
+            hold_time_sec = time.time() - float(self.entry_time)
+            safe_fallback_timeout = params.get('expiration_sec', 12)
+
+            if hold_time_sec > safe_fallback_timeout:
+                return (True, "TIME_STOP_TIMEOUT")
+
+            # HL API TP Fill check via info API
+            if not self.dry_run and self.tp_order_id and not str(self.tp_order_id).startswith("ERR_"):
+                try:
+                    open_orders = self.hl_client.info.open_orders(self.hl_client.wallet.address)
+                    open_oids = {str(o["oid"]) for o in open_orders}
+                    if self.tp_order_id not in open_oids:
+                        return (True, "TAKE_PROFIT_REACHED")
+                except Exception as e:
+                    logger.info(f"⚠️ Open orders ellenőrzése sikertelen az Exit checks-nél: {e}")
+
             return (False, "")
-
-        params = config.get_time_stop_params()
-        hold_time_sec = time.time() - float(self.entry_time)
-        safe_fallback_timeout = params.get('expiration_sec', 12)
-
-        if hold_time_sec > safe_fallback_timeout:
-            return (True, "TIME_STOP_TIMEOUT")
-
-        # HL API TP Fill check via info API
-        if not self.dry_run and self.tp_order_id and not str(self.tp_order_id).startswith("ERR_"):
-            try:
-                open_orders = self.hl_client.info.open_orders(self.hl_client.wallet.address)
-                open_oids = {str(o["oid"]) for o in open_orders}
-                if self.tp_order_id not in open_oids:
-                    return (True, "TAKE_PROFIT_REACHED")
-            except Exception as e:
-                logger.info(f"⚠️ Open orders ellenőrzése sikertelen az Exit checks-nél: {e}")
-
-        return (False, "")
+        except Exception as e:
+            logger.error(f"⚠️ Váratlan hiba a check_exit_conditions-ben: {e}")
+            return (False, "")
 
     def close_position_two_stage(self, current_price: float, tick_size: float) -> bool:
         """
