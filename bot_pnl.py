@@ -2,6 +2,8 @@
 import plotext as plt
 from typing import List
 from bot_logger import logger
+import json
+import os
 
 class PnLTracker:
     def __init__(self):
@@ -10,8 +12,15 @@ class PnLTracker:
         self.win_count: int = 0
         self.loss_count: int = 0
         self.total_fees: float = 0.0
+        self.state_file = "logs/pnl_state.json"
+        
+        # Létrehozzuk a log mappát ha nincs
+        if not os.path.exists("logs"):
+            os.makedirs("logs")
+            
+        self._save_state(account_value=0.0) # Alaphelyzetbe állítás induláskor
     
-    def add_trade(self, profit_usd: float, fee_usd: float):
+    def add_trade(self, profit_usd: float, fee_usd: float, current_account_value: float = 0.0):
         net_profit = profit_usd - fee_usd
         self.cumulative_pnl += net_profit
         self.total_fees += fee_usd
@@ -22,6 +31,22 @@ class PnLTracker:
             self.loss_count += 1
             
         self.trades.append(self.cumulative_pnl)
+        self._save_state(account_value=current_account_value)
+        
+    def _save_state(self, account_value: float):
+        state = {
+            "cumulative_pnl": self.cumulative_pnl,
+            "win_count": self.win_count,
+            "loss_count": self.loss_count,
+            "total_fees": self.total_fees,
+            "account_value": account_value,
+            "trades": self.trades
+        }
+        try:
+            with open(self.state_file, 'w') as f:
+                json.dump(state, f)
+        except Exception as e:
+            logger.error(f"⚠️ Nem sikerült elmenteni a PnL állapotot: {e}")
     
     def print_summary(self):
         total_trades = self.win_count + self.loss_count

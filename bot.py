@@ -458,7 +458,7 @@ class SebessegBot:
                     # A szigorúbb ellenőrzés szerint legyen Taker feltételezve
                     fee = (entry * sz * 0.00025) + (tp_price * sz * 0.00025)
                     
-                    bot_pnl.pnl_tracker.add_trade(profit, fee)
+                    bot_pnl.pnl_tracker.add_trade(profit, fee, current_account_value=self.cached_account_value)
                     bot_pnl.pnl_tracker.print_summary()
                 except Exception as e:
                     logger.error(f"⚠️ PnL Tracker hiba: {e}")
@@ -481,7 +481,7 @@ class SebessegBot:
                         profit = (entry - mid) * sz
                         
                     fee = (entry * sz * 0.00025) + (mid * sz * 0.00025)
-                    bot_pnl.pnl_tracker.add_trade(profit, fee)
+                    bot_pnl.pnl_tracker.add_trade(profit, fee, current_account_value=self.cached_account_value)
                     bot_pnl.pnl_tracker.print_summary()
                 except Exception:
                     pass
