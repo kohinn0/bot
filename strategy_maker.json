@@ -166,8 +166,8 @@
     "risk_management": {
         "position_limits": {
             "max_open_positions": 1,
-            "max_notional_usd_per_trade": 50,
-            "balance_pct_per_trade": 0.05
+            "max_notional_usd_per_trade": 1000,
+            "balance_pct_per_trade": 0.20
         },
         "leverage": {
             "max_leverage": 10,
