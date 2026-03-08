@@ -87,8 +87,15 @@ class SebessegBot:
             except Exception as e:
                 logger.info(f"Could not fetch metadata sizing: {e}")
                 
-        # We enforce a dynamic tick size for testing
-        self.trade_params["tick_size"] = 1.0 if self.active_coin == "BTC" else 0.01
+        # We map known tick sizes for demo since dynamic tick pulling requires full spot info 
+        if self.active_coin == "BTC":
+            self.trade_params["tick_size"] = 1.0
+        elif self.active_coin == "ETH":
+            self.trade_params["tick_size"] = 0.1
+        elif self.active_coin == "SOL":
+            self.trade_params["tick_size"] = 0.001
+        else:
+            self.trade_params["tick_size"] = 0.01
 
         # 2. Market Feed (L2 WebSocket)
         self.feed_engine = HyperliquidFeed(coin=self.active_coin)
@@ -655,7 +662,7 @@ if __name__ == "__main__":
     import signal  # noqa
     parser = argparse.ArgumentParser(description="Sebesseg Crypto Maker Bot")
     parser.add_argument('--live', action='store_true', help='ÉLES KERESKEDÉS (pénzt kockáztatsz!)')
-    parser.add_argument('--coins', type=str, default='BTC', help='Vesszővel elválasztott coin lista (pl. BTC,ETH,SOL)')
+    parser.add_argument('--coins', type=str, default='SOL', help='Vesszővel elválasztott coin lista (pl. SOL,BTC,ETH)')
     args = parser.parse_args()
 
     if not args.live:
