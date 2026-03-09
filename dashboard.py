@@ -43,9 +43,9 @@ def draw_dashboard():
     total_trades = wins + losses
     win_rate = (wins / total_trades * 100) if total_trades > 0 else 0.0
     
-    # 🌟 Napi Statisztikák 
+    # 🌟 Heti Statisztikák 
     print(f"💸 Jelenlegi Egyenleg: ${account_value + cum_pnl:.2f} USD")
-    print(f"💎 Napi Tiszta Profit: ${cum_pnl:.2f} USD")
+    print(f"💎 Heti Tiszta Profit: ${cum_pnl:.2f} USD")
     print("-" * 60)
     print(f"📈 Kötések száma:   {total_trades}")
     print(f"🏆 Win Rate:        {win_rate:.1f}% ({wins} Win / {losses} Loss)")

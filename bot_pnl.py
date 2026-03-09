@@ -14,11 +14,8 @@ class PnLTracker:
         self.total_fees: float = 0.0
         self.state_file = "logs/pnl_state.json"
         
-        # Létrehozzuk a log mappát ha nincs
-        if not os.path.exists("logs"):
-            os.makedirs("logs")
-            
-        self._save_state(account_value=0.0) # Alaphelyzetbe állítás induláskor
+        # Load previous state if exists instead of resetting
+        self._load_state()
     
     def add_trade(self, profit_usd: float, fee_usd: float, current_account_value: float = 0.0):
         net_profit = profit_usd - fee_usd
@@ -33,6 +30,24 @@ class PnLTracker:
         self.trades.append(self.cumulative_pnl)
         self._save_state(account_value=current_account_value)
         
+    def _load_state(self):
+        if not os.path.exists("logs"):
+            os.makedirs("logs")
+        if os.path.exists(self.state_file):
+            try:
+                with open(self.state_file, 'r') as f:
+                    state = json.load(f)
+                    self.cumulative_pnl = state.get("cumulative_pnl", 0.0)
+                    self.win_count = state.get("win_count", 0)
+                    self.loss_count = state.get("loss_count", 0)
+                    self.total_fees = state.get("total_fees", 0.0)
+                    self.trades = state.get("trades", [0.0])
+            except Exception as e:
+                logger.error(f"⚠️ Hiba a PnL állapot betöltésekor: {e}")
+                self._save_state(account_value=0.0)
+        else:
+            self._save_state(account_value=0.0)
+
     def _save_state(self, account_value: float):
         state = {
             "cumulative_pnl": self.cumulative_pnl,
@@ -56,7 +71,7 @@ class PnLTracker:
         win_rate = (self.win_count / total_trades) * 100
         
         logger.info("📊 ========================================== 📊")
-        logger.info("📊 NAPI PnL JELENTÉS (Dry Run Szimuláció)")
+        logger.info("📊 HETI PnL JELENTÉS (Folyamatos)")
         logger.info("📊 ========================================== 📊")
         logger.info(f"📈 Összes Trade: {total_trades}")
         logger.info(f"🏆 Win Rate: {win_rate:.1f}% ({self.win_count} Win / {self.loss_count} Loss)")
