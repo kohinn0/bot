@@ -42,6 +42,7 @@ impl AppConfig {
 
         let is_dry_run = env::var("DRY_RUN")
             .unwrap_or_else(|_| "true".to_string())
+            .trim()
             .to_lowercase() == "true";
 
         let active_coin = env::var("ACTIVE_COIN").unwrap_or_else(|_| "SOL".to_string()).to_uppercase();
