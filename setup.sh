@@ -42,8 +42,8 @@ if [ -d "$BOT_DIR/.git" ]; then
     echo "  → Repo már létezik, frissítés (git pull)..."
     cd "$BOT_DIR" && git pull --quiet
 else
-    echo "  → Kérjük add meg a GitHub repo URL-t (pl. https://github.com/felhasznalo/sebessegbot):"
-    read -r REPO_URL
+    # Alapértelmezett beállítása a Te saját repódra
+    REPO_URL="https://github.com/kohinn0/bot"
     git clone "$REPO_URL" "$BOT_DIR"
     cd "$BOT_DIR"
 fi
