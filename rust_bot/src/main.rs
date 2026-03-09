@@ -76,19 +76,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(signal) = signal_engine.tick().await {
                 info!("🚨 SZIGNÁL ÉSZLELVE: {} @ {:.4}", signal.side, signal.target_mid);
                 
-                let mut payload = order_manager.build_ladder_payload(&signal.side, signal.target_mid, target_usd);
+                let action = order_manager.build_ladder_payload(&signal.side, signal.target_mid, target_usd);
                 
                 let nonce = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap()
                     .as_millis() as u64;
 
-                // Frissítjük a payload nonce-t a signer és backend számára
-                if let Some(obj) = payload.as_object_mut() {
-                    obj.insert("nonce".to_string(), serde_json::json!(nonce));
-                }
-
-                info!("🛠️ Order Payload előkészítve: {}", serde_json::to_string(&payload).unwrap());
+                info!("🛠️ Order Payload előkészítve: {}", serde_json::to_string(&action).unwrap());
 
                 if is_dry_run {
                     // Mivel egyelőre éles bekötés még nincsen (csak Dry Run logolás),
@@ -97,11 +92,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     pnl_tracker.add_trade(2.55, 0.05, simulated_balance_usd);
                 } else {
                     info!(" ام Aláírás és küldés folyamatban (LIVE)...");
-                    let action = payload["action"].clone();
-                    match signer_t.sign_l1_action(action.clone(), nonce, is_mainnet).await {
+                    match signer_t.sign_l1_action(&action, nonce, is_mainnet).await {
                         Ok(signature) => {
                             info!("✅ Payload aláírva! EIP-712 Signature generálva.");
-                            match rest_client_t.send_l1_action(action, nonce, signature).await {
+                            match rest_client_t.send_l1_action(&action, nonce, signature).await {
                                 Ok(response) => info!("🎯 Order elküldve! Válasz: {}", response),
                                 Err(e) => tracing::error!("❌ Hiba az order küldésekor: {}", e),
                             }

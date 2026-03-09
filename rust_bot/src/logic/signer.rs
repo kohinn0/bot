@@ -39,9 +39,9 @@ impl HyperliquidSigner {
         &self.address
     }
 
-    pub async fn sign_l1_action(&self, action: serde_json::Value, nonce: u64, is_mainnet: bool) -> Result<Signature, WalletError> {
+    pub async fn sign_l1_action(&self, action: &crate::logic::order_manager::OrderAction, nonce: u64, is_mainnet: bool) -> Result<Signature, WalletError> {
         // 1. A json Action MessagePack formátummá konvertálása
-        let mut data = rmp_serde::to_vec_named(&action)
+        let mut data = rmp_serde::to_vec_named(action)
             .expect("Failed to serialize Action to MessagePack");
             
         // 2. HL Specifikus: Hozzáfűzzük a Nonce-t (8 bájt, big endian) és a Vault flag-et (0x00)
