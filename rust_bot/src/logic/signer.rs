@@ -1,6 +1,7 @@
 use ethers::core::types::{Signature, H256};
 use ethers::signers::{LocalWallet, Signer, WalletError};
 use ethers::core::types::transaction::eip712::{Eip712, EIP712Domain};
+use sha3::{Digest, Keccak256};
 use std::str::FromStr;
 
 #[derive(Clone)]
@@ -55,7 +56,7 @@ impl HyperliquidSigner {
         // 4. Construct EIP-712 typed data manually
         // HL EIP712 standard is a bit unique. We hash the domain separator and the struct hash.
         
-        let mut domain_hasher = ethers::utils::Keccak256::new();
+        let mut domain_hasher = Keccak256::new();
         // type_hash for EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)
         // Keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)")
         let domain_type_hash = hex::decode("8b73c3c69bb8fe3d512ecc4cf759cc79239f7b179b0ffacaa9a75d522b39400f").unwrap();
@@ -74,10 +75,12 @@ impl HyperliquidSigner {
         let verifying_contract = [0u8; 32]; // Zero address padded to 32 bytes
         domain_hasher.update(&verifying_contract);
         
-        let domain_separator = domain_hasher.finalize();
+        // Finalize gives us a GenericArray, not [u8; 32]. We can just convert it via as_slice().
+        let ds_array = domain_hasher.finalize();
+        let domain_separator: [u8; 32] = ds_array.into();
 
         // Object struct hash
-        let mut struct_hasher = ethers::utils::Keccak256::new();
+        let mut struct_hasher = Keccak256::new();
         // type_hash for HyperliquidTransaction:Agent(address source,address connectionId) or whatever the type is.
         // For general L1 actions, Hyperliquid typically type-hashes "HyperliquidTransaction(bytes32 action,uint64 nonce)"
         // Keccak256("HyperliquidTransaction(bytes32 action,uint64 nonce)")
@@ -89,14 +92,17 @@ impl HyperliquidSigner {
         nonce_bytes[24..32].copy_from_slice(&nonce.to_be_bytes());
         struct_hasher.update(&nonce_bytes);
         
-        let struct_hash = struct_hasher.finalize();
+        let sh_array = struct_hasher.finalize();
+        let struct_hash: [u8; 32] = sh_array.into();
 
         // 5. Build final EIP-712 Digest
-        let mut digest_hasher = ethers::utils::Keccak256::new();
+        let mut digest_hasher = Keccak256::new();
         digest_hasher.update(&[0x19, 0x01]);
         digest_hasher.update(&domain_separator);
         digest_hasher.update(&struct_hash);
-        let digest = digest_hasher.finalize();
+        
+        let digest_array = digest_hasher.finalize();
+        let digest: [u8; 32] = digest_array.into();
 
         // 6. Sign the final digest
         self.wallet.sign_hash(H256::from(digest))
