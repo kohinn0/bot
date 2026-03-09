@@ -109,8 +109,8 @@
                 "enabled": true,
                 "mode": "small_fast_profit",
                 "formula": "filled_price + max(2 * tick_size, 0.7 * current_spread)",
-                "min_profit_ticks": 40,
-                "max_profit_ticks": 200,
+                "min_profit_ticks": 150,
+                "max_profit_ticks": 500,
                 "spread_multiplier": 0.8,
                 "post_only": true,
                 "comment": "Megemelt TP célár a 1-2% nap profitcélhoz (4-10 tick SOL esetében)"
@@ -166,8 +166,8 @@
     "risk_management": {
         "position_limits": {
             "max_open_positions": 1,
-            "max_notional_usd_per_trade": 1000,
-            "balance_pct_per_trade": 0.30
+            "max_notional_usd_per_trade": 5000,
+            "balance_pct_per_trade": 2.0
         },
         "leverage": {
             "max_leverage": 10,
