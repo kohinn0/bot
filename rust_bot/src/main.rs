@@ -30,8 +30,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let coin = app_config.strategy.coin.clone();
 
     // 2. Aláíró és Kliens inicializálása
+    let is_mainnet = true; // Todo: config.rs ből
+    
     let signer = HyperliquidSigner::new(&app_config.private_key);
-    let rest_client = HyperliquidClient::new();
+    let rest_client = HyperliquidClient::new(is_mainnet);
     
     info!("🔑 Pénztárca cím: {}", signer.get_address());
 
@@ -59,6 +61,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     info!("⚙️ Kereskedési ciklus elindítva...");
 
+    // Aláíró és Kliens a Hálózathoz
+    let signer = std::sync::Arc::new(signer);
+    let rest_client = std::sync::Arc::new(rest_client);
+    
+    let signer_t = signer.clone();
+    let rest_client_t = rest_client.clone();
+    let is_dry_run = app_config.is_dry_run;
+
     // 5. A fő "szívverés" (Heartbeat) - Extrém gyors polling az RwLock-ból
     // Mivel aszinkron és lock-free a state_ref, ezt nyugodtan pörgethetjük 1ms delay-el
     tokio::spawn(async move {
@@ -66,18 +76,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(signal) = signal_engine.tick().await {
                 info!("🚨 SZIGNÁL ÉSZLELVE: {} @ {:.4}", signal.side, signal.target_mid);
                 
-                let payload = order_manager.build_ladder_payload(&signal.side, signal.target_mid, target_usd);
+                let mut payload = order_manager.build_ladder_payload(&signal.side, signal.target_mid, target_usd);
                 
+                let nonce = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as u64;
+
+                // Frissítjük a payload nonce-t a signer és backend számára
+                if let Some(obj) = payload.as_object_mut() {
+                    obj.insert("nonce".to_string(), serde_json::json!(nonce));
+                }
+
                 info!("🛠️ Order Payload előkészítve: {}", serde_json::to_string(&payload).unwrap());
 
-                // TODO: Sign payload (Signer) & Send via REST (Client)
-                // A Pythonhoz képest ez itt < 1ms alatt fog megtörténni.
-                
-                // Mivel egyelőre éles bekötés még nincsen (csak Dry Run logolás),
-                // szimuláljuk, hogy bejött egy trade, és elmentjük a PnL fájlba a Dashboardnak.
-                if app_config.is_dry_run {
+                if is_dry_run {
+                    // Mivel egyelőre éles bekötés még nincsen (csak Dry Run logolás),
+                    // szimuláljuk, hogy bejött egy trade, és elmentjük a PnL fájlba a Dashboardnak.
                     simulated_balance_usd += 2.50; // Random nyereség szimuláció
                     pnl_tracker.add_trade(2.55, 0.05, simulated_balance_usd);
+                } else {
+                    info!(" ام Aláírás és küldés folyamatban (LIVE)...");
+                    let action = payload["action"].clone();
+                    match signer_t.sign_l1_action(action.clone(), nonce, is_mainnet).await {
+                        Ok(signature) => {
+                            info!("✅ Payload aláírva! EIP-712 Signature generálva.");
+                            match rest_client_t.send_l1_action(action, nonce, signature).await {
+                                Ok(response) => info!("🎯 Order elküldve! Válasz: {}", response),
+                                Err(e) => tracing::error!("❌ Hiba az order küldésekor: {}", e),
+                            }
+                        },
+                        Err(e) => tracing::error!("❌ Hiba az order aláírásakor: {}", e),
+                    }
                 }
 
                 // Cooldown: miután kiraktuk a letrát, várunk picit, hogy ne spammeljünk
