@@ -42,6 +42,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state_ref = feed.state.clone();
     feed.start().await;
 
+    // === EIP-712 HASH TEST ===
+    use crate::logic::order_manager::{OrderAction, OrderWire, OrderTypeWire, LimitOrderType};
+    
+    let test_action = OrderAction {
+        type_: "order".to_string(),
+        orders: vec![
+            OrderWire {
+                a: 0,
+                b: false,
+                p: "85.90".to_string(),
+                s: "1.164".to_string(),
+                r: false,
+                t: OrderTypeWire { limit: LimitOrderType { tif: "Alo".to_string() } }
+            }
+        ],
+        grouping: "na".to_string()
+    };
+    
+    info!("=== RUNNING LOCAL HASH TEST ===");
+    let _ = signer.sign_l1_action(&test_action, 1773096726676, true).await;
+    panic!("=== HASH TEST FINISHED ===");
+
     use crate::logic::signal::SignalEngine;
     use crate::logic::order_manager::OrderManager;
     use crate::logic::bot_pnl::PnlTracker;

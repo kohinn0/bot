@@ -44,11 +44,16 @@ impl HyperliquidSigner {
         let mut data = rmp_serde::to_vec_named(action)
             .expect("Failed to serialize Action to MessagePack");
             
+        println!("1. MsgPack Action Hex (len={}):\n{}", data.len(), hex::encode(&data));
+            
         // 2. HL Specifikus: Hozzáfűzzük a Nonce-t (8 bájt, big endian) és a Vault flag-et (0x00)
         data.extend_from_slice(&nonce.to_be_bytes());
         data.push(0x00); // vault_address is None
         
+        println!("\n2. After Nonce & Vault (len={}):\n{}", data.len(), hex::encode(&data));
+        
         let connection_id = ethers::utils::keccak256(&data);
+        println!("\n3. ConnectionId (Action Hash):\n{}", hex::encode(connection_id));
 
         // 3. Domain Separator generálása az "Exchange" L1 endpointra
         let mut domain_hasher = Keccak256::new();
@@ -68,6 +73,8 @@ impl HyperliquidSigner {
         
         let ds_array = domain_hasher.finalize();
         let domain_separator: [u8; 32] = ds_array.into();
+        
+        println!("\n5. EIP-712 Domain Hash:\n{}", hex::encode(domain_separator));
 
         // 4. Struct Hash generálása a Phantom Agentre
         let mut struct_hasher = Keccak256::new();
@@ -82,6 +89,8 @@ impl HyperliquidSigner {
         
         let sh_array = struct_hasher.finalize();
         let struct_hash: [u8; 32] = sh_array.into();
+        
+        println!("6. EIP-712 Message Hash (Struct Hash):\n{}", hex::encode(struct_hash));
 
         // 5. Build final EIP-712 Digest
         let mut digest_hasher = Keccak256::new();
@@ -91,6 +100,8 @@ impl HyperliquidSigner {
         
         let digest_array = digest_hasher.finalize();
         let digest: [u8; 32] = digest_array.into();
+        
+        println!("7. Final Keccak256 Digest:\n{}", hex::encode(digest));
 
         // 6. Sign
         self.wallet.sign_hash(H256::from(digest))
