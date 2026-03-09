@@ -1,6 +1,6 @@
 use ethers::core::types::{Signature, H256};
 use ethers::signers::{LocalWallet, Signer, WalletError};
-use ethers::core::types::transaction::eip712::{Eip712, EIP712Domain};
+use ethers::core::types::transaction::eip712::EIP712Domain;
 use sha3::{Digest, Keccak256};
 use std::str::FromStr;
 

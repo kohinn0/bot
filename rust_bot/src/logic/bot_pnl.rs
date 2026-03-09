@@ -65,7 +65,7 @@ impl PnlTracker {
     }
 
     pub fn save_state(&self, account_value: f64) {
-        let mut state_to_save = PnlState {
+        let state_to_save = PnlState {
             cumulative_pnl: self.state.cumulative_pnl,
             win_count: self.state.win_count,
             loss_count: self.state.loss_count,
