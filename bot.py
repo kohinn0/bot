@@ -335,37 +335,9 @@ class SebessegBot:
             has_fills, filled_size, avg_price = self.order_manager.check_fills()
 
         # --- PING-PONG Repricing Engine ---
-        # Ha az ár elmozdult a pihentetett letrától, törölje és azonnal rakja fel az új mid alapján
-        if not has_fills and current_mid:
-            placed_mid = self.trade_params.get("current_mid", current_mid)
-            drift = abs(current_mid - placed_mid)
-            
-            # Dinamikus Drift: Szinkronba hozzuk a létra 0.0005-ös padlójával (SIGMA_R_FLOOR)
-            # Ha a létra 50$-ra van, ne re-price-oljunk 5$-onként. Kb a létra táv felénél (0.5x) húzzuk utána.
-            effective_sigma = max(float(self.trade_params.get("sigma_r", 0.0)), 0.0005)
-            drift_limit_usd = max(effective_sigma * current_mid * 0.5, 10.0 * float(tick_size))
-            
-            if drift > drift_limit_usd:
-                logger.info(f"🔄 PING-PONG REPRICE: Ár {drift:.2f} USD-t mozdult el a letrától (Limit: {drift_limit_usd:.2f}). Újrahúzás a jelenlegi középárhoz...")
-                self.order_manager.cancel_ladder()
-                
-                # Újrahúzás ugyanazokkal a paraméterekkel, csak az új `current_mid`-del
-                self.trade_params["current_mid"] = current_mid
-                ladder = self.order_manager.place_ladder(
-                    coin=self.active_coin,
-                    side=str(self.trade_params["target_side"]),
-                    mid_price=current_mid,
-                    total_usd_notional=float(self.trade_params["sz_usd"]),
-                    tick_size=float(tick_size),
-                    sigma_r=float(self.trade_params["sigma_r"]) * float(self.trade_params.get("skew_penalty", 1.0))
-                )
-                
-                if ladder:
-                    logger.info("✅ Ping-Pong reprice létra betöltve!")
-                else:
-                    logger.info("❌ Ping-Pong reprice elbukott, visszatérés ARMED-be.")
-                    self.state = "ARMED"
-                return
+        # TILTÓLISTÁS: Az Ambush Maker stratégia lényege, hogy BE THE TRAP, DON'T CHASE!
+        # Ha a piac rángatózik, a Ping-Pong logika épp akkor rántja el a csapdát, 
+        # amikor az árfolyam beleesne. Ezért letiltva.
 
         signal_time = float(self.trade_params.get("signal_time", time.time()))
         signal_age_ms = (time.time() - signal_time) * 1000.0
