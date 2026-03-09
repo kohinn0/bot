@@ -63,12 +63,12 @@ if [ ! -f ".env" ]; then
     cp .env.example .env
     echo ""
     echo -e "${RED}⚠️  Add meg a Hyperliquid privát kulcsodat:${NC}"
-    read -rsp "  PRIVATE_KEY (0x...): " PK_INPUT
+    read -rsp "  PRIVATE_KEY (0x...): " PK_INPUT < /dev/tty
     echo ""
     sed -i "s|0x_id_be_a_sajat_private_kulcsodat|$PK_INPUT|g" .env
 
     echo -e "${YELLOW}  Élesen futtassuk? (true=szimuláció / false=ÉLES)${NC}"
-    read -rp "  DRY_RUN [true]: " DRY_RUN_INPUT
+    read -rp "  DRY_RUN [true]: " DRY_RUN_INPUT < /dev/tty
     DRY_RUN_INPUT=${DRY_RUN_INPUT:-true}
     sed -i "s|DRY_RUN=true|DRY_RUN=$DRY_RUN_INPUT|g" .env
     echo -e "${GREEN}✅ .env mentve${NC}"
@@ -153,7 +153,7 @@ echo ""
 echo -e "  ${YELLOW}⚠️  Ne felejtsd el ellenőrizni a DRY_RUN értékét a .env fájlban!${NC}"
 echo ""
 
-read -rp "  Elindítsuk a botot most? [y/N]: " START_NOW
+read -rp "  Elindítsuk a botot most? [y/N]: " START_NOW < /dev/tty
 if [[ "$START_NOW" =~ ^[Yy]$ ]]; then
     sudo systemctl start "$SERVICE_NAME"
     echo -e "${GREEN}🚀 Bot elindítva! Napló: journalctl -u $SERVICE_NAME -f${NC}"
