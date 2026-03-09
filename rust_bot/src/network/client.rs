@@ -44,9 +44,14 @@ impl HyperliquidClient {
         signature: Signature,
     ) -> Result<Value, reqwest::Error> {
         
-        // Ethers Signature konvertálás HL formátumba
-        let r = hex::encode(signature.r.0);
-        let s = hex::encode(signature.s.0);
+        // Ethers Signature (U256) konvertálás HL formátumba (Hex string)
+        let mut r_bytes = [0u8; 32];
+        signature.r.to_big_endian(&mut r_bytes);
+        let r_hex = hex::encode(r_bytes);
+        
+        let mut s_bytes = [0u8; 32];
+        signature.s.to_big_endian(&mut s_bytes);
+        let s_hex = hex::encode(s_bytes);
         // A HL egy 27/28 - 27 offsettel nézni a v-t
         let v_val = signature.v as u8;
         let v = if v_val >= 27 { v_val - 27 } else { v_val };
@@ -55,8 +60,8 @@ impl HyperliquidClient {
             "action": action,
             "nonce": nonce,
             "signature": {
-                "r": format!("0x{}", r),
-                "s": format!("0x{}", s),
+                "r": format!("0x{}", r_hex),
+                "s": format!("0x{}", s_hex),
                 "v": v
             }
         });
