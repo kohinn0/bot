@@ -52,9 +52,9 @@ impl HyperliquidClient {
         let mut s_bytes = [0u8; 32];
         signature.s.to_big_endian(&mut s_bytes);
         let s_hex = hex::encode(s_bytes);
-        // A HL egy 27/28 - 27 offsettel nézni a v-t
+        // HL expects legacy Ethereum v (27 or 28) for EIP-712 L1 actions
         let v_val = signature.v as u8;
-        let v = if v_val >= 27 { v_val - 27 } else { v_val };
+        let v = if v_val < 27 { v_val + 27 } else { v_val };
         
         let payload = json!({
             "action": action,
