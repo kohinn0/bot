@@ -46,11 +46,20 @@ impl AppConfig {
 
         let active_coin = env::var("ACTIVE_COIN").unwrap_or_else(|_| "SOL".to_string()).to_uppercase();
 
-        // Load strategy_maker.json
-        let config_path = "../strategy_maker.json"; // Rust bot a bot mappa belsejében van
-        let config_str = fs::read_to_string(config_path).unwrap_or_else(|e| {
-            panic!("❌ Hiba a {} olvasásakor: {}", config_path, e);
-        });
+        // Load strategy_maker.json fallback paths
+        let paths = ["strategy_maker.json", "../strategy_maker.json", "./rust_bot/strategy_maker.json"];
+        let mut config_str = String::new();
+        
+        for path in paths.iter() {
+            if let Ok(content) = fs::read_to_string(path) {
+                config_str = content;
+                break;
+            }
+        }
+        
+        if config_str.is_empty() {
+            panic!("❌ Hiba: Vagy a 'strategy_maker.json' nem talalhato, vagy nincs jogosultsag olvasni!");
+        }
 
         let parsed: Value = serde_json::from_str(&config_str).unwrap_or_else(|e| {
             panic!("❌ Hiba a config JSON parseolásakor: {}", e);
