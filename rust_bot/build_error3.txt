@@ -1,0 +1,11 @@
+    Checking sebessegbot_rs v0.1.0 (C:\Users\gep\bot\bot\rust_bot)
+error: this file contains an unclosed delimiter
+  --> src\main.rs:87:9
+   |
+10 | async fn main() -> Result<(), Box<dyn std::error::Error>> {
+   |                                                           - unclosed delimiter
+...
+87 |     });
+   |        ^
+
+error: could not compile `sebessegbot_rs` (bin "sebessegbot_rs") due to 1 previous error
