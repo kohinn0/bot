@@ -32,11 +32,12 @@ pub struct OrderAction {
 pub struct OrderManager {
     config: StrategyConfig,
     asset_idx: u32,
+    sz_decimals: u32,
 }
 
 impl OrderManager {
-    pub fn new(config: StrategyConfig, asset_idx: u32) -> Self {
-        Self { config, asset_idx }
+    pub fn new(config: StrategyConfig, asset_idx: u32, sz_decimals: u32) -> Self {
+        Self { config, asset_idx, sz_decimals }
     }
 
     /// Hyperliquid float serialization rules: max 8 decimals, no trailing zeroes, no trailing decimal points.
@@ -59,7 +60,7 @@ impl OrderManager {
     ) -> OrderAction {
         let is_buy = side.to_lowercase() == "buy";
         let tick = self.config.min_tick_size;
-        let min_shares = self.config.min_shares;
+        let sz_step = 10_f64.powi(-(self.sz_decimals as i32));
 
         let mut orders = Vec::new();
         
@@ -79,8 +80,10 @@ impl OrderManager {
             
             let size_usd = sz_usd * level_cfg.size_pct;
             let raw_sz = size_usd / rounded_price;
-            let sz = (raw_sz / min_shares).floor() * min_shares;
+            let sz = (raw_sz / sz_step).floor() * sz_step;
 
+            // Hyperliquid also places a hard minimum on order size value ($10)
+            // But for safety, we round aggressively down.
             orders.push(OrderWire {
                 a: self.asset_idx,
                 b: is_buy,

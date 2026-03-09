@@ -37,18 +37,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     info!("🔑 Pénztárca cím: {}", signer.get_address());
 
-    // 3. Asset Meta lekérdezés a HL API-ból (keressük a coin Asset ID-ját)
+    // 3. Asset Meta lekérdezés a HL API-ból (keressük a coin Asset ID-ját és szDecimals-t)
     let meta = rest_client.get_meta().await.expect("❌ Nem sikerült lekérni a meta adatokat");
     let mut asset_idx = 0;
+    let mut sz_decimals = 0;
     if let Some(universe) = meta["universe"].as_array() {
         for (idx, coin_data) in universe.iter().enumerate() {
             if coin_data["name"].as_str().unwrap_or("") == coin {
                 asset_idx = idx as u32;
+                sz_decimals = coin_data["szDecimals"].as_u64().unwrap_or(0) as u32;
                 break;
             }
         }
     }
-    info!("✅ Kereskedési pár: {}, Asset ID: {}", coin, asset_idx);
+    info!("✅ Kereskedési pár: {}, Asset ID: {}, Size Decimals: {}", coin, asset_idx, sz_decimals);
 
     // 4. WebSocket Feed elindítása (Külön Tokio szálon fog pörögni)
     let feed = HyperliquidFeed::new(&coin);
@@ -69,7 +71,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // 5. Szignál motor, Order Manager és PnL Tracker inicializálása
     let mut signal_engine = SignalEngine::new(app_config.strategy.clone(), state_ref.clone());
-    let order_manager = OrderManager::new(app_config.strategy.clone(), asset_idx);
+    let order_manager = OrderManager::new(app_config.strategy.clone(), asset_idx, sz_decimals);
     let mut pnl_tracker = PnlTracker::new("../logs/pnl_state.json");
     
     info!("⚙️ Kereskedési ciklus elindítva...");
