@@ -31,21 +31,22 @@ pub struct OrderAction {
 
 pub struct OrderManager {
     config: StrategyConfig,
+    asset_idx: u32,
 }
 
 impl OrderManager {
-    pub fn new(config: StrategyConfig) -> Self {
-        Self { config }
+    pub fn new(config: StrategyConfig, asset_idx: u32) -> Self {
+        Self { config, asset_idx }
     }
 
-    /// Segédfüggvény a tizedesjegyek számolásához f64-nél
-    fn count_decimals(value: f64) -> usize {
-        let s = format!("{:.10}", value);
+    /// Hyperliquid float serialization rules: max 8 decimals, no trailing zeroes, no trailing decimal points.
+    fn float_to_wire(x: f64) -> String {
+        let s = format!("{:.8}", x);
         let trimmed = s.trim_end_matches('0');
-        if let Some(pos) = trimmed.find('.') {
-            trimmed.len() - pos - 1
+        if trimmed.ends_with('.') {
+            trimmed.trim_end_matches('.').to_string()
         } else {
-            0
+            trimmed.to_string()
         }
     }
 
@@ -59,9 +60,6 @@ impl OrderManager {
         let is_buy = side.to_lowercase() == "buy";
         let tick = self.config.min_tick_size;
         let min_shares = self.config.min_shares;
-
-        let price_decimals = Self::count_decimals(tick);
-        let size_decimals = Self::count_decimals(min_shares);
 
         let mut orders = Vec::new();
         
@@ -84,10 +82,10 @@ impl OrderManager {
             let sz = (raw_sz / min_shares).floor() * min_shares;
 
             orders.push(OrderWire {
-                a: 0,
+                a: self.asset_idx,
                 b: is_buy,
-                p: format!("{:.*}", price_decimals, rounded_price),
-                s: format!("{:.*}", size_decimals, sz),
+                p: Self::float_to_wire(rounded_price),
+                s: Self::float_to_wire(sz),
                 r: false,
                 t: OrderTypeWire {
                     limit: LimitOrderType {

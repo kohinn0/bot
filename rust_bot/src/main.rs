@@ -37,32 +37,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     info!("🔑 Pénztárca cím: {}", signer.get_address());
 
-    // 3. WebSocket Feed elindítása (Külön Tokio szálon fog pörögni)
+    // 3. Asset Meta lekérdezés a HL API-ból (keressük a coin Asset ID-ját)
+    let meta = rest_client.get_meta().await.expect("❌ Nem sikerült lekérni a meta adatokat");
+    let mut asset_idx = 0;
+    if let Some(universe) = meta["universe"].as_array() {
+        for (idx, coin_data) in universe.iter().enumerate() {
+            if coin_data["name"].as_str().unwrap_or("") == coin {
+                asset_idx = idx as u32;
+                break;
+            }
+        }
+    }
+    info!("✅ Kereskedési pár: {}, Asset ID: {}", coin, asset_idx);
+
+    // 4. WebSocket Feed elindítása (Külön Tokio szálon fog pörögni)
     let feed = HyperliquidFeed::new(&coin);
     let state_ref = feed.state.clone();
     feed.start().await;
-
-    // === EIP-712 HASH TEST ===
-    use crate::logic::order_manager::{OrderAction, OrderWire, OrderTypeWire, LimitOrderType};
-    
-    let test_action = OrderAction {
-        type_: "order".to_string(),
-        orders: vec![
-            OrderWire {
-                a: 0,
-                b: false,
-                p: "85.90".to_string(),
-                s: "1.164".to_string(),
-                r: false,
-                t: OrderTypeWire { limit: LimitOrderType { tif: "Alo".to_string() } }
-            }
-        ],
-        grouping: "na".to_string()
-    };
-    
-    info!("=== RUNNING LOCAL HASH TEST ===");
-    let _ = signer.sign_l1_action(&test_action, 1773096726676, true).await;
-    panic!("=== HASH TEST FINISHED ===");
 
     use crate::logic::signal::SignalEngine;
     use crate::logic::order_manager::OrderManager;
@@ -76,9 +67,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     info!("💰 Kereskedési méret beállítva: ${:.2} (Minden létra hossza)", target_usd);
     
-    // 4. Szignál motor, Order Manager és PnL Tracker inicializálása
+    // 5. Szignál motor, Order Manager és PnL Tracker inicializálása
     let mut signal_engine = SignalEngine::new(app_config.strategy.clone(), state_ref.clone());
-    let order_manager = OrderManager::new(app_config.strategy.clone());
+    let order_manager = OrderManager::new(app_config.strategy.clone(), asset_idx);
     let mut pnl_tracker = PnlTracker::new("../logs/pnl_state.json");
     
     info!("⚙️ Kereskedési ciklus elindítva...");
