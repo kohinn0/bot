@@ -4,6 +4,13 @@ use tracing::info;
 use serde_json::Value;
 
 #[derive(Debug, Clone)]
+pub struct LadderLevel {
+    pub level: u32,
+    pub offset_from_mid_ticks: i32,
+    pub size_pct: f64,
+}
+
+#[derive(Debug, Clone)]
 pub struct StrategyConfig {
     pub coin: String,
     pub leverage: u32,
@@ -13,6 +20,8 @@ pub struct StrategyConfig {
     pub z_score_threshold: f64,
     pub sigma_r: f64,
     pub min_tick_size: f64,
+    pub min_shares: f64,
+    pub ladder_levels: Vec<LadderLevel>,
     pub ping_pong_reprice: Option<bool>,
     pub skew_penalty: Option<f64>,
 }
@@ -51,6 +60,17 @@ impl AppConfig {
         let om = &parsed["order_management"];
         let tp = &parsed["technical_precision"];
 
+        let mut ladder_levels = Vec::new();
+        if let Some(arr) = om["entry"]["ladder_config"].as_array() {
+            for item in arr {
+                ladder_levels.push(LadderLevel {
+                    level: item["level"].as_u64().unwrap_or(1) as u32,
+                    offset_from_mid_ticks: item["offset_from_mid_ticks"].as_i64().unwrap_or(0) as i32,
+                    size_pct: item["size_pct"].as_f64().unwrap_or(0.33),
+                });
+            }
+        }
+
         let strategy = StrategyConfig {
             coin: active_coin,
             leverage: rm["leverage"]["max_leverage"].as_u64().unwrap_or(10) as u32,
@@ -62,6 +82,8 @@ impl AppConfig {
             sigma_r: om["entry"]["sigma_multiplier"].as_f64().unwrap_or(1.5),
             
             min_tick_size: tp["tick_size"].as_f64().unwrap_or(0.01),
+            min_shares: tp["min_shares"].as_f64().unwrap_or(0.001),
+            ladder_levels,
             
             ping_pong_reprice: None,
             skew_penalty: Some(1.0),
