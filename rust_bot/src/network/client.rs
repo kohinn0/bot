@@ -37,9 +37,9 @@ impl HyperliquidClient {
     }
 
     /// Küldi az EIP-712-vel aláírt actiont az exchange végpontra
-    pub async fn send_l1_action(
+    pub async fn send_l1_action<T: serde::Serialize>(
         &self,
-        action: &crate::logic::order_manager::OrderAction,
+        action: &T,
         nonce: u64,
         signature: Signature,
     ) -> Result<Value, reqwest::Error> {

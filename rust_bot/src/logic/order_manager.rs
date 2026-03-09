@@ -29,6 +29,15 @@ pub struct OrderAction {
     pub grouping: String,
 }
 
+#[derive(Serialize, Debug, Clone)]
+pub struct UpdateLeverageAction {
+    #[serde(rename = "type")]
+    pub type_: String,
+    pub asset: u32,
+    pub isCross: bool,
+    pub leverage: u32,
+}
+
 pub struct OrderManager {
     config: StrategyConfig,
     asset_idx: u32,
@@ -48,6 +57,15 @@ impl OrderManager {
             trimmed.trim_end_matches('.').to_string()
         } else {
             trimmed.to_string()
+        }
+    }
+
+    pub fn build_leverage_payload(&self) -> UpdateLeverageAction {
+        UpdateLeverageAction {
+            type_: "updateLeverage".to_string(),
+            asset: self.asset_idx,
+            isCross: true, // Use cross margin to prevent isolated liquidations in sudden volatility
+            leverage: self.config.leverage as u32,
         }
     }
 

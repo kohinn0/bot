@@ -74,17 +74,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let order_manager = OrderManager::new(app_config.strategy.clone(), asset_idx, sz_decimals);
     let mut pnl_tracker = PnlTracker::new("../logs/pnl_state.json");
     
-    info!("⚙️ Kereskedési ciklus elindítva...");
-
-    // Aláíró és Kliens a Hálózathoz
+    // Aláíró és Kliens felkészítése a Hálózathoz
     let signer = std::sync::Arc::new(signer);
     let rest_client = std::sync::Arc::new(rest_client);
-    
-    let signer_t = signer.clone();
-    let rest_client_t = rest_client.clone();
     let is_dry_run = app_config.is_dry_run;
 
-    // 5. A fő "szívverés" (Heartbeat) - Extrém gyors polling az RwLock-ból
+    // === INICIALIZÁLÓ LEVERAGE BEÁLLÍTÁS ===
+    if !is_dry_run {
+        info!("🔧 Kezdeti Tőkeáttétel (Leverage) beállítása: {}x Cross...", app_config.strategy.leverage);
+        let leverage_action = order_manager.build_leverage_payload();
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+
+        match signer.sign_l1_action(&leverage_action, nonce, is_mainnet).await {
+            Ok(signature) => {
+                match rest_client.send_l1_action(&leverage_action, nonce, signature).await {
+                    Ok(_) => info!("✅ Tőkeáttétel sikeresen beállítva a tőzsdén!"),
+                    Err(e) => tracing::error!("❌ Hiba a tőkeáttétel beállításánál: {}", e),
+                }
+            },
+            Err(e) => tracing::error!("❌ Hiba a tőkeáttétel aláírásánál: {}", e),
+        }
+    }
+
+    info!("⚙️ Kereskedési ciklus elindítva...");
+
+    let signer_t = signer.clone();
+    let rest_client_t = rest_client.clone();
+
+    // 6. A fő "szívverés" (Heartbeat) - Extrém gyors polling az RwLock-ból
     // Mivel aszinkron és lock-free a state_ref, ezt nyugodtan pörgethetjük 1ms delay-el
     tokio::spawn(async move {
         loop {

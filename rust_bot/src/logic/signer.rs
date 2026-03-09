@@ -39,7 +39,7 @@ impl HyperliquidSigner {
         &self.address
     }
 
-    pub async fn sign_l1_action(&self, action: &crate::logic::order_manager::OrderAction, nonce: u64, is_mainnet: bool) -> Result<Signature, WalletError> {
+    pub async fn sign_l1_action<T: serde::Serialize>(&self, action: &T, nonce: u64, is_mainnet: bool) -> Result<Signature, WalletError> {
         // 1. A json Action MessagePack formátummá konvertálása
         let mut data = rmp_serde::to_vec_named(action)
             .expect("Failed to serialize Action to MessagePack");
