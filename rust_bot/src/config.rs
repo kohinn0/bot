@@ -16,6 +16,7 @@ pub struct StrategyConfig {
     pub leverage: u32,
     pub is_isolated: bool,
     pub base_sz_usd: f64,
+    pub balance_pct_per_trade: f64,
     pub max_positions: u32,
     pub z_score_threshold: f64,
     pub sigma_r: f64,
@@ -76,6 +77,7 @@ impl AppConfig {
             leverage: rm["leverage"]["max_leverage"].as_u64().unwrap_or(10) as u32,
             is_isolated: !rm["leverage"]["cross_margin"].as_bool().unwrap_or(false),
             base_sz_usd: rm["position_limits"]["max_notional_usd_per_trade"].as_f64().unwrap_or(50.0),
+            balance_pct_per_trade: rm["position_limits"]["balance_pct_per_trade"].as_f64().unwrap_or(2.0),
             max_positions: rm["position_limits"]["max_open_positions"].as_u64().unwrap_or(1) as u32,
             
             z_score_threshold: om["entry"]["signal_params"]["z_threshold"].as_f64().unwrap_or(3.5),
