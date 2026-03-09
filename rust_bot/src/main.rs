@@ -42,6 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     use crate::logic::signal::SignalEngine;
     use crate::logic::order_manager::OrderManager;
+    use crate::logic::bot_pnl::PnlTracker;
 
     let mut simulated_balance_usd = 1000.0;
     
@@ -51,9 +52,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     info!("💰 Kereskedési méret beállítva: ${:.2} (Minden létra hossza)", target_usd);
     
-    // 4. Szignál motor és Order Manager inicializálása
+    // 4. Szignál motor, Order Manager és PnL Tracker inicializálása
     let mut signal_engine = SignalEngine::new(app_config.strategy.clone(), state_ref.clone());
     let order_manager = OrderManager::new(app_config.strategy.clone());
+    let mut pnl_tracker = PnlTracker::new("../logs/pnl_state.json");
     
     info!("⚙️ Kereskedési ciklus elindítva...");
 
@@ -70,6 +72,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 // TODO: Sign payload (Signer) & Send via REST (Client)
                 // A Pythonhoz képest ez itt < 1ms alatt fog megtörténni.
+                
+                // Mivel egyelőre éles bekötés még nincsen (csak Dry Run logolás),
+                // szimuláljuk, hogy bejött egy trade, és elmentjük a PnL fájlba a Dashboardnak.
+                if app_config.is_dry_run {
+                    simulated_balance_usd += 2.50; // Random nyereség szimuláció
+                    pnl_tracker.add_trade(2.55, 0.05, simulated_balance_usd);
+                }
 
                 // Cooldown: miután kiraktuk a letrát, várunk picit, hogy ne spammeljünk
                 tokio::time::sleep(tokio::time::Duration::from_millis(5000)).await;
