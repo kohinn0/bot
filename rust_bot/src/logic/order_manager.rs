@@ -129,10 +129,11 @@ impl OrderManager {
             let skew_adj = self.current_pos * self.config.skew_penalty.unwrap_or(0.0);
             let offset_ticks = (level_cfg.offset_from_mid_ticks as f64) + if is_buy { skew_adj } else { -skew_adj };
             
+            // 💡 MENTOR JAVÍTÁS: A jeleket megcseréljük, mert a configban negatív értékek vannak
             let mut raw_price = if is_buy {
-                mid_price - (offset_ticks * tick)
+                mid_price + (offset_ticks * tick) // mid + (-30) = mid - 30
             } else {
-                mid_price + (offset_ticks * tick)
+                mid_price - (offset_ticks * tick) // mid - (-30) = mid + 30
             };
 
             // 💡 MENTOR TRÜKK: Az 1. szinten próbáljunk "Join"-olni a legjobb árhoz
