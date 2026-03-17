@@ -133,8 +133,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let mut r_b = [0u8; 32]; sig.r.to_big_endian(&mut r_b);
                     let v = if sig.v < 27 { (sig.v + 27) as u8 } else { sig.v as u8 };
                     
+                    let action_obj = exit_action; 
                     feed_f.send_action(serde_json::json!({
-                        "action": exit_action, "nonce": e_nonce,
+                        "action": action_obj,
+                        "nonce": e_nonce,
                         "signature": {"r": format!("0x{}", hex::encode(r_b)), "s": format!("0x{}", hex::encode(s_b)), "v": v}
                     }));
                     info!("🎯 DINAMIKUS TP/SL KIHELYEZVE: {} @ {:.2} (SL: {:.2})", tp_side, tp_price, sl_price);
@@ -233,7 +235,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let v = if sig.v < 27 { (sig.v + 27) as u8 } else { sig.v as u8 };
 
                         feed_t.send_action(serde_json::json!({
-                            "action": cancel_action, "nonce": c_nonce,
+                            "action": cancel_action,
+                            "nonce": c_nonce,
                             "signature": {"r": format!("0x{}", hex::encode(r_b)), "s": format!("0x{}", hex::encode(s_b)), "v": v}
                         }));
                         info!("🧹 SZELLEM-ORDERS TÖRÖLVE (CancelByCoin)");
@@ -253,7 +256,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let v = if signature.v < 27 { (signature.v + 27) as u8 } else { signature.v as u8 };
 
                             let payload = serde_json::json!({
-                                "action": action, "nonce": nonce,
+                                "action": action,
+                                "nonce": nonce,
                                 "signature": {"r": format!("0x{}", hex::encode(r_bytes)), "s": format!("0x{}", hex::encode(s_bytes)), "v": v}
                             });
 
