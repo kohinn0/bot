@@ -138,13 +138,17 @@ impl HyperliquidFeed {
                                 }
                                 // Handle outgoing actions (Orders) - This is the LOW LATENCY path
                                 Some(payload) = cmd_rx.recv() => {
+                                    let request_id = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
                                     let req = WsRequest::Exchange {
-                                        request_id: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64,
+                                        request_id,
                                         payload,
                                     };
                                     if let Ok(json) = serde_json::to_string(&req) {
                                         if let Err(e) = ws_stream.send(Message::Text(json)).await {
                                             error!("❌ Hiba a WS megbízás küldésekor: {}", e);
+                                        } else {
+                                            // 💡 MENTOR TRÜKK: Visszacsatolás a küldésről
+                                            info!("📤 Megbízás kiküldve (ReqID: {})", request_id);
                                         }
                                     }
                                 }
@@ -175,7 +179,14 @@ impl HyperliquidFeed {
                         self.process_user_event(data).await;
                     }
                 }
-                _ => {}
+                "info" | "error" => {
+                    info!("📡 WS SERVER RESPONSE: {}", text);
+                }
+                _ => {
+                    if text.contains("status") || text.contains("response") {
+                        info!("📡 WS Feedback: {}", text);
+                    }
+                }
             }
         }
     }

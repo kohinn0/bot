@@ -176,8 +176,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::spawn(async move {
         loop {
             if let Some(signal) = signal_engine.tick().await {
-                // Cooldown ellenőrzése: ne küldjünk 2 másodpercen belül újabb létrát
-                if last_signal_time.elapsed() < std::time::Duration::from_millis(2000) {
+                // Cooldown ellenőrzése: ne küldjünk 500ms-on belül újabb létrát
+                if last_signal_time.elapsed() < std::time::Duration::from_millis(500) {
                     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
                     continue;
                 }

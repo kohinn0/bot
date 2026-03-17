@@ -27,7 +27,7 @@ impl SignalEngine {
             config,
             state_ref,
             price_history: VecDeque::new(),
-            history_limit: 200, // 60-ról 200-ra emelve a stabilitásért
+            history_limit: 500, // 200-ról 500-ra emelve a stabilitásért
             sum_x: 0.0,
             sum_x2: 0.0,
             tick_count: 0,
@@ -90,7 +90,7 @@ impl SignalEngine {
         let imb_momentum = imbalance - self.prev_imbalance;
         self.prev_imbalance = imbalance;
 
-        let base_threshold = self.config.z_score_threshold;
+        let base_threshold = 1.8; // Kicsit szigorúbb, de több jel (Z-score szűrő)
         let vol_adj_threshold = base_threshold * self.config.sigma_r;
 
         // 4. "HÚSEVŐ" HFT ÁRAZÁS
