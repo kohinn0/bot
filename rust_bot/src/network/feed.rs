@@ -141,16 +141,11 @@ impl HyperliquidFeed {
                                         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64
                                     );
                                     
-                                    // 💡 OFFICIAL HYPERLIQUID WS POST FORMAT:
-                                    // method: "post", id: <num>, request: { type: "action", payload: { action, nonce, signature } }
-                                    let post_payload = serde_json::json!({
-                                        "type": "action",
-                                        "payload": payload
-                                    });
-
+                                    // 💡 REALIGNED HYPERLIQUID WS POST FORMAT:
+                                    // method: "post", id: <num>, request: { action, nonce, signature }
                                     let req = WsRequest::Post {
                                         id: req_id,
-                                        request: post_payload,
+                                        request: payload,
                                     };
                                     if let Ok(json) = serde_json::to_string(&req) {
                                         if let Err(e) = ws_stream.send(Message::Text(json)).await {
