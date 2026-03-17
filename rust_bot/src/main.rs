@@ -61,9 +61,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     use crate::logic::order_manager::OrderManager;
     use crate::logic::bot_pnl::PnlTracker;
 
-    let mut simulated_balance_usd = 1000.0;
+    let mut simulated_balance_usd = 99.0;
     
-    // Százalék kiszámítása a 1000 dollárból, beállítva a maximum plafonnal (base_sz_usd)
+    // Százalék kiszámítása a 99 dollárból, beállítva a maximum plafonnal (base_sz_usd)
     let calculated_usd = simulated_balance_usd * (app_config.strategy.balance_pct_per_trade / 100.0) * (app_config.strategy.leverage as f64);
     let target_usd = calculated_usd.min(app_config.strategy.base_sz_usd);
     

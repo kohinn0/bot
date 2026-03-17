@@ -20,7 +20,7 @@ impl Default for PnlState {
             win_count: 0,
             loss_count: 0,
             total_fees: 0.0,
-            account_value: 1000.0, // Default for dry run
+            account_value: 99.0, // Default for dry run
             trades: vec![0.0],
         }
     }
