@@ -138,6 +138,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "signature": {"r": format!("0x{}", hex::encode(r_b)), "s": format!("0x{}", hex::encode(s_b)), "v": v}
                     }));
                     info!("🎯 DINAMIKUS TP/SL KIHELYEZVE: {} @ {:.2} (SL: {:.2})", tp_side, tp_price, sl_price);
+                }
             }
         }
     });
