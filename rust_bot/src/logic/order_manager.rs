@@ -85,11 +85,38 @@ impl OrderManager {
         }
     }
 
-    /// Létrehozza a 3-szintes limit (Maker) rendelés array-t egy szigorú típusú hierarchiában
+    /// Létrehozza a Take Profit (Exit) megbízást az azonnali hurokhoz
+    pub fn build_exit_payload(&self, side: &str, price: f64, sz: f64) -> OrderAction {
+        let is_buy = side.to_lowercase() == "buy";
+        let mut orders = Vec::new();
+        
+        orders.push(OrderWire {
+            a: self.asset_idx,
+            b: is_buy,
+            p: Self::float_to_wire(price),
+            s: Self::float_to_wire(sz),
+            r: false,
+            t: OrderTypeWire {
+                limit: LimitOrderType {
+                    tif: "Gtc".to_string(), // Exitnél használjunk GTC-t hogy biztosan bent maradjon
+                }
+            }
+        });
+
+        OrderAction {
+            type_: "order".to_string(),
+            orders,
+            grouping: "na".to_string(),
+        }
+    }
+
+    /// ÚJ: Dinamikus árazás a Best Bid/Ask figyelembevételével
     pub fn build_ladder_payload(
         &self,
         side: &str,
         mid_price: f64,
+        best_bid: f64,
+        best_ask: f64,
         sz_usd: f64,
     ) -> OrderAction {
         let is_buy = side.to_lowercase() == "buy";
@@ -98,35 +125,30 @@ impl OrderManager {
 
         let mut orders = Vec::new();
         
-        let ticks_in_mid = (mid_price / tick).floor();
-        let base_price = ticks_in_mid * tick;
-        
         for level_cfg in &self.config.ladder_levels {
-            // Skew logika: ha van pozíciónk, eltoljuk a szinteket
             let skew_adj = self.current_pos * self.config.skew_penalty.unwrap_or(0.0);
             let offset_ticks = (level_cfg.offset_from_mid_ticks as f64) + if is_buy { skew_adj } else { -skew_adj };
             
-            let raw_price = if is_buy {
-                base_price - (offset_ticks * tick) // Buy: mid-től lefelé (szóval -)
+            let mut raw_price = if is_buy {
+                mid_price - (offset_ticks * tick)
             } else {
-                base_price + (offset_ticks * tick) // Sell: mid-től felfelé
+                mid_price + (offset_ticks * tick)
             };
+
+            // 💡 MENTOR TRÜKK: Az 1. szinten próbáljunk "Join"-olni vagy 1 tickkel agresszívabbak lenni
+            if level_cfg.level == 1 {
+                raw_price = if is_buy {
+                    raw_price.max(best_bid + tick) // Legyünk 1 tickkel a legjobb vételi felett
+                } else {
+                    raw_price.min(best_ask - tick) // Legyünk 1 tickkel a legjobb eladási alatt
+                };
+            }
             
             let rounded_price = (raw_price / tick).round() * tick;
-            
             let size_usd = sz_usd * level_cfg.size_pct;
-            let raw_sz = size_usd / rounded_price;
-            let sz = (raw_sz / sz_step).floor() * sz_step;
+            let sz = ((size_usd / rounded_price) / sz_step).floor() * sz_step;
 
-            // Ellenőrizzük a bot által beállított minimum darabszámot is
-            if sz < self.config.min_shares {
-                tracing::warn!("⚠️ Szint kihagyva (L{}): Mennyiség {:.4} < {:.4} (min_shares)", level_cfg.level, sz, self.config.min_shares);
-                continue;
-            }
-
-            // Hyperliquid szigorúan veszi a 10 dolláros limitet értéknél (price * size)
-            if (rounded_price * sz) < 10.0 {
-                tracing::warn!("⚠️ Szint kihagyva (L{}): Érték ${:.2} < $10 minimum", level_cfg.level, rounded_price * sz);
+            if sz < self.config.min_shares || (rounded_price * sz) < 10.0 {
                 continue;
             }
 
