@@ -34,7 +34,8 @@ pub struct UpdateLeverageAction {
     #[serde(rename = "type")]
     pub type_: String,
     pub asset: u32,
-    pub isCross: bool,
+    #[serde(rename = "isCross")]
+    pub is_cross: bool,
     pub leverage: u32,
 }
 
@@ -42,11 +43,12 @@ pub struct OrderManager {
     config: StrategyConfig,
     asset_idx: u32,
     sz_decimals: u32,
+    pub current_pos: f64, // Új: pillanatnyi pozíció követése a skew-hoz
 }
 
 impl OrderManager {
     pub fn new(config: StrategyConfig, asset_idx: u32, sz_decimals: u32) -> Self {
-        Self { config, asset_idx, sz_decimals }
+        Self { config, asset_idx, sz_decimals, current_pos: 0.0 }
     }
 
     /// Hyperliquid float serialization rules: max 8 decimals, no trailing zeroes, no trailing decimal points.
@@ -64,7 +66,7 @@ impl OrderManager {
         UpdateLeverageAction {
             type_: "updateLeverage".to_string(),
             asset: self.asset_idx,
-            isCross: true, // Use cross margin to prevent isolated liquidations in sudden volatility
+            is_cross: !self.config.is_isolated, 
             leverage: self.config.leverage as u32,
         }
     }
@@ -86,12 +88,14 @@ impl OrderManager {
         let base_price = ticks_in_mid * tick;
         
         for level_cfg in &self.config.ladder_levels {
-            let offset_ticks = level_cfg.offset_from_mid_ticks as f64;
+            // Skew logika: ha van pozíciónk, eltoljuk a szinteket
+            let skew_adj = self.current_pos * self.config.skew_penalty.unwrap_or(0.0);
+            let offset_ticks = (level_cfg.offset_from_mid_ticks as f64) + if is_buy { skew_adj } else { -skew_adj };
             
             let raw_price = if is_buy {
-                base_price + (offset_ticks * tick)
+                base_price - (offset_ticks * tick) // Buy: mid-től lefelé (szóval -)
             } else {
-                base_price + (-offset_ticks * tick)
+                base_price + (offset_ticks * tick) // Sell: mid-től felfelé
             };
             
             let rounded_price = (raw_price / tick).round() * tick;
@@ -99,6 +103,12 @@ impl OrderManager {
             let size_usd = sz_usd * level_cfg.size_pct;
             let raw_sz = size_usd / rounded_price;
             let sz = (raw_sz / sz_step).floor() * sz_step;
+
+            // Ellenőrizzük a bot által beállított minimum darabszámot is
+            if sz < self.config.min_shares {
+                tracing::warn!("⚠️ Szint kihagyva (L{}): Mennyiség {:.4} < {:.4} (min_shares)", level_cfg.level, sz, self.config.min_shares);
+                continue;
+            }
 
             // Hyperliquid szigorúan veszi a 10 dolláros limitet értéknél (price * size)
             if (rounded_price * sz) < 10.0 {

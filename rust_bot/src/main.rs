@@ -63,6 +63,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let initial_balance = 99.0;
     let account_value = Arc::new(tokio::sync::Mutex::new(initial_balance));
+    let current_position = Arc::new(tokio::sync::Mutex::new(0.0));
     let pnl_tracker = Arc::new(tokio::sync::Mutex::new(PnlTracker::new("../logs/pnl_state.json")));
     
     // Százalék kiszámítása az induló tőkéből
@@ -73,7 +74,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // 5. Szignál motor és Order Manager inicializálása
     let mut signal_engine = SignalEngine::new(app_config.strategy.clone(), state_ref.clone());
-    let order_manager = OrderManager::new(app_config.strategy.clone(), asset_idx, sz_decimals);
+    let mut order_manager = OrderManager::new(app_config.strategy.clone(), asset_idx, sz_decimals);
     
     let is_dry_run = app_config.is_dry_run;
 
@@ -81,24 +82,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let signer = Arc::new(signer);
     let rest_client = Arc::new(rest_client);
 
-    // === VALÓS IDEJŰ FILL FIGYELŐ (PNL FRISSÍTÉS) ===
+    // === VALÓS IDEJŰ FILL ÉS POZÍCIÓ FIGYELŐ ===
     let mut fill_rx = feed.fill_tx.subscribe();
     let pnl_t = pnl_tracker.clone();
     let acc_t = account_value.clone();
+    let pos_t = current_position.clone();
     
     tokio::spawn(async move {
         while let Ok(fill) = fill_rx.recv().await {
-            info!("📈 PNL UPDATE: {} fill @ {} (Sz: {})", fill.coin, fill.px, fill.sz);
+            info!("📈 PNL/POS UPDATE: {} fill @ {} (Sz: {})", fill.coin, fill.px, fill.sz);
             
             let mut acc = acc_t.lock().await;
             let mut pnl = pnl_t.lock().await;
+            let mut pos = pos_t.lock().await;
             
-            // Élesben a fill-ek alapján frissítjük az egyenleget (leegyszerűsítve)
-            // Megjegyzés: Ez egy market maker bot, ahol a Maker fill-ek csökkentik/növelik az inventory-t
+            // Pozíció frissítése
+            let fill_sz = if fill.side == "B" { fill.sz } else { -fill.sz };
+            *pos += fill_sz;
+
+            // Egyenleg frissítése (egyszerűsített Maker profit modell)
             let side_mult = if fill.side == "B" { -1.0 } else { 1.0 };
-            *acc += fill.px * fill.sz * side_mult; // Nagyon leegyszerűsített PnL modell
+            *acc += fill.px * fill.sz * side_mult; 
             
             pnl.add_trade(0.0, fill.fee, *acc);
+            info!("📊 Aktuális Pozíció: {:.4} {}", *pos, fill.coin);
         }
     });
 
@@ -126,25 +133,47 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let feed_t = feed.clone();
     let pnl_sim_t = pnl_tracker.clone();
     let acc_sim_t = account_value.clone();
+    let pos_sim_t = current_position.clone();
+    let max_pos_limit = app_config.strategy.max_positions;
 
     // 6. A fő "szívverés" (Heartbeat) - Extrém gyors polling az RwLock-ból
     tokio::spawn(async move {
         loop {
             if let Some(signal) = signal_engine.tick().await {
-                info!("🚨 SZIGNÁL: {} @ {:.4}", signal.side, signal.target_mid);
+                // Pozíció állapot lekérése a skew-hoz és korlátozáshoz
+                let current_pos = {
+                    let p = pos_sim_t.lock().await;
+                    *p
+                };
+
+                // Egyszerűsített max_positions kontroll: ha 1 a limit, és van pozíciónk, 
+                // csak akkor engedünk újabb jelet, ha az ellentétes irányú (zárás)
+                if max_pos_limit == 1 && current_pos.abs() > 0.001 {
+                    let is_reducing = (current_pos > 0.0 && signal.side == "Sell") || (current_pos < 0.0 && signal.side == "Buy");
+                    if !is_reducing {
+                        // Nem engedünk rá több pozíciót ugyanabba az irányba
+                        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                        continue;
+                    }
+                }
+
+                info!("🚨 SZIGNÁL: {} @ {:.4} (Pos: {:.4})", signal.side, signal.target_mid, current_pos);
                 
+                // Szinkronizáljuk a pozíciót az order managerrel a skew hatáshoz
+                order_manager.current_pos = current_pos;
+
                 let action = order_manager.build_ladder_payload(&signal.side, signal.target_mid, target_usd);
-                
-                let nonce = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis() as u64;
+                let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
 
                 if is_dry_run {
                     info!("🧪 DRY RUN: Szimulált megbízás elkészítve.");
                     let mut acc = acc_sim_t.lock().await;
                     let mut pnl = pnl_sim_t.lock().await;
+                    let mut pos = pos_sim_t.lock().await;
+                    
                     *acc += 2.50; 
+                    let fill_sz = if signal.side == "Buy" { 0.1 } else { -0.1 }; // fiktív méret
+                    *pos += fill_sz;
                     pnl.add_trade(2.55, 0.05, *acc);
                 } else {
                     match signer_t.sign_l1_action(&action, nonce, is_mainnet).await {

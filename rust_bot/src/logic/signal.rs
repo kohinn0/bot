@@ -49,15 +49,17 @@ impl SignalEngine {
         let z_score = (current_state.mid_price - mean) / std_dev;
 
         // "Toxic Flow" / Imbalance logika
-        let threshold = self.config.z_score_threshold;
+        // A threshold-et korrigáljuk a sigma_r (volatilitás szorzó) értékkel
+        let base_threshold = self.config.z_score_threshold;
+        let volatility_adj_threshold = base_threshold * self.config.sigma_r;
         
-        if z_score < -threshold && current_state.imbalance > 0.6 {
+        if z_score < -volatility_adj_threshold && current_state.imbalance > 0.6 {
             // Felfelé pattanást várunk -> Long Csapda
             return Some(SignalResult {
                 side: "Buy".to_string(),
                 target_mid: current_state.mid_price,
             });
-        } else if z_score > threshold && current_state.imbalance < 0.4 {
+        } else if z_score > volatility_adj_threshold && current_state.imbalance < 0.4 {
             // Lefelé pattanást várunk -> Short Csapda
             return Some(SignalResult {
                 side: "Sell".to_string(),
