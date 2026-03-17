@@ -61,28 +61,28 @@
             "ladder_config": [
                 {
                     "level": 1,
-                    "offset_from_mid_ticks": -30,
+                    "offset_from_mid_ticks": -3,
                     "size_pct": 0.4,
-                    "comment": "mid - 30 ticks"
+                    "comment": "mid - 3 ticks"
                 },
                 {
                     "level": 2,
-                    "offset_from_mid_ticks": -60,
+                    "offset_from_mid_ticks": -6,
                     "size_pct": 0.3,
-                    "comment": "mid - 60 ticks"
+                    "comment": "mid - 6 ticks"
                 },
                 {
                     "level": 3,
-                    "offset_from_mid_ticks": -90,
+                    "offset_from_mid_ticks": -9,
                     "size_pct": 0.3,
-                    "comment": "mid - 90 ticks"
+                    "comment": "mid - 9 ticks"
                 }
             ],
             "signal_params": {
-                "z_threshold": 3.5,
-                "min_time_between_signals_ms": 8000,
+                "z_threshold": 2.5,
+                "min_time_between_signals_ms": 3000,
                 "returns_window_ms": 120000,
-                "comment": "3.5 sigma = ritkabb de tisztabb jel; 8s debounce; 2 perces ablak"
+                "comment": "2.5 sigma = érzékenyebb HFT jel; 3s debounce"
             },
             "execution": {
                 "post_only": true,
