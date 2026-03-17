@@ -24,3 +24,5 @@ logs/
 # Build
 build/
 dist/
+/rust_bot/target/
+rust_bot/Cargo.lock

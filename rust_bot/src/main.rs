@@ -30,7 +30,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let coin = app_config.strategy.coin.clone();
 
     // 2. Aláíró és Kliens inicializálása
-    let is_mainnet = true; // Todo: config.rs ből
+    let is_mainnet = app_config.is_mainnet;
     
     let signer = HyperliquidSigner::new(&app_config.private_key);
     let rest_client = HyperliquidClient::new(is_mainnet);
@@ -61,13 +61,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     use crate::logic::order_manager::OrderManager;
     use crate::logic::bot_pnl::PnlTracker;
 
-    let mut simulated_balance_usd = 99.0;
+    let mut current_account_value = 99.0;
     
-    // Százalék kiszámítása a 99 dollárból, beállítva a maximum plafonnal (base_sz_usd)
-    let calculated_usd = simulated_balance_usd * (app_config.strategy.balance_pct_per_trade / 100.0) * (app_config.strategy.leverage as f64);
+    // Százalék kiszámítása a tőkéből, beállítva a maximum plafonnal (base_sz_usd)
+    let calculated_usd = current_account_value * (app_config.strategy.balance_pct_per_trade / 100.0) * (app_config.strategy.leverage as f64);
     let target_usd = calculated_usd.min(app_config.strategy.base_sz_usd);
     
-    info!("💰 Kereskedési méret beállítva: ${:.2} (Minden létra hossza)", target_usd);
+    info!("💰 Kereskedési méret (notional): ${:.2} per szint", target_usd);
     
     // 5. Szignál motor, Order Manager és PnL Tracker inicializálása
     let mut signal_engine = SignalEngine::new(app_config.strategy.clone(), state_ref.clone());
@@ -121,22 +121,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 info!("🛠️ Order Payload előkészítve: {}", serde_json::to_string(&action).unwrap());
 
                 if is_dry_run {
-                    // Mivel egyelőre éles bekötés még nincsen (csak Dry Run logolás),
-                    // szimuláljuk, hogy bejött egy trade, és elmentjük a PnL fájlba a Dashboardnak.
-                    simulated_balance_usd += 2.50; // Random nyereség szimuláció
-                    pnl_tracker.add_trade(2.55, 0.05, simulated_balance_usd);
+                    // DRY RUN: Csak szimuláljuk a kitöltést
+                    current_account_value += 2.50; // Szimulált profit
+                    pnl_tracker.add_trade(2.55, 0.05, current_account_value);
                 } else {
-                    info!(" ام Aláírás és küldés folyamatban (LIVE)...");
+                    info!("🚀 ÉLES ÜZEM: Aláírás és küldés folyamatban...");
                     match signer_t.sign_l1_action(&action, nonce, is_mainnet).await {
                         Ok(signature) => {
                             info!("✅ Payload aláírva! EIP-712 Signature generálva.");
                             match rest_client_t.send_l1_action(&action, nonce, signature).await {
-                                Ok(response) => info!("🎯 Order elküldve! Válasz: {}", response),
+                                Ok(response) => info!("🎯 Order sikeresen elküldve! Válasz: {}", response),
                                 Err(e) => tracing::error!("❌ Hiba az order küldésekor: {}", e),
                             }
                         },
                         Err(e) => tracing::error!("❌ Hiba az order aláírásakor: {}", e),
                     }
+                    // TODO: Itt valós fill figyelés kellene, ami frissíti a PnL-t
+                    // Egyelőre csak naplózzuk a küldést.
                 }
 
                 // Cooldown: miután kiraktuk a letrát, várunk picit, hogy ne spammeljünk

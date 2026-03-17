@@ -30,6 +30,7 @@ pub struct StrategyConfig {
 pub struct AppConfig {
     pub private_key: String,
     pub is_dry_run: bool,
+    pub is_mainnet: bool,
     pub strategy: StrategyConfig,
 }
 
@@ -103,9 +104,15 @@ impl AppConfig {
 
         info!("✅ Konfiguráció betöltve: {}, Dry Run: {}", strategy.coin, is_dry_run);
 
+        let is_mainnet = env::var("IS_MAINNET")
+            .unwrap_or_else(|_| "true".to_string())
+            .trim()
+            .to_lowercase() == "true";
+
         Self {
             private_key,
             is_dry_run,
+            is_mainnet,
             strategy,
         }
     }
