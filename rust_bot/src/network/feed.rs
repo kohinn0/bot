@@ -46,11 +46,10 @@ pub struct FillEvent {
 enum WsRequest {
     #[serde(rename = "subscribe")]
     Subscribe { subscription: SubscriptionData },
-    #[serde(rename = "exchange")]
-    Exchange {
-        #[serde(rename = "requestId")]
-        request_id: u64,
-        args: serde_json::Value,
+    #[serde(rename = "post")]
+    Post {
+        id: u64,
+        request: serde_json::Value,
     },
 }
 
@@ -138,20 +137,26 @@ impl HyperliquidFeed {
                                 }
                                 // Handle outgoing actions (Orders) - This is the LOW LATENCY path
                                 Some(payload) = cmd_rx.recv() => {
-                                    // 💡 MENTOR FIX: requestId == nonce (szigorú Hyperliquid követelmény)
                                     let req_id = payload["nonce"].as_u64().unwrap_or(
                                         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64
                                     );
                                     
-                                    let req = WsRequest::Exchange {
-                                        request_id: req_id,
-                                        args: payload,
+                                    // 💡 OFFICIAL HYPERLIQUID WS POST FORMAT:
+                                    // method: "post", id: <num>, request: { type: "action", payload: { action, nonce, signature } }
+                                    let post_payload = serde_json::json!({
+                                        "type": "action",
+                                        "payload": payload
+                                    });
+
+                                    let req = WsRequest::Post {
+                                        id: req_id,
+                                        request: post_payload,
                                     };
                                     if let Ok(json) = serde_json::to_string(&req) {
                                         if let Err(e) = ws_stream.send(Message::Text(json)).await {
                                             error!("❌ Hiba a WS megbízás küldésekor: {}", e);
                                         } else {
-                                            info!("📤 Megbízás kiküldve (exchange, ReqID: {})", req_id);
+                                            info!("📤 Megbízás kiküldve (post method, ID: {})", req_id);
                                         }
                                     }
                                 }
