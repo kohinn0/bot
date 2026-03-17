@@ -14,6 +14,9 @@ pub struct SignalEngine {
     sum_x: f64,
     sum_x2: f64,
     
+    // Stability tracking
+    tick_count: u64,
+    
     // Imbalance tracking
     prev_imbalance: f64,
 }
@@ -27,13 +30,14 @@ impl SignalEngine {
             history_limit: 60,
             sum_x: 0.0,
             sum_x2: 0.0,
+            tick_count: 0,
             prev_imbalance: 0.5,
         }
     }
 
-    /// Nagy teljesítményű, O(1) szórás és momentum alapú szignál generálás
+    /// Matematikailag stabil, HFT-optimalizált szignál generátor
     pub async fn tick(&mut self) -> Option<SignalResult> {
-        // 1. MEMÓRIA OPTIMALIZÁLÁS: Csak a szükséges mezőket olvassuk ki, nincs .clone()!
+        // 1. Gyors, non-allocating adat lekérés
         let (mid_price, imbalance) = {
             let lock = self.state_ref.read().await;
             (lock.mid_price, lock.imbalance)
@@ -43,7 +47,17 @@ impl SignalEngine {
             return None;
         }
 
-        // 2. O(1) RUNNING STATS: Frissítjük a futó összegeket
+        self.tick_count += 1;
+
+        // 2. STABILITÁS: Lebegőpontos hiba (Drift) kezelése
+        // 1000 tickenként újraszámoljuk a teljes összeget a VecDeque-ből,
+        // hogy elkerüljük a folyamatos hozzáadás/kivonás okozta pontatlanságot.
+        if self.tick_count % 1000 == 0 {
+            self.sum_x = self.price_history.iter().sum::<f64>();
+            self.sum_x2 = self.price_history.iter().map(|&x| x * x).sum::<f64>();
+        }
+
+        // Running update logic
         if self.price_history.len() >= self.history_limit {
             if let Some(old_price) = self.price_history.pop_front() {
                 self.sum_x -= old_price;
@@ -57,37 +71,36 @@ impl SignalEngine {
 
         let n = self.price_history.len() as f64;
         if n < 15.0 {
-            return None; // Minimális minta a stabilitáshoz
+            return None;
         }
 
-        // Statisztikai számítások constant time-ban
+        // Variancia és Z-Score (numerikusan biztonságos formában)
         let mean = self.sum_x / n;
-        let variance = (self.sum_x2 / n) - (mean * mean);
-        let std_dev = variance.max(0.0000001).sqrt(); // div0 elleni védelem
+        let variance = ((self.sum_x2 / n) - (mean * mean)).max(0.0); // Nincs negatív variancia!
+        let std_dev = variance.sqrt().max(0.0000001);
         let z_score = (mid_price - mean) / std_dev;
 
-        // 3. IMBALANCE MOMENTUM: Figyeljük a falak épülésének sebességét
+        // 3. IMBALANCE MOMENTUM (A mentor kedvence)
         let imb_momentum = imbalance - self.prev_imbalance;
         self.prev_imbalance = imbalance;
 
-        // Stratégiai paraméterek
         let base_threshold = self.config.z_score_threshold;
         let vol_adj_threshold = base_threshold * self.config.sigma_r;
 
-        // 4. AGRESSZÍV SZIGNÁL LOGIKA (A mentor tanácsa alapján)
-        // Nem csak az imbalance szintet nézzük, hanem a momentumot is (ha hirtelen nő a nyomás)
+        // 4. "HÚSEVŐ" HFT ÁRAZÁS
+        // Ha nagy a vételi nyomás (Imbalance + Momentum), ne csak a Mid-re várjunk,
+        // hanem próbáljunk agresszívabban "ráülni" a Bid falra.
         
-        if z_score < -vol_adj_threshold && (imbalance > 0.7 || imb_momentum > 0.15) {
-            // Brutális vételi nyomás alakult ki alul -> Long
+        if z_score < -vol_adj_threshold && (imbalance > 0.72 || imb_momentum > 0.12) {
             return Some(SignalResult {
                 side: "Buy".to_string(),
-                target_mid: mid_price, 
+                // 💡 AGRESSZÍV ELTOLÁS: 1 tick-es mozgást előrejelzünk
+                target_mid: mid_price + self.config.min_tick_size, 
             });
-        } else if z_score > vol_adj_threshold && (imbalance < 0.3 || imb_momentum < -0.15) {
-            // Brutális eladói nyomás alakult ki felül -> Short
+        } else if z_score > vol_adj_threshold && (imbalance < 0.28 || imb_momentum < -0.12) {
             return Some(SignalResult {
                 side: "Sell".to_string(),
-                target_mid: mid_price,
+                target_mid: mid_price - self.config.min_tick_size,
             });
         }
 
