@@ -27,7 +27,7 @@ impl SignalEngine {
             config,
             state_ref,
             price_history: VecDeque::new(),
-            history_limit: 60,
+            history_limit: 200, // 60-ról 200-ra emelve a stabilitásért
             sum_x: 0.0,
             sum_x2: 0.0,
             tick_count: 0,
@@ -38,10 +38,16 @@ impl SignalEngine {
     /// Matematikailag stabil, HFT-optimalizált szignál generátor
     pub async fn tick(&mut self) -> Option<SignalResult> {
         // 1. Gyors, non-allocating adat lekérés
-        let (mid_price, imbalance) = {
+        let (mid_price, imbalance, ts) = {
             let lock = self.state_ref.read().await;
-            (lock.mid_price, lock.imbalance)
+            (lock.mid_price, lock.imbalance, lock.last_update_ts)
         };
+        
+        // STALENESS CHECK: Ha az adat régebbi mint 500ms, eldobjuk (Latency védelem)
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+        if now - ts > 500 {
+            return None;
+        }
         
         if mid_price == 0.0 {
             return None;
@@ -94,13 +100,13 @@ impl SignalEngine {
         if z_score < -vol_adj_threshold && (imbalance > 0.72 || imb_momentum > 0.12) {
             return Some(SignalResult {
                 side: "Buy".to_string(),
-                target_mid: mid_price + self.config.min_tick_size, 
+                target_mid: mid_price, // Visszaállítva Mid-re, az eltolást az OrderManager intézi a spread-en belülre
                 volatility: std_dev,
             });
         } else if z_score > vol_adj_threshold && (imbalance < 0.28 || imb_momentum < -0.12) {
             return Some(SignalResult {
                 side: "Sell".to_string(),
-                target_mid: mid_price - self.config.min_tick_size,
+                target_mid: mid_price,
                 volatility: std_dev,
             });
         }

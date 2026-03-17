@@ -135,12 +135,12 @@ impl OrderManager {
                 mid_price + (offset_ticks * tick)
             };
 
-            // 💡 MENTOR TRÜKK: Az 1. szinten próbáljunk "Join"-olni vagy 1 tickkel agresszívabbak lenni
+            // 💡 MENTOR TRÜKK: Az 1. szinten próbáljunk "Join"-olni a legjobb árhoz
             if level_cfg.level == 1 {
                 raw_price = if is_buy {
-                    raw_price.max(best_bid + tick) // Legyünk 1 tickkel a legjobb vételi felett
+                    raw_price.max(best_bid) // Legyünk pontosan a legjobb vételi szinten
                 } else {
-                    raw_price.min(best_ask - tick) // Legyünk 1 tickkel a legjobb eladási alatt
+                    raw_price.min(best_ask) // Legyünk pontosan a legjobb eladási szinten
                 };
             }
             
