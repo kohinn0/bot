@@ -5,6 +5,7 @@ mod logic;
 use dotenvy::dotenv;
 use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
+use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -52,44 +53,62 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     info!("✅ Kereskedési pár: {}, Asset ID: {}, Size Decimals: {}", coin, asset_idx, sz_decimals);
 
-    // 4. WebSocket Feed elindítása (Külön Tokio szálon fog pörögni)
-    let feed = HyperliquidFeed::new(&coin);
+    // 4. WebSocket Feed elindítása
+    let (feed, cmd_rx) = HyperliquidFeed::new(&coin, signer.get_address());
+    let feed = Arc::new(feed);
     let state_ref = feed.state.clone();
-    feed.start().await;
+    feed.clone().start(cmd_rx).await;
 
-    use crate::logic::signal::SignalEngine;
-    use crate::logic::order_manager::OrderManager;
-    use crate::logic::bot_pnl::PnlTracker;
-
-    let mut current_account_value = 99.0;
+    let initial_balance = 99.0;
+    let account_value = Arc::new(tokio::sync::Mutex::new(initial_balance));
+    let pnl_tracker = Arc::new(tokio::sync::Mutex::new(PnlTracker::new("../logs/pnl_state.json")));
     
-    // Százalék kiszámítása a tőkéből, beállítva a maximum plafonnal (base_sz_usd)
-    let calculated_usd = current_account_value * (app_config.strategy.balance_pct_per_trade / 100.0) * (app_config.strategy.leverage as f64);
+    // Százalék kiszámítása az induló tőkéből
+    let calculated_usd = initial_balance * (app_config.strategy.balance_pct_per_trade / 100.0) * (app_config.strategy.leverage as f64);
     let target_usd = calculated_usd.min(app_config.strategy.base_sz_usd);
     
     info!("💰 Kereskedési méret (notional): ${:.2} per szint", target_usd);
     
-    // 5. Szignál motor, Order Manager és PnL Tracker inicializálása
+    // 5. Szignál motor és Order Manager inicializálása
     let mut signal_engine = SignalEngine::new(app_config.strategy.clone(), state_ref.clone());
     let order_manager = OrderManager::new(app_config.strategy.clone(), asset_idx, sz_decimals);
-    let mut pnl_tracker = PnlTracker::new("../logs/pnl_state.json");
     
-    // Aláíró és Kliens felkészítése a Hálózathoz
-    let signer = std::sync::Arc::new(signer);
-    let rest_client = std::sync::Arc::new(rest_client);
     let is_dry_run = app_config.is_dry_run;
+
+    // Aláíró és Kliens felkészítése a Hálózathoz
+    let signer = Arc::new(signer);
+    let rest_client = Arc::new(rest_client);
+
+    // === VALÓS IDEJŰ FILL FIGYELŐ (PNL FRISSÍTÉS) ===
+    let mut fill_rx = feed.fill_tx.subscribe();
+    let pnl_t = pnl_tracker.clone();
+    let acc_t = account_value.clone();
+    
+    tokio::spawn(async move {
+        while let Ok(fill) = fill_rx.recv().await {
+            info!("📈 PNL UPDATE: {} fill @ {} (Sz: {})", fill.coin, fill.px, fill.sz);
+            
+            let mut acc = acc_t.lock().await;
+            let mut pnl = pnl_t.lock().await;
+            
+            // Élesben a fill-ek alapján frissítjük az egyenleget (leegyszerűsítve)
+            // Megjegyzés: Ez egy market maker bot, ahol a Maker fill-ek csökkentik/növelik az inventory-t
+            let side_mult = if fill.side == "B" { -1.0 } else { 1.0 };
+            *acc += fill.px * fill.sz * side_mult; // Nagyon leegyszerűsített PnL modell
+            
+            pnl.add_trade(0.0, fill.fee, *acc);
+        }
+    });
 
     // === INICIALIZÁLÓ LEVERAGE BEÁLLÍTÁS ===
     if !is_dry_run {
-        info!("🔧 Kezdeti Tőkeáttétel (Leverage) beállítása: {}x Cross...", app_config.strategy.leverage);
+        info!("🔧 Kezdeti Tőkeáttétel {}x beállítása...", app_config.strategy.leverage);
         let leverage_action = order_manager.build_leverage_payload();
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
+        let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
 
         match signer.sign_l1_action(&leverage_action, nonce, is_mainnet).await {
             Ok(signature) => {
+                // A leverage beállítást hagyhatjuk HTTP-n, mert csak egyszer fut le az elején
                 match rest_client.send_l1_action(&leverage_action, nonce, signature).await {
                     Ok(_) => info!("✅ Tőkeáttétel sikeresen beállítva a tőzsdén!"),
                     Err(e) => tracing::error!("❌ Hiba a tőkeáttétel beállításánál: {}", e),
@@ -102,14 +121,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("⚙️ Kereskedési ciklus elindítva...");
 
     let signer_t = signer.clone();
-    let rest_client_t = rest_client.clone();
+    let feed_t = feed.clone();
+    let pnl_sim_t = pnl_tracker.clone();
+    let acc_sim_t = account_value.clone();
 
     // 6. A fő "szívverés" (Heartbeat) - Extrém gyors polling az RwLock-ból
-    // Mivel aszinkron és lock-free a state_ref, ezt nyugodtan pörgethetjük 1ms delay-el
     tokio::spawn(async move {
         loop {
             if let Some(signal) = signal_engine.tick().await {
-                info!("🚨 SZIGNÁL ÉSZLELVE: {} @ {:.4}", signal.side, signal.target_mid);
+                info!("🚨 SZIGNÁL: {} @ {:.4}", signal.side, signal.target_mid);
                 
                 let action = order_manager.build_ladder_payload(&signal.side, signal.target_mid, target_usd);
                 
@@ -118,37 +138,49 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .unwrap()
                     .as_millis() as u64;
 
-                info!("🛠️ Order Payload előkészítve: {}", serde_json::to_string(&action).unwrap());
-
                 if is_dry_run {
-                    // DRY RUN: Csak szimuláljuk a kitöltést
-                    current_account_value += 2.50; // Szimulált profit
-                    pnl_tracker.add_trade(2.55, 0.05, current_account_value);
+                    info!("🧪 DRY RUN: Szimulált megbízás elkészítve.");
+                    let mut acc = acc_sim_t.lock().await;
+                    let mut pnl = pnl_sim_t.lock().await;
+                    *acc += 2.50; 
+                    pnl.add_trade(2.55, 0.05, *acc);
                 } else {
-                    info!("🚀 ÉLES ÜZEM: Aláírás és küldés folyamatban...");
                     match signer_t.sign_l1_action(&action, nonce, is_mainnet).await {
                         Ok(signature) => {
-                            info!("✅ Payload aláírva! EIP-712 Signature generálva.");
-                            match rest_client_t.send_l1_action(&action, nonce, signature).await {
-                                Ok(response) => info!("🎯 Order sikeresen elküldve! Válasz: {}", response),
-                                Err(e) => tracing::error!("❌ Hiba az order küldésekor: {}", e),
-                            }
+                            // --- LOW LATENCY WS ORDER SUBMISSION ---
+                            // Itt már nem várunk a HTTP válaszra, csak "kilőjük" a megbízást a WS-en
+                            let mut s_bytes = [0u8; 32];
+                            signature.s.to_big_endian(&mut s_bytes);
+                            let mut r_bytes = [0u8; 32];
+                            signature.r.to_big_endian(&mut r_bytes);
+                            
+                            let v_val = signature.v as u8;
+                            let v = if v_val < 27 { v_val + 27 } else { v_val };
+
+                            let payload = serde_json::json!({
+                                "action": action,
+                                "nonce": nonce,
+                                "signature": {
+                                    "r": format!("0x{}", hex::encode(r_bytes)),
+                                    "s": format!("0x{}", hex::encode(s_bytes)),
+                                    "v": v
+                                }
+                            });
+
+                            feed_t.send_action(payload);
+                            info!("🚀 ÉLES MEGBÍZÁS KILŐVE (WS) - Latency estim: <50ms");
                         },
                         Err(e) => tracing::error!("❌ Hiba az order aláírásakor: {}", e),
                     }
-                    // TODO: Itt valós fill figyelés kellene, ami frissíti a PnL-t
-                    // Egyelőre csak naplózzuk a küldést.
                 }
 
-                // Cooldown: miután kiraktuk a letrát, várunk picit, hogy ne spammeljünk
                 tokio::time::sleep(tokio::time::Duration::from_millis(5000)).await;
             }
-            // 1ms pihenő a szálnak, hogy ne vigyük 100%-ra a CPU-t fölöslegesen
             tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
         }
     });
 
-    // A main loop blokkol, amíg ki nem lépünk (Ctrl+C)
+    // Diagnosztikai kiírás
     let diag_state_ref = feed.state.clone();
     tokio::spawn(async move {
         loop {
