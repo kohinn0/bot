@@ -6,6 +6,13 @@ use dotenvy::dotenv;
 use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
 use std::sync::Arc;
+use crate::config::AppConfig;
+use crate::logic::signer::HyperliquidSigner;
+use crate::logic::bot_pnl::PnlTracker;
+use crate::logic::signal::SignalEngine;
+use crate::logic::order_manager::OrderManager;
+use crate::network::client::HyperliquidClient;
+use crate::network::feed::HyperliquidFeed;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -20,11 +27,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenv().ok();
     
     info!("🚀 INICIALIZÁLÁS: SebessegBot v3 (Rust/Tokio) 🚀");
-
-    use crate::config::AppConfig;
-    use crate::logic::signer::HyperliquidSigner;
-    use crate::network::client::HyperliquidClient;
-    use crate::network::feed::HyperliquidFeed;
 
     // 1. Konfiguráció Betöltése
     let app_config = AppConfig::load();
