@@ -26,6 +26,7 @@ pub struct OrderAction {
     #[serde(rename = "type")]
     pub type_: String,
     pub orders: Vec<OrderWire>,
+    pub grouping: String,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -103,6 +104,7 @@ impl OrderManager {
         OrderAction {
             type_: "order".to_string(),
             orders,
+            grouping: "na".to_string(),
         }
     }
 
@@ -168,6 +170,7 @@ impl OrderManager {
         OrderAction {
             type_: "order".to_string(),
             orders,
+            grouping: "na".to_string(),
         }
     }
 }

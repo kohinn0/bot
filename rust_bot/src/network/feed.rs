@@ -48,7 +48,8 @@ enum WsRequest {
     Subscribe { subscription: SubscriptionData },
     #[serde(rename = "exchange")]
     Exchange {
-        id: u64,
+        #[serde(rename = "requestId")]
+        request_id: u64,
         args: serde_json::Value,
     },
 }
@@ -137,20 +138,20 @@ impl HyperliquidFeed {
                                 }
                                 // Handle outgoing actions (Orders) - This is the LOW LATENCY path
                                 Some(payload) = cmd_rx.recv() => {
-                                    // 💡 MENTOR FIX: id == nonce (szigorú Hyperliquid követelmény)
-                                    let id = payload["nonce"].as_u64().unwrap_or(
+                                    // 💡 MENTOR FIX: requestId == nonce (szigorú Hyperliquid követelmény)
+                                    let req_id = payload["nonce"].as_u64().unwrap_or(
                                         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64
                                     );
                                     
                                     let req = WsRequest::Exchange {
-                                        id,
+                                        request_id: req_id,
                                         args: payload,
                                     };
                                     if let Ok(json) = serde_json::to_string(&req) {
                                         if let Err(e) = ws_stream.send(Message::Text(json)).await {
                                             error!("❌ Hiba a WS megbízás küldésekor: {}", e);
                                         } else {
-                                            info!("📤 Megbízás kiküldve (exchange, ID: {})", id);
+                                            info!("📤 Megbízás kiküldve (exchange, ReqID: {})", req_id);
                                         }
                                     }
                                 }
