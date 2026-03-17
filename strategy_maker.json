@@ -62,7 +62,7 @@
                 {
                     "level": 1,
                     "offset_from_mid_ticks": -30,
-                    "size_pct": 0.5,
+                    "size_pct": 0.4,
                     "comment": "mid - 30 ticks"
                 },
                 {
@@ -74,8 +74,8 @@
                 {
                     "level": 3,
                     "offset_from_mid_ticks": -90,
-                    "size_pct": 0.2,
-                    "comment": "mid - 90 ticks (leglentebb)"
+                    "size_pct": 0.3,
+                    "comment": "mid - 90 ticks"
                 }
             ],
             "signal_params": {
@@ -167,7 +167,7 @@
         "position_limits": {
             "max_open_positions": 1,
             "max_notional_usd_per_trade": 5000,
-            "balance_pct_per_trade": 2.0
+            "balance_pct_per_trade": 4.5
         },
         "leverage": {
             "max_leverage": 10,

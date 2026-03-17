@@ -100,8 +100,12 @@ impl OrderManager {
             let raw_sz = size_usd / rounded_price;
             let sz = (raw_sz / sz_step).floor() * sz_step;
 
-            // Hyperliquid also places a hard minimum on order size value ($10)
-            // But for safety, we round aggressively down.
+            // Hyperliquid szigorúan veszi a 10 dolláros limitet értéknél (price * size)
+            if (rounded_price * sz) < 10.0 {
+                tracing::warn!("⚠️ Szint kihagyva (L{}): Érték ${:.2} < $10 minimum", level_cfg.level, rounded_price * sz);
+                continue;
+            }
+
             orders.push(OrderWire {
                 a: self.asset_idx,
                 b: is_buy,
