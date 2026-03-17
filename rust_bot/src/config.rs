@@ -23,7 +23,6 @@ pub struct StrategyConfig {
     pub min_tick_size: f64,
     pub min_shares: f64,
     pub ladder_levels: Vec<LadderLevel>,
-    pub ping_pong_reprice: Option<bool>,
     pub skew_penalty: Option<f64>,
 }
 
@@ -98,7 +97,6 @@ impl AppConfig {
             min_shares: tp["min_shares"].as_f64().unwrap_or(0.001),
             ladder_levels,
             
-            ping_pong_reprice: None,
             skew_penalty: Some(1.0),
         };
 

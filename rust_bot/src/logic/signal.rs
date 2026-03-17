@@ -90,7 +90,8 @@ impl SignalEngine {
         let imb_momentum = imbalance - self.prev_imbalance;
         self.prev_imbalance = imbalance;
 
-        let base_threshold = 1.8; // Kicsit szigorúbb, de több jel (Z-score szűrő)
+        // Stratégiai paraméterek
+        let base_threshold = self.config.z_score_threshold; // Most már a config-ból olvassuk!
         let vol_adj_threshold = base_threshold * self.config.sigma_r;
 
         // 4. "HÚSEVŐ" HFT ÁRAZÁS
