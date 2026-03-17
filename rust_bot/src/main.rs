@@ -91,6 +91,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let feed_f = feed.clone();
     let signer_f = signer.clone();
     let om_f = Arc::new(OrderManager::new(app_config.strategy.clone(), asset_idx, sz_decimals));
+    let min_tick = app_config.strategy.min_tick_size;
     let is_mainnet_f = is_mainnet;
 
     tokio::spawn(async move {
@@ -117,11 +118,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let tp_side = if *pos > 0.0 { "Sell" } else { "Buy" };
                 
                 // Dinamikus TP: 1.5x szórás, de minimum 5 tick
-                let tp_dist = (vol * 1.5).max(0.02); 
+                let tp_dist = f64::max(vol * 1.5, 5.0 * min_tick); 
                 let tp_price = if *pos > 0.0 { fill.px + tp_dist } else { fill.px - tp_dist };
 
-                // Dinamikus SL: 3x szórás (hogy legyen tere mozogni, de ne égjen el minden)
-                let sl_dist = (vol * 3.0).max(0.10);
+                // Dinamikus SL: 3x szórás, de minimum 10 tick
+                let sl_dist = f64::max(vol * 3.0, 10.0 * min_tick);
                 let sl_price = if *pos > 0.0 { fill.px - sl_dist } else { fill.px + sl_dist };
 
                 let exit_action = om_f.build_exit_payload(tp_side, tp_price, pos.abs());
