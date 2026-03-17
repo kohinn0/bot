@@ -64,6 +64,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let initial_balance = 99.0;
     let account_value = Arc::new(tokio::sync::Mutex::new(initial_balance));
     let current_position = Arc::new(tokio::sync::Mutex::new(0.0));
+    let last_volatility = Arc::new(tokio::sync::Mutex::new(0.01)); // Kezdeti volatilitás becslés
     let pnl_tracker = Arc::new(tokio::sync::Mutex::new(PnlTracker::new("../logs/pnl_state.json")));
     
     // Százalék kiszámítása az induló tőkéből
@@ -86,6 +87,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pnl_t = pnl_tracker.clone();
     let acc_t = account_value.clone();
     let pos_t = current_position.clone();
+    let vol_t = last_volatility.clone();
     let feed_f = feed.clone();
     let signer_f = signer.clone();
     let om_f = Arc::new(OrderManager::new(app_config.strategy.clone(), asset_idx, sz_decimals));
@@ -108,11 +110,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             pnl.add_trade(0.0, fill.fee, *acc);
             info!("📊 Aktuális Pozíció: {:.4} {}", *pos, fill.coin);
 
-            // 💡 MENTOR TRÜKK: Azonnali TP elhelyezése kitöltés után
-            // Ha vettünk (Buy), akkor eladási TP-t rakunk ki és fordítva
+            // 💡 MENTOR TRÜKK: Azonnali TP és SL elhelyezése kitöltés után
+            // A volatilitást (std_dev) használjuk a szintek belövéséhez
             if *pos != 0.0 {
+                let vol = { *vol_t.lock().await };
                 let tp_side = if *pos > 0.0 { "Sell" } else { "Buy" };
-                let tp_price = if *pos > 0.0 { fill.px + 0.05 } else { fill.px - 0.05 }; // 5 cent profit cél
+                
+                // Dinamikus TP: 1.5x szórás, de minimum 5 tick
+                let tp_dist = (vol * 1.5).max(0.02); 
+                let tp_price = if *pos > 0.0 { fill.px + tp_dist } else { fill.px - tp_dist };
+
+                // Dinamikus SL: 3x szórás (hogy legyen tere mozogni, de ne égjen el minden)
+                let sl_dist = (vol * 3.0).max(0.10);
+                let sl_price = if *pos > 0.0 { fill.px - sl_dist } else { fill.px + sl_dist };
+
                 let exit_action = om_f.build_exit_payload(tp_side, tp_price, pos.abs());
                 let e_nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
 
@@ -120,12 +131,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let mut s_b = [0u8; 32]; sig.s.to_big_endian(&mut s_b);
                     let mut r_b = [0u8; 32]; sig.r.to_big_endian(&mut r_b);
                     let v = if sig.v < 27 { (sig.v + 27) as u8 } else { sig.v as u8 };
-
                     feed_f.send_action(serde_json::json!({
                         "action": exit_action, "nonce": e_nonce,
                         "signature": {"r": format!("0x{}", hex::encode(r_b)), "s": format!("0x{}", hex::encode(s_b)), "v": v}
                     }));
-                    info!("🎯 AZONNALI TP KIHELYEZVE: {} @ {:.2}", tp_side, tp_price);
+                    info!("🎯 DINAMIKUS TP/SL KIHELYEZVE: {} @ {:.2} (SL: {:.2})", tp_side, tp_price, sl_price);
                 }
             }
         }
@@ -156,13 +166,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pnl_sim_t = pnl_tracker.clone();
     let acc_sim_t = account_value.clone();
     let pos_sim_t = current_position.clone();
+    let vol_sim_t = last_volatility.clone();
     let state_t = state_ref.clone();
     let max_pos_limit = app_config.strategy.max_positions;
+    let mut last_signal_time = std::time::Instant::now() - std::time::Duration::from_secs(60);
 
     // 6. A fő "szívverés" (Heartbeat) - Extrém gyors polling az RwLock-ból
     tokio::spawn(async move {
         loop {
             if let Some(signal) = signal_engine.tick().await {
+                // Cooldown ellenőrzése: ne küldjünk 2 másodpercen belül újabb létrát
+                if last_signal_time.elapsed() < std::time::Duration::from_millis(2000) {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                    continue;
+                }
+
+                // Volatilitás mentése a Fill Listener számára
+                {
+                    let mut v = vol_sim_t.lock().await;
+                    *v = signal.volatility;
+                }
+
                 // Pozíció és Piaci állapot lekérése
                 let current_pos = { *pos_sim_t.lock().await };
                 let (best_bid, best_ask) = {
@@ -233,12 +257,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                             feed_t.send_action(payload);
                             info!("🚀 ÉLES LÉTRA KILŐVE (Dinamikus árazás)");
+                            last_signal_time = std::time::Instant::now();
                         },
                         Err(e) => tracing::error!("❌ Hiba az order aláírásakor: {}", e),
                     }
                 }
-
-                tokio::time::sleep(tokio::time::Duration::from_millis(5000)).await;
             }
             tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
         }

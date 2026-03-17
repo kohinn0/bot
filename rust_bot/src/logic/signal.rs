@@ -94,13 +94,14 @@ impl SignalEngine {
         if z_score < -vol_adj_threshold && (imbalance > 0.72 || imb_momentum > 0.12) {
             return Some(SignalResult {
                 side: "Buy".to_string(),
-                // 💡 AGRESSZÍV ELTOLÁS: 1 tick-es mozgást előrejelzünk
                 target_mid: mid_price + self.config.min_tick_size, 
+                volatility: std_dev,
             });
         } else if z_score > vol_adj_threshold && (imbalance < 0.28 || imb_momentum < -0.12) {
             return Some(SignalResult {
                 side: "Sell".to_string(),
                 target_mid: mid_price - self.config.min_tick_size,
+                volatility: std_dev,
             });
         }
 
@@ -111,4 +112,5 @@ impl SignalEngine {
 pub struct SignalResult {
     pub side: String,
     pub target_mid: f64,
+    pub volatility: f64,
 }
