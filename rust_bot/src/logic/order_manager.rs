@@ -26,7 +26,6 @@ pub struct OrderAction {
     #[serde(rename = "type")]
     pub type_: String,
     pub orders: Vec<OrderWire>,
-    pub grouping: String,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -50,7 +49,7 @@ pub struct OrderManager {
     config: StrategyConfig,
     asset_idx: u32,
     sz_decimals: u32,
-    pub current_pos: f64, // Új: pillanatnyi pozíció követése a skew-hoz
+    pub current_pos: f64,
 }
 
 impl OrderManager {
@@ -58,7 +57,6 @@ impl OrderManager {
         Self { config, asset_idx, sz_decimals, current_pos: 0.0 }
     }
 
-    /// Hyperliquid float serialization rules: max 8 decimals, no trailing zeroes, no trailing decimal points.
     fn float_to_wire(x: f64) -> String {
         let s = format!("{:.8}", x);
         let trimmed = s.trim_end_matches('0');
@@ -85,7 +83,6 @@ impl OrderManager {
         }
     }
 
-    /// Létrehozza a Take Profit (Exit) megbízást az azonnali hurokhoz
     pub fn build_exit_payload(&self, side: &str, price: f64, sz: f64) -> OrderAction {
         let is_buy = side.to_lowercase() == "buy";
         let mut orders = Vec::new();
@@ -98,7 +95,7 @@ impl OrderManager {
             r: false,
             t: OrderTypeWire {
                 limit: LimitOrderType {
-                    tif: "Gtc".to_string(), // Exitnél használjunk GTC-t hogy biztosan bent maradjon
+                    tif: "GTC".to_string(),
                 }
             }
         });
@@ -106,11 +103,9 @@ impl OrderManager {
         OrderAction {
             type_: "order".to_string(),
             orders,
-            grouping: "na".to_string(),
         }
     }
 
-    /// ÚJ: Dinamikus árazás a Best Bid/Ask figyelembevételével
     pub fn build_ladder_payload(
         &self,
         side: &str,
@@ -129,10 +124,6 @@ impl OrderManager {
             let skew_adj = self.current_pos * self.config.skew_penalty.unwrap_or(0.0);
             let offset_ticks = (level_cfg.offset_from_mid_ticks as f64) + if is_buy { skew_adj } else { -skew_adj };
             
-            // 💡 MENTOR JAVÍTÁS: Defenzív árazás (Maker)
-            // Buy: mid - offset (lent várunk)
-            // Sell: mid + offset (fent várunk)
-            // Az offset_ticks-et abszolút értékként kezeljük a biztonság kedvéért
             let abs_offset = offset_ticks.abs();
             let mut raw_price = if is_buy {
                 mid_price - (abs_offset * tick)
@@ -140,8 +131,6 @@ impl OrderManager {
                 mid_price + (abs_offset * tick)
             };
 
-            // 💡 JOIN LOGIKA: Ha az 1. szinten vagyunk, megpróbálunk a könyv szélére állni
-            // De SOHA nem léphetjük át a spreadet!
             if level_cfg.level == 1 {
                 if is_buy {
                     raw_price = raw_price.max(best_bid).min(best_ask - (0.5 * tick));
@@ -150,11 +139,10 @@ impl OrderManager {
                 }
             }
             
-            // Kerekítés a tőzsdei tickre
             let rounded_price = if is_buy {
-                (raw_price / tick).floor() * tick // Buy: inkabb lefelé kerekítünk (biztonság)
+                (raw_price / tick).floor() * tick
             } else {
-                (raw_price / tick).ceil() * tick  // Sell: inkabb felfelé kerekítünk (biztonság)
+                (raw_price / tick).ceil() * tick
             };
             let size_usd = sz_usd * level_cfg.size_pct;
             let sz = ((size_usd / rounded_price) / sz_step).floor() * sz_step;
@@ -171,7 +159,7 @@ impl OrderManager {
                 r: false,
                 t: OrderTypeWire {
                     limit: LimitOrderType {
-                        tif: "Alo".to_string(),
+                        tif: "ALO".to_string(),
                     }
                 }
             });
@@ -180,7 +168,6 @@ impl OrderManager {
         OrderAction {
             type_: "order".to_string(),
             orders,
-            grouping: "na".to_string(),
         }
     }
 }

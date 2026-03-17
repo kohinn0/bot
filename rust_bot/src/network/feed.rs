@@ -137,7 +137,11 @@ impl HyperliquidFeed {
                                 }
                                 // Handle outgoing actions (Orders) - This is the LOW LATENCY path
                                 Some(payload) = cmd_rx.recv() => {
-                                    let id = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+                                    // 💡 MENTOR FIX: id == nonce (szigorú Hyperliquid követelmény)
+                                    let id = payload["nonce"].as_u64().unwrap_or(
+                                        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64
+                                    );
+                                    
                                     let req = WsRequest::Exchange {
                                         id,
                                         args: payload,
