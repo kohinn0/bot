@@ -129,23 +129,33 @@ impl OrderManager {
             let skew_adj = self.current_pos * self.config.skew_penalty.unwrap_or(0.0);
             let offset_ticks = (level_cfg.offset_from_mid_ticks as f64) + if is_buy { skew_adj } else { -skew_adj };
             
-            // 💡 MENTOR JAVÍTÁS: A jeleket megcseréljük, mert a configban negatív értékek vannak
+            // 💡 MENTOR JAVÍTÁS: Defenzív árazás (Maker)
+            // Buy: mid - offset (lent várunk)
+            // Sell: mid + offset (fent várunk)
+            // Az offset_ticks-et abszolút értékként kezeljük a biztonság kedvéért
+            let abs_offset = offset_ticks.abs();
             let mut raw_price = if is_buy {
-                mid_price + (offset_ticks * tick) // mid + (-30) = mid - 30
+                mid_price - (abs_offset * tick)
             } else {
-                mid_price - (offset_ticks * tick) // mid - (-30) = mid + 30
+                mid_price + (abs_offset * tick)
             };
 
-            // 💡 MENTOR TRÜKK: Az 1. szinten próbáljunk "Join"-olni a legjobb árhoz
+            // 💡 JOIN LOGIKA: Ha az 1. szinten vagyunk, megpróbálunk a könyv szélére állni
+            // De SOHA nem léphetjük át a spreadet!
             if level_cfg.level == 1 {
-                raw_price = if is_buy {
-                    raw_price.max(best_bid) // Legyünk pontosan a legjobb vételi szinten
+                if is_buy {
+                    raw_price = raw_price.max(best_bid).min(best_ask - (0.5 * tick));
                 } else {
-                    raw_price.min(best_ask) // Legyünk pontosan a legjobb eladási szinten
-                };
+                    raw_price = raw_price.min(best_ask).max(best_bid + (0.5 * tick));
+                }
             }
             
-            let rounded_price = (raw_price / tick).round() * tick;
+            // Kerekítés a tőzsdei tickre
+            let rounded_price = if is_buy {
+                (raw_price / tick).floor() * tick // Buy: inkabb lefelé kerekítünk (biztonság)
+            } else {
+                (raw_price / tick).ceil() * tick  // Sell: inkabb felfelé kerekítünk (biztonság)
+            };
             let size_usd = sz_usd * level_cfg.size_pct;
             let sz = ((size_usd / rounded_price) / sz_step).floor() * sz_step;
 

@@ -46,9 +46,9 @@ pub struct FillEvent {
 enum WsRequest {
     #[serde(rename = "subscribe")]
     Subscribe { subscription: SubscriptionData },
-    #[serde(rename = "action")]
-    Action {
-        request: serde_json::Value,
+    #[serde(rename = "exchange")]
+    Exchange {
+        args: serde_json::Value,
     },
 }
 
@@ -136,8 +136,8 @@ impl HyperliquidFeed {
                                 }
                                 // Handle outgoing actions (Orders) - This is the LOW LATENCY path
                                 Some(payload) = cmd_rx.recv() => {
-                                    let req = WsRequest::Action {
-                                        request: payload,
+                                    let req = WsRequest::Exchange {
+                                        args: payload,
                                     };
                                     if let Ok(json) = serde_json::to_string(&req) {
                                         if let Err(e) = ws_stream.send(Message::Text(json)).await {
