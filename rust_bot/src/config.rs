@@ -41,7 +41,7 @@ impl AppConfig {
         });
 
         let is_dry_run = env::var("DRY_RUN")
-            .unwrap_or_else(|_| "true".to_string())
+            .unwrap_or_else(|_| "false".to_string())
             .trim()
             .to_lowercase() == "true";
 
