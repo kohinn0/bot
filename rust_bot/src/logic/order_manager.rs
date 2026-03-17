@@ -30,6 +30,13 @@ pub struct OrderAction {
 }
 
 #[derive(Serialize, Debug, Clone)]
+pub struct CancelByCoinAction {
+    #[serde(rename = "type")]
+    pub type_: String,
+    pub coin: String,
+}
+
+#[derive(Serialize, Debug, Clone)]
 pub struct UpdateLeverageAction {
     #[serde(rename = "type")]
     pub type_: String,
@@ -59,6 +66,13 @@ impl OrderManager {
             trimmed.trim_end_matches('.').to_string()
         } else {
             trimmed.to_string()
+        }
+    }
+
+    pub fn build_cancel_all_payload(&self) -> CancelByCoinAction {
+        CancelByCoinAction {
+            type_: "cancelByCoin".to_string(),
+            coin: self.config.coin.clone(),
         }
     }
 

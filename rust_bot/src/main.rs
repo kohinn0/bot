@@ -162,9 +162,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Szinkronizáljuk a pozíciót az order managerrel a skew hatáshoz
                 order_manager.current_pos = current_pos;
 
-                let action = order_manager.build_ladder_payload(&signal.side, signal.target_mid, target_usd);
-                let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
-
                 if is_dry_run {
                     info!("🧪 DRY RUN: Szimulált megbízás elkészítve.");
                     let mut acc = acc_sim_t.lock().await;
@@ -176,30 +173,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     *pos += fill_sz;
                     pnl.add_trade(2.55, 0.05, *acc);
                 } else {
+                    // --- 1. CLEAN SLATE: ELŐZŐ MEGBÍZÁSOK TÖRLÉSE ---
+                    let cancel_action = order_manager.build_cancel_all_payload();
+                    let c_nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+                    
+                    if let Ok(sig) = signer_t.sign_l1_action(&cancel_action, c_nonce, is_mainnet).await {
+                        let mut s_b = [0u8; 32]; sig.s.to_big_endian(&mut s_b);
+                        let mut r_b = [0u8; 32]; sig.r.to_big_endian(&mut r_b);
+                        let v = if sig.v < 27 { (sig.v + 27) as u8 } else { sig.v as u8 };
+
+                        feed_t.send_action(serde_json::json!({
+                            "action": cancel_action, "nonce": c_nonce,
+                            "signature": {"r": format!("0x{}", hex::encode(r_b)), "s": format!("0x{}", hex::encode(s_b)), "v": v}
+                        }));
+                        info!("🧹 SZELLEM-ORDERS TÖRÖLVE (CancelByCoin)");
+                    }
+                    
+                    // Adunk pár ms-t a tőzsdének, hogy feldolgozza a törlést
+                    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+                    // --- 2. ÚJ LÉTRA KIHELYEZÉSE ---
+                    let action = order_manager.build_ladder_payload(&signal.side, signal.target_mid, target_usd);
+                    let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+
                     match signer_t.sign_l1_action(&action, nonce, is_mainnet).await {
                         Ok(signature) => {
-                            // --- LOW LATENCY WS ORDER SUBMISSION ---
-                            // Itt már nem várunk a HTTP válaszra, csak "kilőjük" a megbízást a WS-en
-                            let mut s_bytes = [0u8; 32];
-                            signature.s.to_big_endian(&mut s_bytes);
-                            let mut r_bytes = [0u8; 32];
-                            signature.r.to_big_endian(&mut r_bytes);
-                            
-                            let v_val = signature.v as u8;
-                            let v = if v_val < 27 { v_val + 27 } else { v_val };
+                            let mut s_bytes = [0u8; 32]; signature.s.to_big_endian(&mut s_bytes);
+                            let mut r_bytes = [0u8; 32]; signature.r.to_big_endian(&mut r_bytes);
+                            let v = if signature.v < 27 { (signature.v + 27) as u8 } else { signature.v as u8 };
 
                             let payload = serde_json::json!({
-                                "action": action,
-                                "nonce": nonce,
-                                "signature": {
-                                    "r": format!("0x{}", hex::encode(r_bytes)),
-                                    "s": format!("0x{}", hex::encode(s_bytes)),
-                                    "v": v
-                                }
+                                "action": action, "nonce": nonce,
+                                "signature": {"r": format!("0x{}", hex::encode(r_bytes)), "s": format!("0x{}", hex::encode(s_bytes)), "v": v}
                             });
 
                             feed_t.send_action(payload);
-                            info!("🚀 ÉLES MEGBÍZÁS KILŐVE (WS) - Latency estim: <50ms");
+                            info!("🚀 ÉLES MEGBÍZÁS KILŐVE (WS)");
                         },
                         Err(e) => tracing::error!("❌ Hiba az order aláírásakor: {}", e),
                     }
