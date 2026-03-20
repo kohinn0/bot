@@ -7,7 +7,7 @@ use tokio::sync::RwLock;
 pub struct SignalEngine {
     config: StrategyConfig,
     state_ref: Arc<RwLock<L2BookState>>,
-    price_history: VecDeque<f64>,
+    return_history: VecDeque<f64>,
     history_limit: usize,
     
     // O(1) running stats
@@ -19,6 +19,7 @@ pub struct SignalEngine {
     
     // Imbalance tracking
     prev_imbalance: f64,
+    prev_mid_price: Option<f64>,
 }
 
 impl SignalEngine {
@@ -26,12 +27,13 @@ impl SignalEngine {
         Self {
             config,
             state_ref,
-            price_history: VecDeque::new(),
+            return_history: VecDeque::new(),
             history_limit: 500, // 200-ról 500-ra emelve a stabilitásért
             sum_x: 0.0,
             sum_x2: 0.0,
             tick_count: 0,
             prev_imbalance: 0.5,
+            prev_mid_price: None,
         }
     }
 
@@ -59,23 +61,36 @@ impl SignalEngine {
         // 1000 tickenként újraszámoljuk a teljes összeget a VecDeque-ből,
         // hogy elkerüljük a folyamatos hozzáadás/kivonás okozta pontatlanságot.
         if self.tick_count % 1000 == 0 {
-            self.sum_x = self.price_history.iter().sum::<f64>();
-            self.sum_x2 = self.price_history.iter().map(|&x| x * x).sum::<f64>();
+            self.sum_x = self.return_history.iter().sum::<f64>();
+            self.sum_x2 = self.return_history.iter().map(|&x| x * x).sum::<f64>();
         }
 
-        // Running update logic
-        if self.price_history.len() >= self.history_limit {
-            if let Some(old_price) = self.price_history.pop_front() {
-                self.sum_x -= old_price;
-                self.sum_x2 -= old_price * old_price;
+        // Return-based signal: numerically more stable across price regimes.
+        let prev_mid = if let Some(v) = self.prev_mid_price {
+            v
+        } else {
+            self.prev_mid_price = Some(mid_price);
+            return None;
+        };
+        self.prev_mid_price = Some(mid_price);
+        if prev_mid <= 0.0 || mid_price <= 0.0 {
+            return None;
+        }
+        let log_ret = (mid_price / prev_mid).ln();
+
+        // Running update logic on returns
+        if self.return_history.len() >= self.history_limit {
+            if let Some(old_ret) = self.return_history.pop_front() {
+                self.sum_x -= old_ret;
+                self.sum_x2 -= old_ret * old_ret;
             }
         }
         
-        self.price_history.push_back(mid_price);
-        self.sum_x += mid_price;
-        self.sum_x2 += mid_price * mid_price;
+        self.return_history.push_back(log_ret);
+        self.sum_x += log_ret;
+        self.sum_x2 += log_ret * log_ret;
 
-        let n = self.price_history.len() as f64;
+        let n = self.return_history.len() as f64;
         if n < 15.0 {
             return None;
         }
@@ -84,7 +99,8 @@ impl SignalEngine {
         let mean = self.sum_x / n;
         let variance = ((self.sum_x2 / n) - (mean * mean)).max(0.0); // Nincs negatív variancia!
         let std_dev = variance.sqrt().max(0.0000001);
-        let z_score = (mid_price - mean) / std_dev;
+        let z_score = (log_ret - mean) / std_dev;
+        let volatility_px = (std_dev * mid_price).abs();
 
         // 3. IMBALANCE MOMENTUM (A mentor kedvence)
         let imb_momentum = imbalance - self.prev_imbalance;
@@ -102,13 +118,13 @@ impl SignalEngine {
             return Some(SignalResult {
                 side: "Buy".to_string(),
                 target_mid: mid_price, // Visszaállítva Mid-re, az eltolást az OrderManager intézi a spread-en belülre
-                volatility: std_dev,
+                volatility: volatility_px,
             });
         } else if z_score > vol_adj_threshold && (imbalance < 0.28 || imb_momentum < -0.12) {
             return Some(SignalResult {
                 side: "Sell".to_string(),
                 target_mid: mid_price,
-                volatility: std_dev,
+                volatility: volatility_px,
             });
         }
 
