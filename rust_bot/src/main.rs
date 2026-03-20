@@ -125,7 +125,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let sl_dist = f64::max(vol * 3.0, 10.0 * min_tick);
                 let sl_price = if *pos > 0.0 { fill.px - sl_dist } else { fill.px + sl_dist };
 
-                let exit_action = om_f.build_exit_payload(tp_side, tp_price, pos.abs());
+                let exit_action = om_f.build_protective_tpsl_payload(tp_side, tp_price, sl_price, pos.abs());
                 let e_nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
 
                 if let Ok(sig) = signer_f.sign_l1_action(&exit_action, e_nonce, is_mainnet_f).await {
@@ -139,7 +139,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "nonce": e_nonce,
                         "signature": {"r": format!("0x{}", hex::encode(r_b)), "s": format!("0x{}", hex::encode(s_b)), "v": v}
                     }));
-                    info!("🎯 DINAMIKUS TP/SL KIHELYEZVE: {} @ {:.2} (SL: {:.2})", tp_side, tp_price, sl_price);
+                    info!("🛡️ EXCHANGE TP/SL KIHELYEZVE: {} TP @ {:.2} | SL @ {:.2}", tp_side, tp_price, sl_price);
                 }
             }
         }

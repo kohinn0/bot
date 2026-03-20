@@ -7,8 +7,20 @@ pub struct LimitOrderType {
 }
 
 #[derive(Serialize, Debug, Clone)]
+pub struct TriggerOrderType {
+    #[serde(rename = "triggerPx")]
+    pub trigger_px: String,
+    #[serde(rename = "isMarket")]
+    pub is_market: bool,
+    pub tpsl: String,
+}
+
+#[derive(Serialize, Debug, Clone)]
 pub struct OrderTypeWire {
-    pub limit: LimitOrderType,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<LimitOrderType>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<TriggerOrderType>,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -98,27 +110,48 @@ impl OrderManager {
         }
     }
 
-    pub fn build_exit_payload(&self, side: &str, price: f64, sz: f64) -> OrderAction {
+    pub fn build_protective_tpsl_payload(&self, side: &str, tp_price: f64, sl_price: f64, sz: f64) -> OrderAction {
         let is_buy = side.to_lowercase() == "buy";
         let mut orders = Vec::new();
-        
+
+        // TP trigger (exchange-side)
         orders.push(OrderWire {
             a: self.asset_idx,
             b: is_buy,
-            p: Self::float_to_wire(price),
+            p: Self::float_to_wire(tp_price),
             s: Self::float_to_wire(sz),
-            r: false,
+            r: true,
             t: OrderTypeWire {
-                limit: LimitOrderType {
-                    tif: "Gtc".to_string(),
-                }
+                limit: None,
+                trigger: Some(TriggerOrderType {
+                    trigger_px: Self::float_to_wire(tp_price),
+                    is_market: true,
+                    tpsl: "tp".to_string(),
+                }),
+            }
+        });
+
+        // SL trigger (exchange-side)
+        orders.push(OrderWire {
+            a: self.asset_idx,
+            b: is_buy,
+            p: Self::float_to_wire(sl_price),
+            s: Self::float_to_wire(sz),
+            r: true,
+            t: OrderTypeWire {
+                limit: None,
+                trigger: Some(TriggerOrderType {
+                    trigger_px: Self::float_to_wire(sl_price),
+                    is_market: true,
+                    tpsl: "sl".to_string(),
+                }),
             }
         });
 
         OrderAction {
             type_: "order".to_string(),
             orders,
-            grouping: "na".to_string(),
+            grouping: "positionTpsl".to_string(),
         }
     }
 
@@ -174,9 +207,10 @@ impl OrderManager {
                 s: Self::float_to_wire(sz),
                 r: false,
                 t: OrderTypeWire {
-                    limit: LimitOrderType {
+                    limit: Some(LimitOrderType {
                         tif: "Alo".to_string(),
-                    }
+                    }),
+                    trigger: None,
                 }
             });
         }
