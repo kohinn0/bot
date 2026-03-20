@@ -188,11 +188,18 @@ impl OrderManager {
                 }
             }
             
-            let rounded_price = if is_buy {
+            let mut rounded_price = if is_buy {
                 (raw_price / tick).floor() * tick
             } else {
                 (raw_price / tick).ceil() * tick
             };
+            // Keep orders strictly passive to reduce post-only rejections
+            // when BBO moves between signal and submit.
+            if is_buy {
+                rounded_price = rounded_price.min(best_bid - tick);
+            } else {
+                rounded_price = rounded_price.max(best_ask + tick);
+            }
             let size_usd = sz_usd * level_cfg.size_pct;
             let sz = ((size_usd / rounded_price) / sz_step).floor() * sz_step;
 
