@@ -81,6 +81,7 @@ pub struct HyperliquidFeed {
     pub ws_url: String,
     pub state: Arc<RwLock<L2BookState>>,
     pub open_order_oids: Arc<Mutex<Vec<u64>>>,
+    pub post_only_reject_flag: Arc<Mutex<bool>>,
     pub fill_tx: broadcast::Sender<FillEvent>,
     cmd_tx: mpsc::UnboundedSender<serde_json::Value>,
 }
@@ -100,6 +101,7 @@ impl HyperliquidFeed {
                 ..Default::default()
             })),
             open_order_oids: Arc::new(Mutex::new(Vec::new())),
+            post_only_reject_flag: Arc::new(Mutex::new(false)),
             fill_tx,
             cmd_tx,
         };
@@ -108,6 +110,18 @@ impl HyperliquidFeed {
 
     pub fn send_action(&self, action: serde_json::Value) {
         let _ = self.cmd_tx.send(action);
+    }
+
+    pub async fn clear_post_only_reject_flag(&self) {
+        let mut f = self.post_only_reject_flag.lock().await;
+        *f = false;
+    }
+
+    pub async fn consume_post_only_reject_flag(&self) -> bool {
+        let mut f = self.post_only_reject_flag.lock().await;
+        let current = *f;
+        *f = false;
+        current
     }
 
     pub async fn start(self: Arc<Self>, mut cmd_rx: mpsc::UnboundedReceiver<serde_json::Value>) {
@@ -274,11 +288,17 @@ impl HyperliquidFeed {
             }
 
             if let Some(err) = sample_error {
+                if err.contains("Post only order would have immediately matched") {
+                    let mut f = self.post_only_reject_flag.lock().await;
+                    *f = true;
+                }
                 warn!(
                     "⚠️ POST order status detail (id={}): resting={}, filled={}, errored={}, other={}, sample_error={}",
                     id, resting, filled, errored, other, err
                 );
             } else {
+                let mut f = self.post_only_reject_flag.lock().await;
+                *f = false;
                 info!(
                     "✅ POST order ok (id={}, statuses={}, resting={}, filled={}, errored={}, other={})",
                     id, count, resting, filled, errored, other

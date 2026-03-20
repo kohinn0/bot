@@ -163,13 +163,23 @@ impl OrderManager {
         best_ask: f64,
         sz_usd: f64,
     ) -> OrderAction {
+        self.build_ladder_payload_with_passive_buffer(side, mid_price, best_bid, best_ask, sz_usd, 2.0)
+    }
+
+    pub fn build_ladder_payload_with_passive_buffer(
+        &self,
+        side: &str,
+        mid_price: f64,
+        best_bid: f64,
+        best_ask: f64,
+        sz_usd: f64,
+        passive_buffer_ticks: f64,
+    ) -> OrderAction {
         let is_buy = side.to_lowercase() == "buy";
         let tick = self.config.min_tick_size;
         let sz_step = 10_f64.powi(-(self.sz_decimals as i32));
 
         let mut orders = Vec::new();
-        
-        let passive_buffer_ticks = 2.0_f64;
 
         for level_cfg in &self.config.ladder_levels {
             let skew_adj = self.current_pos * self.config.skew_penalty.unwrap_or(0.0);

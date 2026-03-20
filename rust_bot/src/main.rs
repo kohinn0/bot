@@ -336,7 +336,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
 
                     // --- 2. ÚJ LÉTRA KIHELYEZÉSE ---
-                    let action = order_manager.build_ladder_payload(&signal.side, signal.target_mid, best_bid, best_ask, target_usd);
+                    let action = order_manager.build_ladder_payload_with_passive_buffer(
+                        &signal.side,
+                        signal.target_mid,
+                        best_bid,
+                        best_ask,
+                        target_usd,
+                        2.0,
+                    );
                     if action.orders.is_empty() {
                         tracing::warn!("⚠️ Üres order lista, létra küldés kihagyva (szűrők minden szintet eldobtak).");
                         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
@@ -356,8 +363,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 "signature": {"r": format!("0x{}", hex::encode(r_bytes)), "s": format!("0x{}", hex::encode(s_bytes)), "v": v}
                             });
 
+                            feed_t.clear_post_only_reject_flag().await;
                             feed_t.send_action(payload);
                             info!("🚀 ÉLES LÉTRA KILŐVE (Dinamikus árazás)");
+                            tokio::time::sleep(tokio::time::Duration::from_millis(220)).await;
+                            let rejected_post_only = feed_t.consume_post_only_reject_flag().await;
+                            if rejected_post_only {
+                                let retry_action = order_manager.build_ladder_payload_with_passive_buffer(
+                                    &signal.side,
+                                    signal.target_mid,
+                                    best_bid,
+                                    best_ask,
+                                    target_usd,
+                                    6.0,
+                                );
+                                if !retry_action.orders.is_empty() {
+                                    let retry_nonce = std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .unwrap()
+                                        .as_millis() as u64;
+                                    if let Ok(retry_sig) = signer_t.sign_l1_action(&retry_action, retry_nonce, is_mainnet).await {
+                                        let mut s2 = [0u8; 32];
+                                        retry_sig.s.to_big_endian(&mut s2);
+                                        let mut r2 = [0u8; 32];
+                                        retry_sig.r.to_big_endian(&mut r2);
+                                        let v2 = if retry_sig.v < 27 { (retry_sig.v + 27) as u8 } else { retry_sig.v as u8 };
+                                        feed_t.send_action(serde_json::json!({
+                                            "action": retry_action,
+                                            "nonce": retry_nonce,
+                                            "signature": {"r": format!("0x{}", hex::encode(r2)), "s": format!("0x{}", hex::encode(s2)), "v": v2}
+                                        }));
+                                        info!("🔁 POST-ONLY RETRY elküldve mélyebb passzív árral (buffer=6 tick).");
+                                    }
+                                }
+                            }
                             last_signal_time = std::time::Instant::now();
                         },
                         Err(e) => tracing::error!("❌ Hiba az order aláírásakor: {}", e),
