@@ -287,10 +287,22 @@ impl HyperliquidFeed {
         }
         if let Some(statuses) = action_payload["response"]["data"]["statuses"].as_array() {
             let mut tracked = self.open_order_oids.lock().await;
+            let before = tracked.len();
             for status in statuses {
-                if let Some(oid) = status["resting"]["oid"].as_u64() {
+                let oid = status["resting"]["oid"]
+                    .as_u64()
+                    .or_else(|| status["resting"]["oid"].as_str().and_then(|v| v.parse::<u64>().ok()))
+                    .or_else(|| status["oid"].as_u64())
+                    .or_else(|| status["oid"].as_str().and_then(|v| v.parse::<u64>().ok()));
+                if let Some(oid) = oid {
                     tracked.push(oid);
                 }
+            }
+            let added = tracked.len().saturating_sub(before);
+            if added > 0 {
+                info!("🧷 OID TRACK: {} új nyitott order OID mentve", added);
+            } else {
+                warn!("⚠️ OID TRACK: order POST ok, de nem találtam OID-t a statuses mezőben");
             }
         }
     }

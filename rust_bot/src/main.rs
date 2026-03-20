@@ -269,12 +269,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     pnl.add_trade(2.55, 0.05, *acc);
                 } else {
                     // --- 1. CLEAN SLATE: ELŐZŐ MEGBÍZÁSOK TÖRLÉSE ---
-                    let cancel_oids = {
+                    let mut cancel_oids = {
                         let mut tracked = feed_t.open_order_oids.lock().await;
                         let oids = tracked.clone();
                         tracked.clear();
                         oids
                     };
+
+                    // Fallback: ha WS OID track üres, kérdezzük le REST-ről a nyitott ordereket.
+                    if cancel_oids.is_empty() {
+                        if let Ok(open_orders) = rest_client.get_open_orders(signer_t.get_address()).await {
+                            if let Some(arr) = open_orders.as_array() {
+                                for ord in arr {
+                                    let coin_match = ord["coin"].as_str().map(|c| c == coin_signal).unwrap_or(false);
+                                    let asset_match = ord["asset"]
+                                        .as_u64()
+                                        .map(|a| a == asset_idx as u64)
+                                        .unwrap_or(false);
+                                    if !(coin_match || asset_match) {
+                                        continue;
+                                    }
+                                    let oid = ord["oid"]
+                                        .as_u64()
+                                        .or_else(|| ord["oid"].as_str().and_then(|v| v.parse::<u64>().ok()));
+                                    if let Some(oid) = oid {
+                                        cancel_oids.push(oid);
+                                    }
+                                }
+                            }
+                        }
+                    }
 
                     if !cancel_oids.is_empty() {
                         let cancel_action = order_manager.build_cancel_payload(&cancel_oids);
