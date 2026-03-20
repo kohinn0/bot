@@ -363,11 +363,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 "signature": {"r": format!("0x{}", hex::encode(r_bytes)), "s": format!("0x{}", hex::encode(s_bytes)), "v": v}
                             });
 
+                            let oids_before = feed_t.open_order_oids.lock().await.len();
                             feed_t.clear_post_only_reject_flag().await;
                             feed_t.send_action(payload);
                             info!("🚀 ÉLES LÉTRA KILŐVE (Dinamikus árazás)");
-                            tokio::time::sleep(tokio::time::Duration::from_millis(220)).await;
-                            let rejected_post_only = feed_t.consume_post_only_reject_flag().await;
+                            // WS post feedback often arrives after 200–800ms; poll instead of a single short sleep.
+                            let mut rejected_post_only = false;
+                            for _ in 0..22 {
+                                tokio::time::sleep(tokio::time::Duration::from_millis(45)).await;
+                                if feed_t.post_only_reject_pending().await {
+                                    rejected_post_only = true;
+                                    let _ = feed_t.consume_post_only_reject_flag().await;
+                                    break;
+                                }
+                                if feed_t.open_order_oids.lock().await.len() > oids_before {
+                                    break;
+                                }
+                            }
                             if rejected_post_only {
                                 let retry_action = order_manager.build_ladder_payload_with_passive_buffer(
                                     &signal.side,
@@ -375,7 +387,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     best_bid,
                                     best_ask,
                                     target_usd,
-                                    6.0,
+                                    10.0,
                                 );
                                 if !retry_action.orders.is_empty() {
                                     let retry_nonce = std::time::SystemTime::now()
@@ -388,12 +400,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         let mut r2 = [0u8; 32];
                                         retry_sig.r.to_big_endian(&mut r2);
                                         let v2 = if retry_sig.v < 27 { (retry_sig.v + 27) as u8 } else { retry_sig.v as u8 };
+                                        feed_t.clear_post_only_reject_flag().await;
                                         feed_t.send_action(serde_json::json!({
                                             "action": retry_action,
                                             "nonce": retry_nonce,
                                             "signature": {"r": format!("0x{}", hex::encode(r2)), "s": format!("0x{}", hex::encode(s2)), "v": v2}
                                         }));
-                                        info!("🔁 POST-ONLY RETRY elküldve mélyebb passzív árral (buffer=6 tick).");
+                                        info!("🔁 POST-ONLY RETRY elküldve mélyebb passzív árral (buffer=10 tick).");
                                     }
                                 }
                             }

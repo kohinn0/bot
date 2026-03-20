@@ -117,6 +117,10 @@ impl HyperliquidFeed {
         *f = false;
     }
 
+    pub async fn post_only_reject_pending(&self) -> bool {
+        *self.post_only_reject_flag.lock().await
+    }
+
     pub async fn consume_post_only_reject_flag(&self) -> bool {
         let mut f = self.post_only_reject_flag.lock().await;
         let current = *f;
