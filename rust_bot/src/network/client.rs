@@ -36,6 +36,15 @@ impl HyperliquidClient {
         resp.json::<Value>().await
     }
 
+    pub async fn get_user_state(&self, user: &str) -> Result<Value, reqwest::Error> {
+        let payload = json!({
+            "type": "clearinghouseState",
+            "user": user
+        });
+        let resp = self.rest_client.post(&self.info_url).json(&payload).send().await?;
+        resp.json::<Value>().await
+    }
+
     pub async fn get_open_orders(&self, user: &str) -> Result<Value, reqwest::Error> {
         let payload = json!({
             "type": "openOrders",

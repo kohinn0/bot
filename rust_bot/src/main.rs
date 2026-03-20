@@ -170,11 +170,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let signer_t = signer.clone();
     let feed_t = feed.clone();
+    let signer_r = signer.clone();
+    let feed_r = feed.clone();
+    let rest_client_r = rest_client.clone();
     let pnl_sim_t = pnl_tracker.clone();
     let acc_sim_t = account_value.clone();
     let pos_sim_t = current_position.clone();
+    let pos_reconcile_t = current_position.clone();
     let vol_sim_t = last_volatility.clone();
+    let vol_reconcile_t = last_volatility.clone();
     let state_t = state_ref.clone();
+    let state_reconcile = state_ref.clone();
+    let om_reconcile = Arc::new(OrderManager::new(app_config.strategy.clone(), asset_idx, sz_decimals));
     let max_pos_limit = app_config.strategy.max_positions;
     let mut last_signal_time = std::time::Instant::now() - std::time::Duration::from_secs(60);
     let min_signal_interval = std::time::Duration::from_secs(3);
@@ -292,6 +299,97 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
+        }
+    });
+
+    // === FAILSAFE: REST reconcile a pozícióra + védő TP/SL újraküldés ===
+    let coin_reconcile = coin.clone();
+    let min_tick_reconcile = min_tick;
+    let is_mainnet_reconcile = is_mainnet;
+    tokio::spawn(async move {
+        let mut last_protected_pos: f64 = 0.0;
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+            match rest_client_r.get_user_state(signer_r.get_address()).await {
+                Ok(state) => {
+                    let mut exchange_pos = 0.0_f64;
+                    let mut entry_px = None::<f64>;
+
+                    if let Some(arr) = state["assetPositions"].as_array() {
+                        for ap in arr {
+                            let pos = &ap["position"];
+                            if pos["coin"].as_str().unwrap_or("") == coin_reconcile {
+                                exchange_pos = pos["szi"].as_str().unwrap_or("0").parse::<f64>().unwrap_or(0.0);
+                                entry_px = pos["entryPx"].as_str().and_then(|v| v.parse::<f64>().ok());
+                                break;
+                            }
+                        }
+                    }
+
+                    {
+                        let mut p = pos_reconcile_t.lock().await;
+                        *p = exchange_pos;
+                    }
+
+                    if exchange_pos.abs() < 0.0001 {
+                        last_protected_pos = 0.0;
+                        continue;
+                    }
+
+                    // Re-arm protection if position changed materially or wasn't protected yet.
+                    if (exchange_pos.abs() - last_protected_pos.abs()).abs() >= 0.001 {
+                            let reference_px = if let Some(px) = entry_px {
+                            px
+                        } else {
+                                let s = state_reconcile.read().await;
+                            s.mid_price
+                        };
+
+                        if reference_px > 0.0 {
+                            let vol = { *vol_reconcile_t.lock().await };
+                            let tp_side = if exchange_pos > 0.0 { "Sell" } else { "Buy" };
+                            let tp_dist = f64::max(vol * 1.5, 5.0 * min_tick_reconcile);
+                            let sl_dist = f64::max(vol * 3.0, 10.0 * min_tick_reconcile);
+                            let tp_price = if exchange_pos > 0.0 { reference_px + tp_dist } else { reference_px - tp_dist };
+                            let sl_price = if exchange_pos > 0.0 { reference_px - sl_dist } else { reference_px + sl_dist };
+
+                            let protection = om_reconcile.build_protective_tpsl_payload(
+                                tp_side,
+                                tp_price,
+                                sl_price,
+                                exchange_pos.abs(),
+                            );
+                            let nonce = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap()
+                                .as_millis() as u64;
+
+                            if let Ok(sig) = signer_r.sign_l1_action(&protection, nonce, is_mainnet_reconcile).await {
+                                let mut s_b = [0u8; 32];
+                                sig.s.to_big_endian(&mut s_b);
+                                let mut r_b = [0u8; 32];
+                                sig.r.to_big_endian(&mut r_b);
+                                let v = if sig.v < 27 { (sig.v + 27) as u8 } else { sig.v as u8 };
+
+                                feed_r.send_action(serde_json::json!({
+                                    "action": protection,
+                                    "nonce": nonce,
+                                    "signature": {"r": format!("0x{}", hex::encode(r_b)), "s": format!("0x{}", hex::encode(s_b)), "v": v}
+                                }));
+                                info!(
+                                    "🛡️ FAILSAFE TP/SL RECONCILE: pos={:.4}, TP={:.4}, SL={:.4}",
+                                    exchange_pos, tp_price, sl_price
+                                );
+                                last_protected_pos = exchange_pos;
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("⚠️ REST reconcile hiba (user_state): {}", e);
+                }
+            }
         }
     });
 
