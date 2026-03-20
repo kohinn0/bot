@@ -169,6 +169,8 @@ impl OrderManager {
 
         let mut orders = Vec::new();
         
+        let passive_buffer_ticks = 2.0_f64;
+
         for level_cfg in &self.config.ladder_levels {
             let skew_adj = self.current_pos * self.config.skew_penalty.unwrap_or(0.0);
             let offset_ticks = (level_cfg.offset_from_mid_ticks as f64) + if is_buy { skew_adj } else { -skew_adj };
@@ -196,9 +198,9 @@ impl OrderManager {
             // Keep orders strictly passive to reduce post-only rejections
             // when BBO moves between signal and submit.
             if is_buy {
-                rounded_price = rounded_price.min(best_bid - tick);
+                rounded_price = rounded_price.min(best_bid - (passive_buffer_ticks * tick));
             } else {
-                rounded_price = rounded_price.max(best_ask + tick);
+                rounded_price = rounded_price.max(best_ask + (passive_buffer_ticks * tick));
             }
             let size_usd = sz_usd * level_cfg.size_pct;
             let sz = ((size_usd / rounded_price) / sz_step).floor() * sz_step;
@@ -227,9 +229,9 @@ impl OrderManager {
         // place one fallback maker order with the full intended notional.
         if orders.is_empty() {
             let tick_price = if is_buy {
-                best_bid.max(mid_price - tick)
+                best_bid.max(mid_price - (passive_buffer_ticks * tick))
             } else {
-                best_ask.min(mid_price + tick)
+                best_ask.min(mid_price + (passive_buffer_ticks * tick))
             };
             let rounded_price = if is_buy {
                 (tick_price / tick).floor() * tick
