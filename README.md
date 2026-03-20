@@ -6,7 +6,7 @@ Z-score alapú létra stratégia, kétlépcsős WebSocket védelem, automatikus 
 
 ---
 
-## 🚀 Telepítés (VPS – egyetlen parancs)
+## 🚀 Telepítés (VPS – Rust)
 
 ```bash
 git clone https://github.com/kohinn0/bot ~/sebessegbot
@@ -14,21 +14,20 @@ cd ~/sebessegbot
 bash setup.sh
 ```
 
-A script interaktívan bekéri a privát kulcsot, lefuttatja a backend tesztet,
-és regisztrálja a botot `systemd` alá – szerver újraindítás után is automatikusan elindul.
+A `setup.sh` most Rust-only belépőpont, és a `setup_rust.sh`-t futtatja.
+Telepíti a Rust toolchaint + build függőségeket, majd lefordítja a botot release módban.
 
 ---
 
-## ⚙️ Kézi indítás
+## ⚙️ Kézi indítás (Rust)
 
 ```bash
-python3 -m venv venv && source venv/bin/activate
-pip install -r requirements.txt
 cp .env.example .env   # majd add meg a PRIVATE_KEY-t
 
-python test_backend.py  # ← mindig futtasd először!
-python bot.py           # dry run (szimuláció)
-python bot.py --live    # éles kereskedés
+bash setup_rust.sh
+cd rust_bot
+cargo build --release
+./target/release/sebessegbot_rs
 ```
 
 ---
@@ -56,17 +55,12 @@ bash setup.sh                       # frissítés
 
 ---
 
-## 🧪 Backend teszt
+## 🧪 Diagnosztika
 
-A `test_backend.py` az alábbiak rendben létét ellenőrzi mielőtt a bot elindul:
+Rust build után futtass rövid ellenőrzést:
 
-- Python 3.10+ és függőségek
-- `.env` fájl és `PRIVATE_KEY`
-- Összes Python modul betölthetősége
-- `strategy_maker.json` konfig (leverage, isolated margin)
-- Hyperliquid REST API elérhetősége
-- WebSocket L2 feed 3 másodperces élő tesztje
-- Wallet inicializálás
+- `python test_ws.py` (WS kapcsolat smoke test)
+- induláskor figyeld a `WS POST ERROR` / `WS POST FEEDBACK` sorokat
 
 ---
 
@@ -97,17 +91,15 @@ IDLE → ARMED → LADDER_PLACED → IN_POSITION → EXITING → COOLDOWN
 
 ---
 
-## 📁 Struktúra
+## 📁 Struktúra (aktuális)
 
 ```
-bot.py                 # Főprogram, FSM
-order_manager.py       # Létra + TP kezelés
-signal_engine.py       # Z-score, volatilitás, jelgenerátor
-hyperliquid_feed.py    # L2 WebSocket (ultra-low latency)
-hyperliquid_client.py  # HL REST/SDK kliens
-config.py              # Konfig loader
-bot_logger.py          # Naplózás
+rust_bot/src/main.rs           # Főprogram (Tokio event loop)
+rust_bot/src/network/feed.rs   # HL WebSocket feed + order post
+rust_bot/src/network/client.rs # HL REST kliens
+rust_bot/src/logic/order_manager.rs # Létra, TP/SL, payload wire
+rust_bot/src/logic/signer.rs   # EIP-712 aláírás
 strategy_maker.json    # Stratégia paraméterek
-test_backend.py        # Öndiagnosztika
-setup.sh               # VPS telepítő
+setup_rust.sh          # Rust VPS telepítő/fordító
+setup.sh               # Rust-only wrapper
 ```
