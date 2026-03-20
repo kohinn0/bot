@@ -49,8 +49,15 @@ enum WsRequest {
     #[serde(rename = "post")]
     Post {
         id: u64,
-        request: serde_json::Value,
+        request: WsPostRequest,
     },
+}
+
+#[derive(Serialize)]
+struct WsPostRequest {
+    #[serde(rename = "type")]
+    request_type: String,
+    payload: serde_json::Value,
 }
 
 #[derive(Serialize)]
@@ -144,11 +151,14 @@ impl HyperliquidFeed {
                                         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64
                                     );
                                     
-                                    // 💡 REALIGNED HYPERLIQUID WS POST FORMAT:
-                                    // method: "post", id: <num>, request: { action, nonce, signature }
+                                    // HL WS post requires wrapper:
+                                    // request: { type: "action", payload: { action, nonce, signature } }
                                     let req = WsRequest::Post {
                                         id: req_id,
-                                        request: payload,
+                                        request: WsPostRequest {
+                                            request_type: "action".to_string(),
+                                            payload,
+                                        },
                                     };
                                     if let Ok(json) = serde_json::to_string(&req) {
                                         if let Err(e) = ws_stream.send(Message::Text(json)).await {
@@ -180,7 +190,7 @@ impl HyperliquidFeed {
                         self.process_l2_book(data).await;
                     }
                 }
-                "userEvents" => {
+                "userEvents" | "user" => {
                     if let Some(data) = response.data {
                         self.process_user_event(data).await;
                     }
