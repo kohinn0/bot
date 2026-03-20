@@ -245,11 +245,45 @@ impl HyperliquidFeed {
         }
 
         if resp_type == "order" {
-            let count = payload["response"]["data"]["statuses"]
-                .as_array()
-                .map(|a| a.len())
-                .unwrap_or(0);
-            info!("✅ POST order ok (id={}, statuses={})", id, count);
+            let statuses = payload["response"]["data"]["statuses"].as_array();
+            let count = statuses.map(|a| a.len()).unwrap_or(0);
+            let mut resting = 0usize;
+            let mut filled = 0usize;
+            let mut errored = 0usize;
+            let mut other = 0usize;
+            let mut sample_error: Option<String> = None;
+
+            if let Some(arr) = statuses {
+                for s in arr {
+                    if s.get("resting").is_some() {
+                        resting += 1;
+                    } else if s.get("filled").is_some() {
+                        filled += 1;
+                    } else if s.get("error").is_some() {
+                        errored += 1;
+                        if sample_error.is_none() {
+                            sample_error = s
+                                .get("error")
+                                .and_then(|v| v.as_str())
+                                .map(|v| v.to_string());
+                        }
+                    } else {
+                        other += 1;
+                    }
+                }
+            }
+
+            if let Some(err) = sample_error {
+                warn!(
+                    "⚠️ POST order status detail (id={}): resting={}, filled={}, errored={}, other={}, sample_error={}",
+                    id, resting, filled, errored, other, err
+                );
+            } else {
+                info!(
+                    "✅ POST order ok (id={}, statuses={}, resting={}, filled={}, errored={}, other={})",
+                    id, count, resting, filled, errored, other
+                );
+            }
             return;
         }
 

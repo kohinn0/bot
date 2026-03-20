@@ -280,6 +280,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if cancel_oids.is_empty() {
                         if let Ok(open_orders) = rest_client.get_open_orders(signer_t.get_address()).await {
                             if let Some(arr) = open_orders.as_array() {
+                                let mut rest_found = 0usize;
                                 for ord in arr {
                                     let coin_match = ord["coin"].as_str().map(|c| c == coin_signal).unwrap_or(false);
                                     let asset_match = ord["asset"]
@@ -294,7 +295,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         .or_else(|| ord["oid"].as_str().and_then(|v| v.parse::<u64>().ok()));
                                     if let Some(oid) = oid {
                                         cancel_oids.push(oid);
+                                        rest_found += 1;
                                     }
+                                }
+                                if rest_found > 0 {
+                                    info!("🛰️ REST openOrders fallback: {} db OID betöltve törléshez", rest_found);
                                 }
                             }
                         }
