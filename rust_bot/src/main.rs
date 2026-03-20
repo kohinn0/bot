@@ -175,13 +175,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state_t = state_ref.clone();
     let max_pos_limit = app_config.strategy.max_positions;
     let mut last_signal_time = std::time::Instant::now() - std::time::Duration::from_secs(60);
+    let min_signal_interval = std::time::Duration::from_secs(3);
 
     // 6. A fő "szívverés" (Heartbeat) - Extrém gyors polling az RwLock-ból
     tokio::spawn(async move {
         loop {
             if let Some(signal) = signal_engine.tick().await {
                 // Cooldown ellenőrzése: ne küldjünk 500ms-on belül újabb létrát
-                if last_signal_time.elapsed() < std::time::Duration::from_millis(500) {
+                if last_signal_time.elapsed() < min_signal_interval {
                     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
                     continue;
                 }
@@ -266,6 +267,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     
                     // Adunk pár ms-t a tőzsdének, hogy feldolgozza a törlést
                     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+                    // Hard guard: ha maradt nyitott order ezen a coinon, ne küldjünk új létrát.
+                    // Ez megfogja a "túl sok order" jelenséget hálózati lag vagy részleges cancel esetén.
+                    let mut has_open_orders = false;
+                    match rest_client_t.get_open_orders(signer_t.get_address()).await {
+                        Ok(orders_after_cancel) => {
+                            if let Some(order_list) = orders_after_cancel.as_array() {
+                                has_open_orders = order_list.iter().any(|o| o["coin"].as_str().unwrap_or("") == coin);
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("⚠️ Open orders re-check sikertelen, order küldés kihagyva: {}", e);
+                            has_open_orders = true;
+                        }
+                    }
+                    if has_open_orders {
+                        info!("⛔ Új létra kihagyva: még vannak nyitott orderek {} piacon.", coin);
+                        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                        continue;
+                    }
 
                     // --- 2. ÚJ LÉTRA KIHELYEZÉSE ---
                     let action = order_manager.build_ladder_payload(&signal.side, signal.target_mid, best_bid, best_ask, target_usd);
