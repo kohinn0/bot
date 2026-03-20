@@ -167,6 +167,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let signer_t = signer.clone();
     let feed_t = feed.clone();
+    let rest_client_t = rest_client.clone();
     let pnl_sim_t = pnl_tracker.clone();
     let acc_sim_t = account_value.clone();
     let pos_sim_t = current_position.clone();
@@ -226,20 +227,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     pnl.add_trade(2.55, 0.05, *acc);
                 } else {
                     // --- 1. CLEAN SLATE: ELŐZŐ MEGBÍZÁSOK TÖRLÉSE ---
-                    let cancel_action = order_manager.build_cancel_all_payload();
-                    let c_nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
-                    
-                    if let Ok(sig) = signer_t.sign_l1_action(&cancel_action, c_nonce, is_mainnet).await {
-                        let mut s_b = [0u8; 32]; sig.s.to_big_endian(&mut s_b);
-                        let mut r_b = [0u8; 32]; sig.r.to_big_endian(&mut r_b);
-                        let v = if sig.v < 27 { (sig.v + 27) as u8 } else { sig.v as u8 };
+                    match rest_client_t.get_open_orders(signer_t.get_address()).await {
+                        Ok(orders) => {
+                            let mut cancel_oids: Vec<u64> = Vec::new();
+                            if let Some(order_list) = orders.as_array() {
+                                for o in order_list {
+                                    if o["coin"].as_str().unwrap_or("") == coin {
+                                        if let Some(oid) = o["oid"].as_u64() {
+                                            cancel_oids.push(oid);
+                                        }
+                                    }
+                                }
+                            }
 
-                        feed_t.send_action(serde_json::json!({
-                            "action": cancel_action,
-                            "nonce": c_nonce,
-                            "signature": {"r": format!("0x{}", hex::encode(r_b)), "s": format!("0x{}", hex::encode(s_b)), "v": v}
-                        }));
-                        info!("🧹 SZELLEM-ORDERS TÖRÖLVE (CancelByCoin)");
+                            if !cancel_oids.is_empty() {
+                                let cancel_action = order_manager.build_cancel_payload(&cancel_oids);
+                                let c_nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+                                if let Ok(sig) = signer_t.sign_l1_action(&cancel_action, c_nonce, is_mainnet).await {
+                                    let mut s_b = [0u8; 32]; sig.s.to_big_endian(&mut s_b);
+                                    let mut r_b = [0u8; 32]; sig.r.to_big_endian(&mut r_b);
+                                    let v = if sig.v < 27 { (sig.v + 27) as u8 } else { sig.v as u8 };
+
+                                    feed_t.send_action(serde_json::json!({
+                                        "action": cancel_action,
+                                        "nonce": c_nonce,
+                                        "signature": {"r": format!("0x{}", hex::encode(r_b)), "s": format!("0x{}", hex::encode(s_b)), "v": v}
+                                    }));
+                                    info!("🧹 SZELLEM-ORDERS TÖRÖLVE ({} db Cancel)", cancel_oids.len());
+                                }
+                            } else {
+                                info!("🧹 Nincs törlendő nyitott order ezen a coinon.");
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("⚠️ Open orders lekérdezés sikertelen, cancel kihagyva: {}", e);
+                        }
                     }
                     
                     // Adunk pár ms-t a tőzsdének, hogy feldolgozza a törlést

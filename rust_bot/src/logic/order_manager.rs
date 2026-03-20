@@ -30,10 +30,16 @@ pub struct OrderAction {
 }
 
 #[derive(Serialize, Debug, Clone)]
-pub struct CancelByCoinAction {
+pub struct CancelWire {
+    pub a: u32,
+    pub o: u64,
+}
+
+#[derive(Serialize, Debug, Clone)]
+pub struct CancelAction {
     #[serde(rename = "type")]
     pub type_: String,
-    pub coin: String,
+    pub cancels: Vec<CancelWire>,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -68,10 +74,18 @@ impl OrderManager {
         }
     }
 
-    pub fn build_cancel_all_payload(&self) -> CancelByCoinAction {
-        CancelByCoinAction {
-            type_: "cancelByCoin".to_string(),
-            coin: self.config.coin.clone(),
+    pub fn build_cancel_payload(&self, oids: &[u64]) -> CancelAction {
+        let cancels = oids
+            .iter()
+            .map(|oid| CancelWire {
+                a: self.asset_idx,
+                o: *oid,
+            })
+            .collect();
+
+        CancelAction {
+            type_: "cancel".to_string(),
+            cancels,
         }
     }
 
