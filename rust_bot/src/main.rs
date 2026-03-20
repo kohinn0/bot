@@ -234,12 +234,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     *v = signal.volatility;
                 }
 
-                // Pozíció és Piaci állapot lekérése
+                // Pozíció lekérése (BBO-t a megbízás előtt frissítjük — cancel után már más lehet)
                 let current_pos = { *pos_sim_t.lock().await };
-                let (best_bid, best_ask) = {
-                    let s = state_t.read().await;
-                    (s.best_bid, s.best_ask)
-                };
 
                 // Egyszerűsített max_positions kontroll: ha 1 a limit, és van pozíciónk, 
                 // csak akkor engedünk újabb jelet, ha az ellentétes irányú (zárás)
@@ -336,9 +332,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
 
                     // --- 2. ÚJ LÉTRA KIHELYEZÉSE ---
+                    let (best_bid, best_ask, ladder_mid) = {
+                        let s = state_t.read().await;
+                        let mid = if s.best_bid > 0.0 && s.best_ask > 0.0 {
+                            (s.best_bid + s.best_ask) / 2.0
+                        } else {
+                            signal.target_mid
+                        };
+                        (s.best_bid, s.best_ask, mid)
+                    };
                     let action = order_manager.build_ladder_payload_with_passive_buffer(
                         &signal.side,
-                        signal.target_mid,
+                        ladder_mid,
                         best_bid,
                         best_ask,
                         target_usd,
@@ -381,11 +386,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                             if rejected_post_only {
+                                let (best_bid_r, best_ask_r, ladder_mid_r) = {
+                                    let s = state_t.read().await;
+                                    let mid = if s.best_bid > 0.0 && s.best_ask > 0.0 {
+                                        (s.best_bid + s.best_ask) / 2.0
+                                    } else {
+                                        signal.target_mid
+                                    };
+                                    (s.best_bid, s.best_ask, mid)
+                                };
                                 let retry_action = order_manager.build_ladder_payload_with_passive_buffer(
                                     &signal.side,
-                                    signal.target_mid,
-                                    best_bid,
-                                    best_ask,
+                                    ladder_mid_r,
+                                    best_bid_r,
+                                    best_ask_r,
                                     target_usd,
                                     10.0,
                                 );
