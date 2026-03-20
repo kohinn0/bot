@@ -48,7 +48,7 @@
             "comment": "0.25%/s fölött ha 900ms-ig tart → Toxic flow. 2000ms túl késő: addigra már 0.5%-ot esett!"
         },
         "debounce": {
-            "min_time_between_entries_ms": 5000
+            "min_time_between_entries_ms": 3500
         }
     },
     "order_management": {
@@ -61,25 +61,25 @@
             "ladder_config": [
                 {
                     "level": 1,
-                    "offset_from_mid_ticks": -3,
+                    "offset_from_mid_ticks": -1,
                     "size_pct": 0.4,
                     "comment": "mid - 3 ticks"
                 },
                 {
                     "level": 2,
-                    "offset_from_mid_ticks": -6,
+                    "offset_from_mid_ticks": -2,
                     "size_pct": 0.3,
                     "comment": "mid - 6 ticks"
                 },
                 {
                     "level": 3,
-                    "offset_from_mid_ticks": -9,
+                    "offset_from_mid_ticks": -4,
                     "size_pct": 0.3,
                     "comment": "mid - 9 ticks"
                 }
             ],
             "signal_params": {
-                "z_threshold": 2.8,
+                "z_threshold": 2.4,
                 "min_time_between_signals_ms": 3000,
                 "returns_window_ms": 120000,
                 "comment": "2.5 sigma = érzékenyebb HFT jel; 3s debounce"
