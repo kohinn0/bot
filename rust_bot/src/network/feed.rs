@@ -199,8 +199,8 @@ impl HyperliquidFeed {
                 }
                 "post" => {
                     if let Some(data) = response.data {
-                        self.track_post_order_oids(data).await;
-                        self.log_post_summary(data).await;
+                        self.track_post_order_oids(&data).await;
+                        self.log_post_summary(&data).await;
                     }
                 }
                 "info" | "error" => {
@@ -232,7 +232,7 @@ impl HyperliquidFeed {
         }
     }
 
-    async fn log_post_summary(&self, data: serde_json::Value) {
+    async fn log_post_summary(&self, data: &serde_json::Value) {
         let id = data["id"].as_u64().unwrap_or(0);
         let response = &data["response"];
         let payload = &response["payload"];
@@ -273,7 +273,7 @@ impl HyperliquidFeed {
         info!("📡 POST ok (id={}, type={})", id, resp_type);
     }
 
-    async fn track_post_order_oids(&self, data: serde_json::Value) {
+    async fn track_post_order_oids(&self, data: &serde_json::Value) {
         let response = &data["response"];
         if response["type"].as_str().unwrap_or("") != "action" {
             return;
