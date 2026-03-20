@@ -14,7 +14,7 @@ cd ~/sebessegbot
 bash setup.sh
 ```
 
-A `setup.sh` most Rust-only belépőpont, és a `setup_rust.sh`-t futtatja.
+A `setup.sh` a teljes Rust telepítőt futtatja.
 Telepíti a Rust toolchaint + build függőségeket, majd lefordítja a botot release módban.
 
 ---
@@ -24,7 +24,7 @@ Telepíti a Rust toolchaint + build függőségeket, majd lefordítja a botot re
 ```bash
 cp .env.example .env   # majd add meg a PRIVATE_KEY-t
 
-bash setup_rust.sh
+bash setup.sh
 cd rust_bot
 cargo build --release
 ./target/release/sebessegbot_rs
@@ -100,6 +100,5 @@ rust_bot/src/network/client.rs # HL REST kliens
 rust_bot/src/logic/order_manager.rs # Létra, TP/SL, payload wire
 rust_bot/src/logic/signer.rs   # EIP-712 aláírás
 strategy_maker.json    # Stratégia paraméterek
-setup_rust.sh          # Rust VPS telepítő/fordító
-setup.sh               # Rust-only wrapper
+setup.sh               # Rust VPS telepítő/fordító
 ```
