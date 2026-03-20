@@ -185,6 +185,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let max_pos_limit = app_config.strategy.max_positions;
     let mut last_signal_time = std::time::Instant::now() - std::time::Duration::from_secs(60);
     let min_signal_interval = std::time::Duration::from_secs(3);
+    let coin_signal = coin.clone();
 
     // 6. A fő "szívverés" (Heartbeat) - Extrém gyors polling az RwLock-ból
     tokio::spawn(async move {
@@ -269,7 +270,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // Hard guard: ha van még lokálisan nyitottként követett order, ne küldjünk új létrát.
                     let has_open_orders = !feed_t.open_order_oids.lock().await.is_empty();
                     if has_open_orders {
-                        info!("⛔ Új létra kihagyva: még vannak nyitott orderek {} piacon.", coin);
+                        info!("⛔ Új létra kihagyva: még vannak nyitott orderek {} piacon.", coin_signal);
                         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
                         continue;
                     }
