@@ -167,7 +167,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let signer_t = signer.clone();
     let feed_t = feed.clone();
-    let rest_client_t = rest_client.clone();
     let pnl_sim_t = pnl_tracker.clone();
     let acc_sim_t = account_value.clone();
     let pos_sim_t = current_position.clone();
@@ -228,60 +227,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     pnl.add_trade(2.55, 0.05, *acc);
                 } else {
                     // --- 1. CLEAN SLATE: ELŐZŐ MEGBÍZÁSOK TÖRLÉSE ---
-                    match rest_client_t.get_open_orders(signer_t.get_address()).await {
-                        Ok(orders) => {
-                            let mut cancel_oids: Vec<u64> = Vec::new();
-                            if let Some(order_list) = orders.as_array() {
-                                for o in order_list {
-                                    if o["coin"].as_str().unwrap_or("") == coin {
-                                        if let Some(oid) = o["oid"].as_u64() {
-                                            cancel_oids.push(oid);
-                                        }
-                                    }
-                                }
-                            }
+                    let cancel_oids = {
+                        let mut tracked = feed_t.open_order_oids.lock().await;
+                        let oids = tracked.clone();
+                        tracked.clear();
+                        oids
+                    };
 
-                            if !cancel_oids.is_empty() {
-                                let cancel_action = order_manager.build_cancel_payload(&cancel_oids);
-                                let c_nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
-                                if let Ok(sig) = signer_t.sign_l1_action(&cancel_action, c_nonce, is_mainnet).await {
-                                    let mut s_b = [0u8; 32]; sig.s.to_big_endian(&mut s_b);
-                                    let mut r_b = [0u8; 32]; sig.r.to_big_endian(&mut r_b);
-                                    let v = if sig.v < 27 { (sig.v + 27) as u8 } else { sig.v as u8 };
+                    if !cancel_oids.is_empty() {
+                        let cancel_action = order_manager.build_cancel_payload(&cancel_oids);
+                        let c_nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+                        if let Ok(sig) = signer_t.sign_l1_action(&cancel_action, c_nonce, is_mainnet).await {
+                            let mut s_b = [0u8; 32]; sig.s.to_big_endian(&mut s_b);
+                            let mut r_b = [0u8; 32]; sig.r.to_big_endian(&mut r_b);
+                            let v = if sig.v < 27 { (sig.v + 27) as u8 } else { sig.v as u8 };
 
-                                    feed_t.send_action(serde_json::json!({
-                                        "action": cancel_action,
-                                        "nonce": c_nonce,
-                                        "signature": {"r": format!("0x{}", hex::encode(r_b)), "s": format!("0x{}", hex::encode(s_b)), "v": v}
-                                    }));
-                                    info!("🧹 SZELLEM-ORDERS TÖRÖLVE ({} db Cancel)", cancel_oids.len());
-                                }
-                            } else {
-                                info!("🧹 Nincs törlendő nyitott order ezen a coinon.");
-                            }
+                            feed_t.send_action(serde_json::json!({
+                                "action": cancel_action,
+                                "nonce": c_nonce,
+                                "signature": {"r": format!("0x{}", hex::encode(r_b)), "s": format!("0x{}", hex::encode(s_b)), "v": v}
+                            }));
+                            info!("🧹 SZELLEM-ORDERS TÖRÖLVE ({} db Cancel)", cancel_oids.len());
                         }
-                        Err(e) => {
-                            tracing::warn!("⚠️ Open orders lekérdezés sikertelen, cancel kihagyva: {}", e);
-                        }
+                    } else {
+                        info!("🧹 Nincs törlendő nyitott order ezen a coinon.");
                     }
                     
                     // Adunk pár ms-t a tőzsdének, hogy feldolgozza a törlést
                     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
-                    // Hard guard: ha maradt nyitott order ezen a coinon, ne küldjünk új létrát.
-                    // Ez megfogja a "túl sok order" jelenséget hálózati lag vagy részleges cancel esetén.
-                    let mut has_open_orders = false;
-                    match rest_client_t.get_open_orders(signer_t.get_address()).await {
-                        Ok(orders_after_cancel) => {
-                            if let Some(order_list) = orders_after_cancel.as_array() {
-                                has_open_orders = order_list.iter().any(|o| o["coin"].as_str().unwrap_or("") == coin);
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!("⚠️ Open orders re-check sikertelen, order küldés kihagyva: {}", e);
-                            has_open_orders = true;
-                        }
-                    }
+                    // Hard guard: ha van még lokálisan nyitottként követett order, ne küldjünk új létrát.
+                    let has_open_orders = !feed_t.open_order_oids.lock().await.is_empty();
                     if has_open_orders {
                         info!("⛔ Új létra kihagyva: még vannak nyitott orderek {} piacon.", coin);
                         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;

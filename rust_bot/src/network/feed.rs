@@ -2,7 +2,7 @@ use futures_util::{SinkExt, StreamExt};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tokio::sync::{RwLock, mpsc, broadcast};
+use tokio::sync::{RwLock, mpsc, broadcast, Mutex};
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 use tracing::{error, info, warn};
 
@@ -80,6 +80,7 @@ pub struct HyperliquidFeed {
     pub user_address: String,
     pub ws_url: String,
     pub state: Arc<RwLock<L2BookState>>,
+    pub open_order_oids: Arc<Mutex<Vec<u64>>>,
     pub fill_tx: broadcast::Sender<FillEvent>,
     cmd_tx: mpsc::UnboundedSender<serde_json::Value>,
 }
@@ -98,6 +99,7 @@ impl HyperliquidFeed {
                 coin: coin.to_string(),
                 ..Default::default()
             })),
+            open_order_oids: Arc::new(Mutex::new(Vec::new())),
             fill_tx,
             cmd_tx,
         };
@@ -195,6 +197,12 @@ impl HyperliquidFeed {
                         self.process_user_event(data).await;
                     }
                 }
+                "post" => {
+                    if let Some(data) = response.data {
+                        self.track_post_order_oids(data).await;
+                    }
+                    info!("📡 WS Feedback: {}", text);
+                }
                 "info" | "error" => {
                     info!("📡 WS SERVER RESPONSE: {}", text);
                 }
@@ -222,6 +230,28 @@ impl HyperliquidFeed {
             if has_id || has_status || has_response {
                 info!("📡 WS POST FEEDBACK: {}", text);
                 return;
+            }
+        }
+    }
+
+    async fn track_post_order_oids(&self, data: serde_json::Value) {
+        let response = &data["response"];
+        if response["type"].as_str().unwrap_or("") != "action" {
+            return;
+        }
+        let action_payload = &response["payload"];
+        if action_payload["status"].as_str().unwrap_or("") != "ok" {
+            return;
+        }
+        if action_payload["response"]["type"].as_str().unwrap_or("") != "order" {
+            return;
+        }
+        if let Some(statuses) = action_payload["response"]["data"]["statuses"].as_array() {
+            let mut tracked = self.open_order_oids.lock().await;
+            for status in statuses {
+                if let Some(oid) = status["resting"]["oid"].as_u64() {
+                    tracked.push(oid);
+                }
             }
         }
     }
