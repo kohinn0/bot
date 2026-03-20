@@ -200,16 +200,14 @@ impl HyperliquidFeed {
                 "post" => {
                     if let Some(data) = response.data {
                         self.track_post_order_oids(data).await;
+                        self.log_post_summary(data).await;
                     }
-                    info!("📡 WS Feedback: {}", text);
                 }
                 "info" | "error" => {
-                    info!("📡 WS SERVER RESPONSE: {}", text);
+                    info!("📡 WS {} üzenet érkezett", response.channel);
                 }
                 _ => {
-                    if text.contains("status") || text.contains("response") {
-                        info!("📡 WS Feedback: {}", text);
-                    }
+                    // Ignore noisy channels we don't explicitly track.
                 }
             }
             return;
@@ -228,10 +226,51 @@ impl HyperliquidFeed {
             }
 
             if has_id || has_status || has_response {
-                info!("📡 WS POST FEEDBACK: {}", text);
+                info!("📡 WS POST FEEDBACK érkezett");
                 return;
             }
         }
+    }
+
+    async fn log_post_summary(&self, data: serde_json::Value) {
+        let id = data["id"].as_u64().unwrap_or(0);
+        let response = &data["response"];
+        let payload = &response["payload"];
+        let status = payload["status"].as_str().unwrap_or("unknown");
+        let resp_type = payload["response"]["type"].as_str().unwrap_or("");
+
+        if status != "ok" {
+            info!("📡 POST id={} status={}", id, status);
+            return;
+        }
+
+        if resp_type == "order" {
+            let count = payload["response"]["data"]["statuses"]
+                .as_array()
+                .map(|a| a.len())
+                .unwrap_or(0);
+            info!("✅ POST order ok (id={}, statuses={})", id, count);
+            return;
+        }
+
+        if resp_type == "cancel" {
+            let statuses = payload["response"]["data"]["statuses"].as_array();
+            let mut success = 0usize;
+            let mut non_success = 0usize;
+            if let Some(arr) = statuses {
+                for s in arr {
+                    if s.as_str() == Some("success") {
+                        success += 1;
+                    } else {
+                        non_success += 1;
+                    }
+                }
+            }
+            info!("🧹 POST cancel ok (id={}, success={}, other={})", id, success, non_success);
+            return;
+        }
+
+        info!("📡 POST ok (id={}, type={})", id, resp_type);
     }
 
     async fn track_post_order_oids(&self, data: serde_json::Value) {
