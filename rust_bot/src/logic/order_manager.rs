@@ -215,6 +215,40 @@ impl OrderManager {
             });
         }
 
+        // Exchange rejects empty order lists ("Orders are empty.").
+        // If all ladder levels were filtered out by min size/notional guards,
+        // place one fallback maker order with the full intended notional.
+        if orders.is_empty() {
+            let tick_price = if is_buy {
+                best_bid.max(mid_price - tick)
+            } else {
+                best_ask.min(mid_price + tick)
+            };
+            let rounded_price = if is_buy {
+                (tick_price / tick).floor() * tick
+            } else {
+                (tick_price / tick).ceil() * tick
+            };
+            let min_notional = 10.0_f64;
+            let fallback_notional = sz_usd.max(min_notional);
+            let sz = ((fallback_notional / rounded_price) / sz_step).floor() * sz_step;
+            if sz >= self.config.min_shares && (rounded_price * sz) >= min_notional {
+                orders.push(OrderWire {
+                    a: self.asset_idx,
+                    b: is_buy,
+                    p: Self::float_to_wire(rounded_price),
+                    s: Self::float_to_wire(sz),
+                    r: false,
+                    t: OrderTypeWire {
+                        limit: Some(LimitOrderType {
+                            tif: "Alo".to_string(),
+                        }),
+                        trigger: None,
+                    }
+                });
+            }
+        }
+
         OrderAction {
             type_: "order".to_string(),
             orders,

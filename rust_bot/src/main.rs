@@ -337,6 +337,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     // --- 2. ÚJ LÉTRA KIHELYEZÉSE ---
                     let action = order_manager.build_ladder_payload(&signal.side, signal.target_mid, best_bid, best_ask, target_usd);
+                    if action.orders.is_empty() {
+                        tracing::warn!("⚠️ Üres order lista, létra küldés kihagyva (szűrők minden szintet eldobtak).");
+                        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                        continue;
+                    }
                     let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
 
                     match signer_t.sign_l1_action(&action, nonce, is_mainnet).await {
