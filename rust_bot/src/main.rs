@@ -6,6 +6,7 @@ use dotenvy::dotenv;
 use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use crate::config::AppConfig;
 use crate::logic::signer::HyperliquidSigner;
 use crate::logic::bot_pnl::PnlTracker;
@@ -62,7 +63,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     feed.clone().start(cmd_rx).await;
 
     let initial_balance = 99.0;
+    let max_daily_loss_usd = app_config.strategy.max_daily_loss_usd;
+    let max_daily_trades = app_config.strategy.max_daily_trades;
     let account_value = Arc::new(tokio::sync::Mutex::new(initial_balance));
+    let trade_count = Arc::new(AtomicU32::new(0));
     let current_position = Arc::new(tokio::sync::Mutex::new(0.0));
     let last_volatility = Arc::new(tokio::sync::Mutex::new(0.01)); // Kezdeti volatilitás becslés
     let pnl_tracker = Arc::new(tokio::sync::Mutex::new(PnlTracker::new("../logs/pnl_state.json")));
@@ -85,6 +89,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // === VALÓS IDEJŰ FILL ÉS POZÍCIÓ FIGYELŐ ===
     let mut fill_rx = feed.fill_tx.subscribe();
     let pnl_t = pnl_tracker.clone();
+    let trades_t = trade_count.clone();
     let acc_t = account_value.clone();
     let pos_t = current_position.clone();
     let vol_t = last_volatility.clone();
@@ -109,6 +114,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             *acc += fill.px * fill.sz * side_mult; 
             
             pnl.add_trade(0.0, fill.fee, *acc);
+            trades_t.fetch_add(1, Ordering::Relaxed);
             info!("📊 Aktuális Pozíció: {:.4} {}", *pos, fill.coin);
 
             // 💡 MENTOR TRÜKK: Azonnali TP és SL elhelyezése kitöltés után
@@ -184,13 +190,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let om_reconcile = Arc::new(OrderManager::new(app_config.strategy.clone(), asset_idx, sz_decimals));
     let max_pos_limit = app_config.strategy.max_positions;
     let mut last_signal_time = std::time::Instant::now() - std::time::Duration::from_secs(60);
-    let min_signal_interval = std::time::Duration::from_secs(3);
+    let min_signal_interval = std::time::Duration::from_millis(app_config.strategy.min_signal_interval_ms);
     let coin_signal = coin.clone();
+    let account_guard_t = account_value.clone();
+    let trade_guard_t = trade_count.clone();
 
     // 6. A fő "szívverés" (Heartbeat) - Extrém gyors polling az RwLock-ból
     tokio::spawn(async move {
         loop {
             if let Some(signal) = signal_engine.tick().await {
+                // Hard risk stop: halt new entries after daily loss/trade caps.
+                let current_acc = *account_guard_t.lock().await;
+                let drawdown = initial_balance - current_acc;
+                let trades_done = trade_guard_t.load(Ordering::Relaxed);
+                if drawdown >= max_daily_loss_usd {
+                    tracing::warn!(
+                        "🛑 DAILY LOSS LIMIT ELÉRVE (dd=${:.2} >= ${:.2}), új belépések tiltva.",
+                        drawdown,
+                        max_daily_loss_usd
+                    );
+                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                    continue;
+                }
+                if trades_done >= max_daily_trades {
+                    tracing::warn!(
+                        "🛑 DAILY TRADE LIMIT ELÉRVE ({} >= {}), új belépések tiltva.",
+                        trades_done,
+                        max_daily_trades
+                    );
+                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                    continue;
+                }
+
                 // Cooldown ellenőrzése: ne küldjünk 500ms-on belül újabb létrát
                 if last_signal_time.elapsed() < min_signal_interval {
                     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;

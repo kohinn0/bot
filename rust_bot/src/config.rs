@@ -24,6 +24,9 @@ pub struct StrategyConfig {
     pub min_shares: f64,
     pub ladder_levels: Vec<LadderLevel>,
     pub skew_penalty: Option<f64>,
+    pub min_signal_interval_ms: u64,
+    pub max_daily_loss_usd: f64,
+    pub max_daily_trades: u32,
 }
 
 pub struct AppConfig {
@@ -98,6 +101,11 @@ impl AppConfig {
             ladder_levels,
             
             skew_penalty: Some(1.0),
+            min_signal_interval_ms: parsed["signal_engine"]["debounce"]["min_time_between_entries_ms"]
+                .as_u64()
+                .unwrap_or(8000),
+            max_daily_loss_usd: rm["daily_limits"]["max_daily_loss_usd"].as_f64().unwrap_or(10.0),
+            max_daily_trades: rm["daily_limits"]["max_daily_trades"].as_u64().unwrap_or(25) as u32,
         };
 
         info!("✅ Konfiguráció betöltve: {}, Dry Run: {}", strategy.coin, is_dry_run);
