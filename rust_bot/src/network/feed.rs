@@ -6,8 +6,8 @@ use tokio::sync::{RwLock, mpsc, broadcast};
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 use tracing::{error, info, warn};
 
-// Hyperliquid WebSocket URL
-const HL_WSS_URL: &str = "wss://api.hyperliquid.xyz/ws";
+const HL_MAINNET_WSS_URL: &str = "wss://api.hyperliquid.xyz/ws";
+const HL_TESTNET_WSS_URL: &str = "wss://api.hyperliquid-testnet.xyz/ws";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct L2BookState {
@@ -71,19 +71,22 @@ struct WsResponse {
 pub struct HyperliquidFeed {
     pub coin: String,
     pub user_address: String,
+    pub ws_url: String,
     pub state: Arc<RwLock<L2BookState>>,
     pub fill_tx: broadcast::Sender<FillEvent>,
     cmd_tx: mpsc::UnboundedSender<serde_json::Value>,
 }
 
 impl HyperliquidFeed {
-    pub fn new(coin: &str, user_address: &str) -> (Self, mpsc::UnboundedReceiver<serde_json::Value>) {
+    pub fn new(coin: &str, user_address: &str, is_mainnet: bool) -> (Self, mpsc::UnboundedReceiver<serde_json::Value>) {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let (fill_tx, _) = broadcast::channel(100);
+        let ws_url = if is_mainnet { HL_MAINNET_WSS_URL } else { HL_TESTNET_WSS_URL };
         
         let feed = Self {
             coin: coin.to_string(),
             user_address: user_address.to_string(),
+            ws_url: ws_url.to_string(),
             state: Arc::new(RwLock::new(L2BookState {
                 coin: coin.to_string(),
                 ..Default::default()
@@ -104,7 +107,7 @@ impl HyperliquidFeed {
         tokio::spawn(async move {
             loop {
                 info!("🔗 Kapcsolódás a Hyperliquid WS-hez...");
-                let url = Url::parse(HL_WSS_URL).unwrap();
+                let url = Url::parse(&this.ws_url).unwrap();
                 
                 match connect_async(url).await {
                     Ok((mut ws_stream, _)) => {
@@ -190,6 +193,25 @@ impl HyperliquidFeed {
                         info!("📡 WS Feedback: {}", text);
                     }
                 }
+            }
+            return;
+        }
+
+        // WS "post" responses often don't include "channel" and would be missed otherwise.
+        if let Ok(raw) = serde_json::from_str::<serde_json::Value>(text) {
+            let has_id = raw.get("id").is_some();
+            let has_status = raw.get("status").is_some();
+            let has_response = raw.get("response").is_some();
+            let has_error = raw.get("error").is_some();
+
+            if has_error {
+                error!("❌ WS POST ERROR: {}", text);
+                return;
+            }
+
+            if has_id || has_status || has_response {
+                info!("📡 WS POST FEEDBACK: {}", text);
+                return;
             }
         }
     }

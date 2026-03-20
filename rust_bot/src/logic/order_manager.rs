@@ -96,7 +96,7 @@ impl OrderManager {
             r: false,
             t: OrderTypeWire {
                 limit: LimitOrderType {
-                    tif: "GTC".to_string(),
+                    tif: "Gtc".to_string(),
                 }
             }
         });
@@ -161,7 +161,7 @@ impl OrderManager {
                 r: false,
                 t: OrderTypeWire {
                     limit: LimitOrderType {
-                        tif: "ALO".to_string(),
+                        tif: "Alo".to_string(),
                     }
                 }
             });

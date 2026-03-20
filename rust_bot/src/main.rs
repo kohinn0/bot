@@ -56,7 +56,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("✅ Kereskedési pár: {}, Asset ID: {}, Size Decimals: {}", coin, asset_idx, sz_decimals);
 
     // 4. WebSocket Feed elindítása
-    let (feed, cmd_rx) = HyperliquidFeed::new(&coin, signer.get_address());
+    let (feed, cmd_rx) = HyperliquidFeed::new(&coin, signer.get_address(), is_mainnet);
     let feed = Arc::new(feed);
     let state_ref = feed.state.clone();
     feed.clone().start(cmd_rx).await;
