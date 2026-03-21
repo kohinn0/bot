@@ -204,6 +204,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let acc_t = wallet_equity.clone();
     let pos_t = current_position.clone();
     let vol_t = last_volatility.clone();
+    let state_for_fill = state_ref.clone();
     let signer_f = signer.clone();
     let rest_client_f = rest_client.clone();
     let om_f = Arc::new(OrderManager::new(app_config.strategy.clone(), asset_idx, sz_decimals));
@@ -233,11 +234,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 
                 // Dinamikus TP: 1.5x szórás, de minimum 5 tick
                 let tp_dist = f64::max(vol * 1.5, 5.0 * min_tick); 
-                let tp_price = if *pos > 0.0 { fill.px + tp_dist } else { fill.px - tp_dist };
+                let raw_tp = if *pos > 0.0 { fill.px + tp_dist } else { fill.px - tp_dist };
 
                 // Dinamikus SL: 3x szórás, de minimum 10 tick
                 let sl_dist = f64::max(vol * 3.0, 10.0 * min_tick);
-                let sl_price = if *pos > 0.0 { fill.px - sl_dist } else { fill.px + sl_dist };
+                let raw_sl = if *pos > 0.0 { fill.px - sl_dist } else { fill.px + sl_dist };
+
+                let mark_mid = { state_for_fill.read().await.mid_price };
+                let (tp_price, sl_price) = match OrderManager::clamp_tpsl_prices_for_mark(
+                    *pos, raw_tp, raw_sl, mark_mid, min_tick,
+                ) {
+                    Some(p) => p,
+                    None => {
+                        tracing::warn!(
+                            "🛡️ TP/SL kihagyva (clamp): mark={:.4} pos={:.4} raw_tp={:.4} raw_sl={:.4}",
+                            mark_mid, *pos, raw_tp, raw_sl
+                        );
+                        continue;
+                    }
+                };
 
                 // Teljes nyitott pozíció méretére TP/SL (nem csak az utolsó fill chunk).
                 let protective_sz = om_f.quantize_position_sz(*pos);
@@ -667,8 +682,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let tp_side = if exchange_pos > 0.0 { "Sell" } else { "Buy" };
                             let tp_dist = f64::max(vol * 1.5, 5.0 * min_tick_reconcile);
                             let sl_dist = f64::max(vol * 3.0, 10.0 * min_tick_reconcile);
-                            let tp_price = if exchange_pos > 0.0 { reference_px + tp_dist } else { reference_px - tp_dist };
-                            let sl_price = if exchange_pos > 0.0 { reference_px - sl_dist } else { reference_px + sl_dist };
+                            let raw_tp = if exchange_pos > 0.0 {
+                                reference_px + tp_dist
+                            } else {
+                                reference_px - tp_dist
+                            };
+                            let raw_sl = if exchange_pos > 0.0 {
+                                reference_px - sl_dist
+                            } else {
+                                reference_px + sl_dist
+                            };
+
+                            let mark_mid = { state_reconcile.read().await.mid_price };
+                            let (tp_price, sl_price) = match OrderManager::clamp_tpsl_prices_for_mark(
+                                exchange_pos,
+                                raw_tp,
+                                raw_sl,
+                                mark_mid,
+                                min_tick_reconcile,
+                            ) {
+                                Some(p) => p,
+                                None => {
+                                    tracing::warn!(
+                                        "🛡️ FAILSAFE TP/SL clamp skip: mark={:.4} pos={:.4} ref={:.4} raw_tp={:.4} raw_sl={:.4}",
+                                        mark_mid, exchange_pos, reference_px, raw_tp, raw_sl
+                                    );
+                                    continue;
+                                }
+                            };
 
                             let protection = om_reconcile.build_protective_tpsl_payload(
                                 tp_side,

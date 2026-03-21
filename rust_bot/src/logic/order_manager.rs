@@ -77,6 +77,46 @@ impl OrderManager {
         Self { config, asset_idx, sz_decimals, current_pos: 0.0 }
     }
 
+    /// HL `positionTpsl`: triggerárak a **jelenlegi mark/mid**-hez képest a megfelelő oldalon legyenek (különben „Invalid TP/SL price”).
+    ///
+    /// - **Long** (eladás zárás): TP trigger a mark **fölött**, SL a mark **alatt**.
+    /// - **Short** (vétel zárás): TP trigger a mark **alatt**, SL a mark **fölött**.
+    pub fn clamp_tpsl_prices_for_mark(
+        exchange_pos: f64,
+        tp_price: f64,
+        sl_price: f64,
+        mark_mid: f64,
+        tick: f64,
+    ) -> Option<(f64, f64)> {
+        if !mark_mid.is_finite() || mark_mid <= 0.0 || !tick.is_finite() || tick <= 0.0 {
+            return None;
+        }
+        let min_sep = (tick * 2.0).max(tick);
+
+        let ceil_tick = |px: f64| (px / tick).ceil() * tick;
+        let floor_tick = |px: f64| (px / tick).floor() * tick;
+
+        if exchange_pos > 0.0 {
+            let tp = ceil_tick(tp_price.max(mark_mid + min_sep));
+            let sl = floor_tick(sl_price.min(mark_mid - min_sep));
+            if tp > mark_mid && sl < mark_mid && tp > sl + tick {
+                Some((tp, sl))
+            } else {
+                None
+            }
+        } else if exchange_pos < 0.0 {
+            let tp = floor_tick(tp_price.min(mark_mid - min_sep));
+            let sl = ceil_tick(sl_price.max(mark_mid + min_sep));
+            if tp < mark_mid && sl > mark_mid && sl > tp + tick {
+                Some((tp, sl))
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+
     /// Pozíció méret kvantálása `szDecimals` szerint (TP/SL méret = teljes pozíció).
     pub fn quantize_position_sz(&self, sz: f64) -> f64 {
         let step = 10_f64.powi(-(self.sz_decimals as i32));
