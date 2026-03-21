@@ -2,7 +2,7 @@ use futures_util::{SinkExt, StreamExt};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tokio::sync::{RwLock, mpsc, broadcast, Mutex};
+use tokio::sync::{RwLock, broadcast, Mutex};
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 use tracing::{error, info, warn};
 
@@ -46,18 +46,6 @@ pub struct FillEvent {
 enum WsRequest {
     #[serde(rename = "subscribe")]
     Subscribe { subscription: SubscriptionData },
-    #[serde(rename = "post")]
-    Post {
-        id: u64,
-        request: WsPostRequest,
-    },
-}
-
-#[derive(Serialize)]
-struct WsPostRequest {
-    #[serde(rename = "type")]
-    request_type: String,
-    payload: serde_json::Value,
 }
 
 #[derive(Serialize)]
@@ -83,16 +71,15 @@ pub struct HyperliquidFeed {
     pub open_order_oids: Arc<Mutex<Vec<u64>>>,
     pub post_only_reject_flag: Arc<Mutex<bool>>,
     pub fill_tx: broadcast::Sender<FillEvent>,
-    cmd_tx: mpsc::UnboundedSender<serde_json::Value>,
 }
 
 impl HyperliquidFeed {
-    pub fn new(coin: &str, user_address: &str, is_mainnet: bool) -> (Self, mpsc::UnboundedReceiver<serde_json::Value>) {
-        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+    /// Megbízások HTTP-n mennek (`/exchange`); a WS csak L2 + userEvents.
+    pub fn new(coin: &str, user_address: &str, is_mainnet: bool) -> Self {
         let (fill_tx, _) = broadcast::channel(100);
         let ws_url = if is_mainnet { HL_MAINNET_WSS_URL } else { HL_TESTNET_WSS_URL };
-        
-        let feed = Self {
+
+        Self {
             coin: coin.to_string(),
             user_address: user_address.to_string(),
             ws_url: ws_url.to_string(),
@@ -103,13 +90,7 @@ impl HyperliquidFeed {
             open_order_oids: Arc::new(Mutex::new(Vec::new())),
             post_only_reject_flag: Arc::new(Mutex::new(false)),
             fill_tx,
-            cmd_tx,
-        };
-        (feed, cmd_rx)
-    }
-
-    pub fn send_action(&self, action: serde_json::Value) {
-        let _ = self.cmd_tx.send(action);
+        }
     }
 
     pub async fn clear_post_only_reject_flag(&self) {
@@ -134,66 +115,42 @@ impl HyperliquidFeed {
         *f = pending;
     }
 
-    pub async fn start(self: Arc<Self>, mut cmd_rx: mpsc::UnboundedReceiver<serde_json::Value>) {
+    pub async fn start(self: Arc<Self>) {
         let this = self.clone();
-        
+
         tokio::spawn(async move {
             loop {
                 info!("🔗 Kapcsolódás a Hyperliquid WS-hez...");
                 let url = Url::parse(&this.ws_url).unwrap();
-                
+
                 match connect_async(url).await {
                     Ok((mut ws_stream, _)) => {
                         info!("✅ Hyperliquid WS Connected (Market + User stream)");
-                        
-                        // 1. Subscribe to L2 Book
+
                         let sub_l2 = WsRequest::Subscribe {
                             subscription: SubscriptionData::L2Book { coin: this.coin.clone() },
                         };
-                        ws_stream.send(Message::Text(serde_json::to_string(&sub_l2).unwrap())).await.ok();
+                        ws_stream
+                            .send(Message::Text(serde_json::to_string(&sub_l2).unwrap()))
+                            .await
+                            .ok();
 
-                        // 2. Subscribe to User Events
                         let sub_user = WsRequest::Subscribe {
-                            subscription: SubscriptionData::UserEvents { user: this.user_address.clone() },
+                            subscription: SubscriptionData::UserEvents {
+                                user: this.user_address.clone(),
+                            },
                         };
-                        ws_stream.send(Message::Text(serde_json::to_string(&sub_user).unwrap())).await.ok();
+                        ws_stream
+                            .send(Message::Text(serde_json::to_string(&sub_user).unwrap()))
+                            .await
+                            .ok();
 
-                        loop {
-                            tokio::select! {
-                                // Handle incoming WS messages
-                                Some(msg) = ws_stream.next() => {
-                                    match msg {
-                                        Ok(Message::Text(text)) => {
-                                            this.process_message(&text).await;
-                                        }
-                                        Ok(Message::Close(_)) => break,
-                                        Err(_) => break,
-                                        _ => {}
-                                    }
-                                }
-                                // Handle outgoing actions (Orders) - This is the LOW LATENCY path
-                                Some(payload) = cmd_rx.recv() => {
-                                    let req_id = payload["nonce"].as_u64().unwrap_or(
-                                        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64
-                                    );
-                                    
-                                    // HL WS post requires wrapper:
-                                    // request: { type: "action", payload: { action, nonce, signature } }
-                                    let req = WsRequest::Post {
-                                        id: req_id,
-                                        request: WsPostRequest {
-                                            request_type: "action".to_string(),
-                                            payload,
-                                        },
-                                    };
-                                    if let Ok(json) = serde_json::to_string(&req) {
-                                        if let Err(e) = ws_stream.send(Message::Text(json)).await {
-                                            error!("❌ Hiba a WS megbízás küldésekor: {}", e);
-                                        } else {
-                                            info!("📤 Megbízás kiküldve (post method, ID: {})", req_id);
-                                        }
-                                    }
-                                }
+                        while let Some(msg) = ws_stream.next().await {
+                            match msg {
+                                Ok(Message::Text(text)) => this.process_message(&text).await,
+                                Ok(Message::Close(_)) => break,
+                                Err(_) => break,
+                                _ => {}
                             }
                         }
                     }

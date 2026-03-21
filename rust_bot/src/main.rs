@@ -78,10 +78,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("✅ Kereskedési pár: {}, Asset ID: {}, Size Decimals: {}", coin, asset_idx, sz_decimals);
 
     // 4. WebSocket Feed elindítása
-    let (feed, cmd_rx) = HyperliquidFeed::new(&coin, &hl_user, is_mainnet);
-    let feed = Arc::new(feed);
+    let feed = Arc::new(HyperliquidFeed::new(&coin, &hl_user, is_mainnet));
     let state_ref = feed.state.clone();
-    feed.clone().start(cmd_rx).await;
+    feed.clone().start().await;
 
     let user_address = hl_user.clone();
     let max_daily_loss_usd = app_config.strategy.max_daily_loss_usd;
@@ -205,7 +204,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let acc_t = wallet_equity.clone();
     let pos_t = current_position.clone();
     let vol_t = last_volatility.clone();
-    let feed_f = feed.clone();
     let signer_f = signer.clone();
     let rest_client_f = rest_client.clone();
     let om_f = Arc::new(OrderManager::new(app_config.strategy.clone(), asset_idx, sz_decimals));
@@ -296,7 +294,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let signer_r = signer.clone();
     let hl_user_t = hl_user.clone();
     let hl_user_r = hl_user.clone();
-    let feed_r = feed.clone();
     let rest_client_r = rest_client.clone();
     let pnl_sim_t = pnl_tracker.clone();
     let acc_sim_t = wallet_equity.clone();
