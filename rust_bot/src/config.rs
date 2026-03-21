@@ -29,10 +29,25 @@ pub struct StrategyConfig {
     pub max_daily_trades: u32,
 }
 
+impl StrategyConfig {
+    /// Létra szintenkénti cél-notional (USD): egyenleg % × tőkeáttétel, cap `base_sz_usd`.
+    pub fn notional_per_level_usd(&self, equity_usd: f64) -> f64 {
+        let computed =
+            equity_usd * (self.balance_pct_per_trade / 100.0) * (self.leverage as f64);
+        computed.min(self.base_sz_usd)
+    }
+}
+
 pub struct AppConfig {
     pub private_key: String,
     pub is_dry_run: bool,
     pub is_mainnet: bool,
+    /// Induló egyenleg (USD) — fallback, ha HL egyenleg nem kérhető le; env: STARTING_EQUITY_USD
+    pub starting_equity_usd: f64,
+    /// Ha true (alap): méret a Hyperliquid `clearinghouseState.accountValue` alapján; env: USE_WALLET_BALANCE_FOR_SIZING
+    pub use_wallet_balance_for_sizing: bool,
+    /// HL egyenleg frissítése másodpercenként (méret követése); env: WALLET_EQUITY_REFRESH_SEC
+    pub wallet_equity_refresh_sec: u64,
     pub strategy: StrategyConfig,
 }
 
@@ -115,10 +130,31 @@ impl AppConfig {
             .trim()
             .to_lowercase() == "true";
 
+        let starting_equity_usd = env::var("STARTING_EQUITY_USD")
+            .ok()
+            .and_then(|s| s.trim().parse::<f64>().ok())
+            .filter(|&v| v > 0.0)
+            .unwrap_or(100.0);
+
+        let use_wallet_balance_for_sizing = env::var("USE_WALLET_BALANCE_FOR_SIZING")
+            .unwrap_or_else(|_| "true".to_string())
+            .trim()
+            .to_lowercase()
+            != "false";
+
+        let wallet_equity_refresh_sec = env::var("WALLET_EQUITY_REFRESH_SEC")
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .filter(|&v| v >= 10)
+            .unwrap_or(30);
+
         Self {
             private_key,
             is_dry_run,
             is_mainnet,
+            starting_equity_usd,
+            use_wallet_balance_for_sizing,
+            wallet_equity_refresh_sec,
             strategy,
         }
     }

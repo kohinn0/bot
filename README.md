@@ -37,6 +37,10 @@ cargo build --release
 ```env
 PRIVATE_KEY=0x...       # Hyperliquid privát kulcs
 DRY_RUN=true            # true = szimuláció | false = éles
+IS_MAINNET=true         # mainnet / testnet
+STARTING_EQUITY_USD=100 # fallback: méret + drawdown, ha nincs HL egyenleg (pl. DRY_RUN)
+USE_WALLET_BALANCE_FOR_SIZING=true  # élesben: méret a HL számla accountValue alapján
+WALLET_EQUITY_REFRESH_SEC=30        # HL egyenleg frissítése (másodperc)
 ```
 
 > ⚠️ A `.env` fájl nincs a repóban – sosem kerüljön commitba.

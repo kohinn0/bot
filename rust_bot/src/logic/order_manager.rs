@@ -76,6 +76,13 @@ impl OrderManager {
         Self { config, asset_idx, sz_decimals, current_pos: 0.0 }
     }
 
+    /// Pozíció méret kvantálása `szDecimals` szerint (TP/SL méret = teljes pozíció).
+    pub fn quantize_position_sz(&self, sz: f64) -> f64 {
+        let step = 10_f64.powi(-(self.sz_decimals as i32));
+        let q = (sz.abs() / step).floor() * step;
+        q.max(self.config.min_shares)
+    }
+
     fn float_to_wire(x: f64) -> String {
         let s = format!("{:.8}", x);
         let trimmed = s.trim_end_matches('0');

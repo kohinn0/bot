@@ -166,16 +166,17 @@
     "risk_management": {
         "position_limits": {
             "max_open_positions": 1,
-            "max_notional_usd_per_trade": 800,
-            "balance_pct_per_trade": 1.2
+            "max_notional_usd_per_trade": 40,
+            "balance_pct_per_trade": 1.0,
+            "comment": "~$100 számla: 1% × 10x ≈ $10/szint; cap 40 USD véletlen túlméret ellen"
         },
         "leverage": {
             "max_leverage": 10,
             "cross_margin": false
         },
         "daily_limits": {
-            "max_daily_loss_usd": 8,
-            "max_daily_trades": 45
+            "max_daily_loss_usd": 5,
+            "max_daily_trades": 25
         },
         "partial_fill_handling": {
             "min_position_size_to_manage": "30% of intended size",

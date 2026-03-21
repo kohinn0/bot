@@ -12,7 +12,10 @@ use crate::logic::signer::HyperliquidSigner;
 use crate::logic::bot_pnl::PnlTracker;
 use crate::logic::signal::SignalEngine;
 use crate::logic::order_manager::OrderManager;
-use crate::network::client::HyperliquidClient;
+use crate::network::client::{
+    collect_ladder_cancel_oids_from_frontend, filter_cancel_oids_excluding_position_tpsl_triggers,
+    HyperliquidClient,
+};
 use crate::network::feed::HyperliquidFeed;
 
 #[tokio::main]
@@ -62,20 +65,108 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state_ref = feed.state.clone();
     feed.clone().start(cmd_rx).await;
 
-    let initial_balance = 99.0;
+    let user_address = signer.get_address().to_string();
     let max_daily_loss_usd = app_config.strategy.max_daily_loss_usd;
     let max_daily_trades = app_config.strategy.max_daily_trades;
-    let account_value = Arc::new(tokio::sync::Mutex::new(initial_balance));
+
+    // Méret: Hyperliquid perp `accountValue` (clearinghouseState), ha engedélyezett; különben STARTING_EQUITY_USD
+    let use_hl_equity =
+        app_config.use_wallet_balance_for_sizing && !app_config.is_dry_run;
+    let (wallet_equity_usd, equity_source): (f64, String) = if use_hl_equity {
+        match rest_client.get_account_value_usd(user_address.as_str()).await {
+            Ok(v) if v.is_finite() && v > 0.0 => (v, "Hyperliquid accountValue".to_string()),
+            Ok(v) => {
+                tracing::warn!(
+                    "⚠️ HL accountValue érvénytelen (${:.4}), fallback STARTING_EQUITY_USD",
+                    v
+                );
+                (
+                    app_config.starting_equity_usd,
+                    "fallback STARTING_EQUITY_USD (érvénytelen HL)".to_string(),
+                )
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "⚠️ HL egyenleg lekérés sikertelen: {} — fallback STARTING_EQUITY_USD",
+                    e
+                );
+                (
+                    app_config.starting_equity_usd,
+                    "fallback STARTING_EQUITY_USD (API hiba)".to_string(),
+                )
+            }
+        }
+    } else {
+        let why = if app_config.is_dry_run {
+            "DRY_RUN"
+        } else if !app_config.use_wallet_balance_for_sizing {
+            "USE_WALLET_BALANCE_FOR_SIZING=false"
+        } else {
+            "kikapcsolva"
+        };
+        (
+            app_config.starting_equity_usd,
+            format!("STARTING_EQUITY_USD ({})", why),
+        )
+    };
+
+    // Session drawdown: induló HL/fallback egyenleg (bot indítás pillanata)
+    let session_start_equity = wallet_equity_usd;
+    info!(
+        "💵 Számlaérték (méret + drawdown bázis): ${:.2} — forrás: {}",
+        wallet_equity_usd, equity_source
+    );
+
+    let wallet_equity = Arc::new(tokio::sync::Mutex::new(wallet_equity_usd));
+    let initial_notional = app_config
+        .strategy
+        .notional_per_level_usd(wallet_equity_usd);
+    let target_notional_usd = Arc::new(tokio::sync::Mutex::new(initial_notional));
+
     let trade_count = Arc::new(AtomicU32::new(0));
     let current_position = Arc::new(tokio::sync::Mutex::new(0.0));
     let last_volatility = Arc::new(tokio::sync::Mutex::new(0.01)); // Kezdeti volatilitás becslés
     let pnl_tracker = Arc::new(tokio::sync::Mutex::new(PnlTracker::new("../logs/pnl_state.json")));
-    
-    // Százalék kiszámítása az induló tőkéből
-    let calculated_usd = initial_balance * (app_config.strategy.balance_pct_per_trade / 100.0) * (app_config.strategy.leverage as f64);
-    let target_usd = calculated_usd.min(app_config.strategy.base_sz_usd);
-    
-    info!("💰 Kereskedési méret (notional): ${:.2} per szint", target_usd);
+
+    info!(
+        "💰 Kereskedési méret (notional): ${:.2} per szint (követi a számlaértéket, ha HL frissítés fut)",
+        initial_notional
+    );
+
+    // Háttérben: számlaérték + cél-notional frissítése a tőzsdéről
+    if use_hl_equity {
+        let rest_w = rest_client.clone();
+        let addr_w = user_address.clone(); // String — 'static a háttér taskban
+        let wallet_w = wallet_equity.clone();
+        let target_w = target_notional_usd.clone();
+        let strat_w = app_config.strategy.clone();
+        let sec = app_config.wallet_equity_refresh_sec.max(10);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_secs(sec)).await;
+                match rest_w.get_account_value_usd(&addr_w).await {
+                    Ok(v) if v.is_finite() && v > 0.0 => {
+                        let n = strat_w.notional_per_level_usd(v);
+                        {
+                            let mut w = wallet_w.lock().await;
+                            *w = v;
+                        }
+                        {
+                            let mut t = target_w.lock().await;
+                            *t = n;
+                        }
+                        tracing::debug!(
+                            "🔄 HL egyenleg frissítve: ${:.2} → notional/szint ${:.2}",
+                            v,
+                            n
+                        );
+                    }
+                    Ok(v) => tracing::warn!("⚠️ HL accountValue kihagyva (érvénytelen): {}", v),
+                    Err(e) => tracing::warn!("⚠️ HL egyenleg frissítés hiba: {}", e),
+                }
+            }
+        });
+    }
     
     // 5. Szignál motor és Order Manager inicializálása
     let mut signal_engine = SignalEngine::new(app_config.strategy.clone(), state_ref.clone());
@@ -90,7 +181,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut fill_rx = feed.fill_tx.subscribe();
     let pnl_t = pnl_tracker.clone();
     let trades_t = trade_count.clone();
-    let acc_t = account_value.clone();
+    let acc_t = wallet_equity.clone();
     let pos_t = current_position.clone();
     let vol_t = last_volatility.clone();
     let feed_f = feed.clone();
@@ -103,17 +194,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         while let Ok(fill) = fill_rx.recv().await {
             info!("📈 PNL/POS UPDATE: {} fill @ {} (Sz: {})", fill.coin, fill.px, fill.sz);
             
-            let mut acc = acc_t.lock().await;
             let mut pnl = pnl_t.lock().await;
             let mut pos = pos_t.lock().await;
             
             let fill_sz = if fill.side == "B" { fill.sz } else { -fill.sz };
             *pos += fill_sz;
 
-            let side_mult = if fill.side == "B" { -1.0 } else { 1.0 };
-            *acc += fill.px * fill.sz * side_mult; 
-            
-            pnl.add_trade(0.0, fill.fee, *acc);
+            let eq_for_pnl = *acc_t.lock().await;
+            pnl.add_trade(0.0, fill.fee, eq_for_pnl);
             trades_t.fetch_add(1, Ordering::Relaxed);
             info!("📊 Aktuális Pozíció: {:.4} {}", *pos, fill.coin);
 
@@ -131,9 +219,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let sl_dist = f64::max(vol * 3.0, 10.0 * min_tick);
                 let sl_price = if *pos > 0.0 { fill.px - sl_dist } else { fill.px + sl_dist };
 
-                // Use latest fill size for protective order sizing to avoid oversizing
-                // when multiple partial fills arrive quickly.
-                let protective_sz = fill.sz.abs();
+                // Teljes nyitott pozíció méretére TP/SL (nem csak az utolsó fill chunk).
+                let protective_sz = om_f.quantize_position_sz(*pos);
                 let exit_action = om_f.build_protective_tpsl_payload(tp_side, tp_price, sl_price, protective_sz);
                 let e_nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
 
@@ -180,7 +267,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let feed_r = feed.clone();
     let rest_client_r = rest_client.clone();
     let pnl_sim_t = pnl_tracker.clone();
-    let acc_sim_t = account_value.clone();
+    let acc_sim_t = wallet_equity.clone();
     let pos_sim_t = current_position.clone();
     let pos_reconcile_t = current_position.clone();
     let vol_sim_t = last_volatility.clone();
@@ -192,16 +279,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut last_signal_time = std::time::Instant::now() - std::time::Duration::from_secs(60);
     let min_signal_interval = std::time::Duration::from_millis(app_config.strategy.min_signal_interval_ms);
     let coin_signal = coin.clone();
-    let account_guard_t = account_value.clone();
+    let account_guard_t = wallet_equity.clone();
     let trade_guard_t = trade_count.clone();
+    let target_notional_t = target_notional_usd.clone();
 
     // 6. A fő "szívverés" (Heartbeat) - Extrém gyors polling az RwLock-ból
     tokio::spawn(async move {
         loop {
             if let Some(signal) = signal_engine.tick().await {
                 // Hard risk stop: halt new entries after daily loss/trade caps.
-                let current_acc = *account_guard_t.lock().await;
-                let drawdown = initial_balance - current_acc;
+                let current_equity = *account_guard_t.lock().await;
+                let drawdown = (session_start_equity - current_equity).max(0.0);
                 let trades_done = trade_guard_t.load(Ordering::Relaxed);
                 if drawdown >= max_daily_loss_usd {
                     tracing::warn!(
@@ -264,7 +352,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     *pos += fill_sz;
                     pnl.add_trade(2.55, 0.05, *acc);
                 } else {
-                    // --- 1. CLEAN SLATE: ELŐZŐ MEGBÍZÁSOK TÖRLÉSE ---
+                    // --- 1. CLEAN SLATE: ELŐZŐ LÉTRA ORDEREK (TP/SL trigger NEM törlődik) ---
+                    let fe_orders = rest_client
+                        .get_frontend_open_orders(signer_t.get_address())
+                        .await
+                        .ok();
+
                     let mut cancel_oids = {
                         let mut tracked = feed_t.open_order_oids.lock().await;
                         let oids = tracked.clone();
@@ -272,32 +365,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         oids
                     };
 
-                    // Fallback: ha WS OID track üres, kérdezzük le REST-ről a nyitott ordereket.
+                    // Fallback: WS OID üres → frontend listából csak nem-trigger / nem-positionTpsl
                     if cancel_oids.is_empty() {
-                        if let Ok(open_orders) = rest_client.get_open_orders(signer_t.get_address()).await {
-                            if let Some(arr) = open_orders.as_array() {
-                                let mut rest_found = 0usize;
-                                for ord in arr {
-                                    let coin_match = ord["coin"].as_str().map(|c| c == coin_signal).unwrap_or(false);
-                                    let asset_match = ord["asset"]
-                                        .as_u64()
-                                        .map(|a| a == asset_idx as u64)
-                                        .unwrap_or(false);
-                                    if !(coin_match || asset_match) {
-                                        continue;
-                                    }
-                                    let oid = ord["oid"]
-                                        .as_u64()
-                                        .or_else(|| ord["oid"].as_str().and_then(|v| v.parse::<u64>().ok()));
-                                    if let Some(oid) = oid {
-                                        cancel_oids.push(oid);
-                                        rest_found += 1;
-                                    }
-                                }
-                                if rest_found > 0 {
-                                    info!("🛰️ REST openOrders fallback: {} db OID betöltve törléshez", rest_found);
-                                }
+                        if let Some(ref fe) = fe_orders {
+                            cancel_oids = collect_ladder_cancel_oids_from_frontend(fe, &coin_signal);
+                            if !cancel_oids.is_empty() {
+                                info!(
+                                    "🛰️ REST frontendOpenOrders fallback: {} db létra-OID törléshez (TP/SL kihagyva)",
+                                    cancel_oids.len()
+                                );
                             }
+                        }
+                    }
+
+                    if let Some(ref fe) = fe_orders {
+                        let before = cancel_oids.len();
+                        cancel_oids =
+                            filter_cancel_oids_excluding_position_tpsl_triggers(fe, &coin_signal, cancel_oids);
+                        if before != cancel_oids.len() {
+                            info!(
+                                "🛡️ TP/SL trigger OID-ek kihagyva a törlésből ({} → {} oid)",
+                                before,
+                                cancel_oids.len()
+                            );
                         }
                     }
 
@@ -341,6 +431,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         };
                         (s.best_bid, s.best_ask, mid)
                     };
+                    let target_usd = *target_notional_t.lock().await;
                     let action = order_manager.build_ladder_payload_with_passive_buffer(
                         &signal.side,
                         ladder_mid,
@@ -395,12 +486,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     };
                                     (s.best_bid, s.best_ask, mid)
                                 };
+                                let target_usd_retry = *target_notional_t.lock().await;
                                 let retry_action = order_manager.build_ladder_payload_with_passive_buffer(
                                     &signal.side,
                                     ladder_mid_r,
                                     best_bid_r,
                                     best_ask_r,
-                                    target_usd,
+                                    target_usd_retry,
                                     10.0,
                                 );
                                 if !retry_action.orders.is_empty() {

@@ -1,5 +1,6 @@
 use reqwest::Client;
 use serde_json::{json, Value};
+use std::collections::HashSet;
 use ethers::core::types::Signature;
 
 pub struct HyperliquidClient {
@@ -45,9 +46,33 @@ impl HyperliquidClient {
         resp.json::<Value>().await
     }
 
+    /// Hyperliquid perp számlaérték (USD) a `clearinghouseState` válaszból.
+    pub async fn get_account_value_usd(&self, user: &str) -> Result<f64, String> {
+        let state = self
+            .get_user_state(user)
+            .await
+            .map_err(|e| format!("clearinghouseState HTTP: {}", e))?;
+        parse_clearinghouse_account_value_usd(&state).ok_or_else(|| {
+            format!(
+                "accountValue nem található (marginSummary/crossMarginSummary), válasz-részlet: {:?}",
+                state.get("marginSummary").or_else(|| state.get("crossMarginSummary"))
+            )
+        })
+    }
+
     pub async fn get_open_orders(&self, user: &str) -> Result<Value, reqwest::Error> {
         let payload = json!({
             "type": "openOrders",
+            "user": user
+        });
+        let resp = self.rest_client.post(&self.info_url).json(&payload).send().await?;
+        resp.json::<Value>().await
+    }
+
+    /// Nyitott orderek + `isPositionTpsl` / `isTrigger` / `orderType` — TP/SL szűréshez a törlés előtt.
+    pub async fn get_frontend_open_orders(&self, user: &str) -> Result<Value, reqwest::Error> {
+        let payload = json!({
+            "type": "frontendOpenOrders",
             "user": user
         });
         let resp = self.rest_client.post(&self.info_url).json(&payload).send().await?;
@@ -92,4 +117,79 @@ impl HyperliquidClient {
             
         resp.json::<Value>().await
     }
+}
+
+fn parse_order_oid(ord: &Value) -> Option<u64> {
+    ord["oid"]
+        .as_u64()
+        .or_else(|| ord["oid"].as_str().and_then(|v| v.parse().ok()))
+}
+
+/// Nem töröljük a position TP/SL és trigger típusú orderek OID-jét (clean slate előtt).
+pub fn filter_cancel_oids_excluding_position_tpsl_triggers(
+    frontend_orders: &Value,
+    coin: &str,
+    oids: Vec<u64>,
+) -> Vec<u64> {
+    let Some(arr) = frontend_orders.as_array() else {
+        return oids;
+    };
+    let mut protected = HashSet::new();
+    for ord in arr {
+        if ord["coin"].as_str() != Some(coin) {
+            continue;
+        }
+        let protect = ord["isPositionTpsl"].as_bool() == Some(true)
+            || ord["isTrigger"].as_bool() == Some(true);
+        if protect {
+            if let Some(oid) = parse_order_oid(ord) {
+                protected.insert(oid);
+            }
+        }
+    }
+    oids.into_iter()
+        .filter(|o| !protected.contains(o))
+        .collect()
+}
+
+/// Létra / sima limit OID-ek `frontendOpenOrders`-ból (TP/SL trigger nélkül).
+pub fn collect_ladder_cancel_oids_from_frontend(frontend_orders: &Value, coin: &str) -> Vec<u64> {
+    let Some(arr) = frontend_orders.as_array() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for ord in arr {
+        if ord["coin"].as_str() != Some(coin) {
+            continue;
+        }
+        if ord["isPositionTpsl"].as_bool() == Some(true) {
+            continue;
+        }
+        if ord["isTrigger"].as_bool() == Some(true) {
+            continue;
+        }
+        if let Some(oid) = parse_order_oid(ord) {
+            out.push(oid);
+        }
+    }
+    out
+}
+
+fn parse_json_number(v: &Value) -> Option<f64> {
+    if let Some(s) = v.as_str() {
+        s.parse().ok()
+    } else {
+        v.as_f64()
+    }
+}
+
+/// `marginSummary` vagy `crossMarginSummary` → `accountValue` (string vagy szám).
+pub fn parse_clearinghouse_account_value_usd(state: &Value) -> Option<f64> {
+    let from = |key: &str| {
+        state
+            .get(key)
+            .and_then(|ms| ms.get("accountValue"))
+            .and_then(parse_json_number)
+    };
+    from("marginSummary").or_else(|| from("crossMarginSummary"))
 }
