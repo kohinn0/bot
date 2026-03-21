@@ -6,12 +6,13 @@ pub struct LimitOrderType {
     pub tif: String,
 }
 
+/// Mező sorrend = Hyperliquid Python SDK `order_type_to_wire` (msgpack kulcs sorrend!).
 #[derive(Serialize, Debug, Clone)]
 pub struct TriggerOrderType {
-    #[serde(rename = "triggerPx")]
-    pub trigger_px: String,
     #[serde(rename = "isMarket")]
     pub is_market: bool,
+    #[serde(rename = "triggerPx")]
+    pub trigger_px: String,
     pub tpsl: String,
 }
 
@@ -131,8 +132,8 @@ impl OrderManager {
             t: OrderTypeWire {
                 limit: None,
                 trigger: Some(TriggerOrderType {
-                    trigger_px: Self::float_to_wire(tp_price),
                     is_market: true,
+                    trigger_px: Self::float_to_wire(tp_price),
                     tpsl: "tp".to_string(),
                 }),
             }
@@ -148,8 +149,8 @@ impl OrderManager {
             t: OrderTypeWire {
                 limit: None,
                 trigger: Some(TriggerOrderType {
-                    trigger_px: Self::float_to_wire(sl_price),
                     is_market: true,
+                    trigger_px: Self::float_to_wire(sl_price),
                     tpsl: "sl".to_string(),
                 }),
             }
