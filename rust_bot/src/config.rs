@@ -48,6 +48,10 @@ pub struct AppConfig {
     pub use_wallet_balance_for_sizing: bool,
     /// HL egyenleg frissítése másodpercenként (méret követése); env: WALLET_EQUITY_REFRESH_SEC
     pub wallet_equity_refresh_sec: u64,
+    /// Builder / másodlagos perp DEX neve; env: HL_PERP_DEX (üres = alap HL perp, nincs `dex` mező a kérésben)
+    pub hl_perp_dex: Option<String>,
+    /// API / user stream cím (master), ha az aláíró (agent) kulcs más címről származik; env: HL_USER_ADDRESS
+    pub hl_user_address: Option<String>,
     pub strategy: StrategyConfig,
 }
 
@@ -148,6 +152,16 @@ impl AppConfig {
             .filter(|&v| v >= 10)
             .unwrap_or(30);
 
+        let hl_perp_dex = env::var("HL_PERP_DEX")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+
+        let hl_user_address = env::var("HL_USER_ADDRESS")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+
         Self {
             private_key,
             is_dry_run,
@@ -155,6 +169,8 @@ impl AppConfig {
             starting_equity_usd,
             use_wallet_balance_for_sizing,
             wallet_equity_refresh_sec,
+            hl_perp_dex,
+            hl_user_address,
             strategy,
         }
     }

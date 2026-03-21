@@ -13,7 +13,8 @@ use crate::logic::bot_pnl::PnlTracker;
 use crate::logic::signal::SignalEngine;
 use crate::logic::order_manager::OrderManager;
 use crate::network::client::{
-    collect_ladder_cancel_oids_from_frontend, filter_cancel_oids_excluding_position_tpsl_triggers,
+    collect_ladder_cancel_oids_from_frontend, collect_ladder_cancel_oids_from_open_orders,
+    filter_cancel_oids_excluding_position_tpsl_triggers,
     HyperliquidClient,
 };
 use crate::network::feed::HyperliquidFeed;
@@ -40,9 +41,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let is_mainnet = app_config.is_mainnet;
     
     let signer = HyperliquidSigner::new(&app_config.private_key);
-    let rest_client = HyperliquidClient::new(is_mainnet);
-    
-    info!("🔑 Pénztárca cím: {}", signer.get_address());
+    let rest_client = HyperliquidClient::new(is_mainnet, app_config.hl_perp_dex.clone());
+
+    let signer_addr = signer.get_address().to_string();
+    let hl_user = app_config
+        .hl_user_address
+        .as_ref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| signer_addr.clone());
+
+    info!("🔐 Aláíró cím (PRIVATE_KEY): {}", signer_addr);
+    if !hl_user.eq_ignore_ascii_case(&signer_addr) {
+        info!(
+            "👤 HL user (egyenleg, open orders, user WS): {}  ← HL_USER_ADDRESS",
+            hl_user
+        );
+    } else {
+        info!("👤 HL user = aláíró cím (HL_USER_ADDRESS nincs beállítva)");
+    }
 
     // 3. Asset Meta lekérdezés a HL API-ból (keressük a coin Asset ID-ját és szDecimals-t)
     let meta = rest_client.get_meta().await.expect("❌ Nem sikerült lekérni a meta adatokat");
@@ -60,12 +77,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("✅ Kereskedési pár: {}, Asset ID: {}, Size Decimals: {}", coin, asset_idx, sz_decimals);
 
     // 4. WebSocket Feed elindítása
-    let (feed, cmd_rx) = HyperliquidFeed::new(&coin, signer.get_address(), is_mainnet);
+    let (feed, cmd_rx) = HyperliquidFeed::new(&coin, &hl_user, is_mainnet);
     let feed = Arc::new(feed);
     let state_ref = feed.state.clone();
     feed.clone().start(cmd_rx).await;
 
-    let user_address = signer.get_address().to_string();
+    let user_address = hl_user.clone();
     let max_daily_loss_usd = app_config.strategy.max_daily_loss_usd;
     let max_daily_trades = app_config.strategy.max_daily_trades;
 
@@ -74,10 +91,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         app_config.use_wallet_balance_for_sizing && !app_config.is_dry_run;
     let (wallet_equity_usd, equity_source): (f64, String) = if use_hl_equity {
         match rest_client.get_account_value_usd(user_address.as_str()).await {
-            Ok(v) if v.is_finite() && v > 0.0 => (v, "Hyperliquid accountValue".to_string()),
+            Ok(v) if v.is_finite() && v > 0.0 => (v, "Hyperliquid perp + spot USDC (API)".to_string()),
             Ok(v) => {
                 tracing::warn!(
-                    "⚠️ HL accountValue érvénytelen (${:.4}), fallback STARTING_EQUITY_USD",
+                    "⚠️ HL API egyenleg ~0 (${:.4}) — fallback STARTING_EQUITY_USD. Agent kulcsnál állítsd a HL_USER_ADDRESS-t a Portfolio címre; builder DEX → HL_PERP_DEX; mainnet/testnet.",
                     v
                 );
                 (
@@ -267,6 +284,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let signer_t = signer.clone();
     let feed_t = feed.clone();
     let signer_r = signer.clone();
+    let hl_user_t = hl_user.clone();
+    let hl_user_r = hl_user.clone();
     let feed_r = feed.clone();
     let rest_client_r = rest_client.clone();
     let pnl_sim_t = pnl_tracker.clone();
@@ -356,10 +375,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     pnl.add_trade(2.55, 0.05, *acc);
                 } else {
                     // --- 1. CLEAN SLATE: ELŐZŐ LÉTRA ORDEREK (TP/SL trigger NEM törlődik) ---
-                    let fe_orders = rest_client
-                        .get_frontend_open_orders(signer_t.get_address())
-                        .await
-                        .ok();
+                    let addr = hl_user_t.as_str();
+                    let fe_orders = rest_client.get_frontend_open_orders(addr).await.ok();
+                    let open_orders_basic = if fe_orders.is_none() {
+                        match rest_client.get_open_orders(addr).await {
+                            Ok(v) => {
+                                tracing::warn!(
+                                    "🛰️ frontendOpenOrders nem elérhető → openOrders fallback OID-gyűjtéshez"
+                                );
+                                Some(v)
+                            }
+                            Err(e) => {
+                                tracing::warn!("🛰️ openOrders fallback is sikertelen: {}", e);
+                                None
+                            }
+                        }
+                    } else {
+                        None
+                    };
 
                     let mut cancel_oids = {
                         let mut tracked = feed_t.open_order_oids.lock().await;
@@ -378,6 +411,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     cancel_oids.len()
                                 );
                             }
+                        } else if let Some(ref oo) = open_orders_basic {
+                            cancel_oids =
+                                collect_ladder_cancel_oids_from_open_orders(oo, &coin_signal);
+                            if !cancel_oids.is_empty() {
+                                info!(
+                                    "🛰️ REST openOrders fallback: {} db OID törléshez (csak egyszerű limit; frontend hiányzik)",
+                                    cancel_oids.len()
+                                );
+                            }
                         }
                     }
 
@@ -392,6 +434,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 cancel_oids.len()
                             );
                         }
+                    } else if open_orders_basic.is_some() && !cancel_oids.is_empty() {
+                        tracing::warn!(
+                            "🛡️ TP/SL OID szűrés kihagyva (nincs frontendOpenOrders); openOrders alapú lista lehet kevésbé biztos"
+                        );
                     }
 
                     if !cancel_oids.is_empty() {
@@ -435,13 +481,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         (s.best_bid, s.best_ask, mid)
                     };
                     let target_usd = *target_notional_t.lock().await;
-                    let action = order_manager.build_ladder_payload_with_passive_buffer(
+                    let action = order_manager.build_ladder_payload(
                         &signal.side,
                         ladder_mid,
                         best_bid,
                         best_ask,
                         target_usd,
-                        2.0,
                     );
                     if action.orders.is_empty() {
                         tracing::warn!("⚠️ Üres order lista, létra küldés kihagyva (szűrők minden szintet eldobtak).");
@@ -538,7 +583,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         loop {
             tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
-            match rest_client_r.get_user_state(signer_r.get_address()).await {
+            match rest_client_r.get_user_state(hl_user_r.as_str()).await {
                 Ok(state) => {
                     let mut exchange_pos = 0.0_f64;
                     let mut entry_px = None::<f64>;

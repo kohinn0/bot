@@ -19,7 +19,8 @@ impl HyperliquidSigner {
         let wallet = LocalWallet::from_str(clean_hex)
             .expect("Hibás privát kulcs formátum vagy érvénytelen ECDSA kulcs");
             
-        let address = format!("{:?}", wallet.address());
+        // EIP-55 checksum cím — így egyezik a Hyperliquid webes portfólióval; a `{:?}` formátum eltérhet.
+        let address = format!("{}", wallet.address());
 
         // 1. Pre-calculate Domain Separator
         let mut domain_hasher = Keccak256::new();

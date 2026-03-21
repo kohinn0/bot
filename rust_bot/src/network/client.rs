@@ -8,10 +8,12 @@ pub struct HyperliquidClient {
     pub rest_client: Client,
     pub info_url: String,
     pub exchange_url: String,
+    /// Builder perp DEX; `None` = ne küldjünk `dex` mezőt (alap HL perp).
+    perp_dex: Option<String>,
 }
 
 impl HyperliquidClient {
-    pub fn new(is_mainnet: bool) -> Self {
+    pub fn new(is_mainnet: bool, perp_dex: Option<String>) -> Self {
         // Pre-wärmte Verbindung für low latency
         let client = Client::builder()
             .pool_idle_timeout(None)
@@ -29,6 +31,22 @@ impl HyperliquidClient {
             rest_client: client,
             info_url: format!("{}/info", base),
             exchange_url: format!("{}/exchange", base),
+            perp_dex,
+        }
+    }
+
+    fn clearinghouse_state_payload(&self, user: &str) -> Value {
+        let user = user.trim();
+        match &self.perp_dex {
+            Some(d) if !d.is_empty() => json!({
+                "type": "clearinghouseState",
+                "user": user,
+                "dex": d.as_str(),
+            }),
+            _ => json!({
+                "type": "clearinghouseState",
+                "user": user,
+            }),
         }
     }
 
@@ -39,26 +57,70 @@ impl HyperliquidClient {
     }
 
     pub async fn get_user_state(&self, user: &str) -> Result<Value, reqwest::Error> {
+        let payload = self.clearinghouse_state_payload(user);
+        let resp = self.rest_client.post(&self.info_url).json(&payload).send().await?;
+        resp.json::<Value>().await
+    }
+
+    pub async fn get_spot_clearinghouse_state(&self, user: &str) -> Result<Value, reqwest::Error> {
         let payload = json!({
-            "type": "clearinghouseState",
-            "user": user
+            "type": "spotClearinghouseState",
+            "user": user.trim(),
         });
         let resp = self.rest_client.post(&self.info_url).json(&payload).send().await?;
         resp.json::<Value>().await
     }
 
-    /// Hyperliquid perp számlaérték (USD) a `clearinghouseState` válaszból.
+    /// Hyperliquid egyenleg méretbázishoz: **perp** (`clearinghouseState`) + **spot USDC** (`spotClearinghouseState` összes `USDC.total`).
+    ///
+    /// A webes „Portfolio / Total equity” gyakran több forrást mutat; ha az API itt 0, ellenőrizd, hogy a bot `Pénztárca cím`
+    /// megegyezik-e a Hyperliquid fiók címével, és builder DEX esetén állítsd a `HL_PERP_DEX` env-et.
     pub async fn get_account_value_usd(&self, user: &str) -> Result<f64, String> {
-        let state = self
+        let user = user.trim();
+        let perp_state = self
             .get_user_state(user)
             .await
             .map_err(|e| format!("clearinghouseState HTTP: {}", e))?;
-        parse_clearinghouse_account_value_usd(&state).ok_or_else(|| {
-            format!(
-                "accountValue nem található (marginSummary/crossMarginSummary), válasz-részlet: {:?}",
-                state.get("marginSummary").or_else(|| state.get("crossMarginSummary"))
-            )
-        })
+
+        if let Some(err) = perp_state.get("error") {
+            return Err(format!("clearinghouseState API hiba: {}", err));
+        }
+
+        let perp_usd = parse_clearinghouse_account_value_usd(&perp_state).unwrap_or(0.0);
+
+        let spot_state = match self.get_spot_clearinghouse_state(user).await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("spotClearinghouseState HTTP: {}", e);
+                json!({})
+            }
+        };
+        let spot_usd = if spot_state.get("error").is_some() {
+            tracing::warn!("spotClearinghouseState: {:?}", spot_state.get("error"));
+            0.0
+        } else {
+            parse_spot_usdc_total_usd(&spot_state)
+        };
+
+        let total = perp_usd + spot_usd;
+        if total.is_finite() && total > 0.0 {
+            return Ok(total);
+        }
+
+        let ms_av = perp_state
+            .pointer("/marginSummary/accountValue")
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "n/a".to_string());
+        let spot_n = spot_state
+            .get("balances")
+            .and_then(|b| b.as_array())
+            .map(|a| a.len());
+
+        Err(format!(
+            "HL egyenleg ~0 USD (perp {:.4} + spot USDC {:.4}). perp marginSummary.accountValue={} | spot USDC sorok: {:?}. \
+             Ha a weben van egyenleg: (1) a bot `Pénztárca cím` = Hyperliquid bejelentkezési cím, (2) builder perp → HL_PERP_DEX, (3) perp margin vs spot.",
+            perp_usd, spot_usd, ms_av, spot_n
+        ))
     }
 
     pub async fn get_open_orders(&self, user: &str) -> Result<Value, reqwest::Error> {
@@ -176,6 +238,33 @@ pub fn collect_ladder_cancel_oids_from_frontend(frontend_orders: &Value, coin: &
     out
 }
 
+/// `openOrders` (info) — kevesebb mező mint a `frontendOpenOrders`-nél; trigger / reduce-only kihagyása, ahol látszik.
+pub fn collect_ladder_cancel_oids_from_open_orders(orders: &Value, coin: &str) -> Vec<u64> {
+    let Some(arr) = orders.as_array() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for ord in arr {
+        if ord["coin"].as_str() != Some(coin) {
+            continue;
+        }
+        if ord["reduceOnly"].as_bool() == Some(true) {
+            continue;
+        }
+        let has_trigger_px = ord
+            .get("triggerPx")
+            .map(|v| !(v.is_null() || v.as_str() == Some("")))
+            .unwrap_or(false);
+        if has_trigger_px {
+            continue;
+        }
+        if let Some(oid) = parse_order_oid(ord) {
+            out.push(oid);
+        }
+    }
+    out
+}
+
 fn parse_json_number(v: &Value) -> Option<f64> {
     if let Some(s) = v.as_str() {
         s.parse().ok()
@@ -184,13 +273,99 @@ fn parse_json_number(v: &Value) -> Option<f64> {
     }
 }
 
-/// `marginSummary` vagy `crossMarginSummary` → `accountValue` (string vagy szám).
-pub fn parse_clearinghouse_account_value_usd(state: &Value) -> Option<f64> {
-    let from = |key: &str| {
-        state
-            .get(key)
-            .and_then(|ms| ms.get("accountValue"))
-            .and_then(parse_json_number)
+/// Spot USDC összes mennyiség (USD) a `spotClearinghouseState` → `balances` (`coin == "USDC"`, mező: `total`).
+pub fn parse_spot_usdc_total_usd(spot: &Value) -> f64 {
+    let Some(balances) = spot.get("balances").and_then(|b| b.as_array()) else {
+        return 0.0;
     };
-    from("marginSummary").or_else(|| from("crossMarginSummary"))
+    let mut sum = 0.0;
+    for b in balances {
+        if b.get("coin").and_then(|c| c.as_str()) != Some("USDC") {
+            continue;
+        }
+        if let Some(t) = b.get("total").and_then(parse_json_number) {
+            sum += t;
+        }
+    }
+    sum
+}
+
+/// Egy `marginSummary` / `crossMarginSummary` blokk: `accountValue`, majd ha az 0, `totalRawUsd`.
+fn margin_block_equity_usd(ms: &Value) -> Option<f64> {
+    let av = ms.get("accountValue").and_then(parse_json_number);
+    let tr = ms.get("totalRawUsd").and_then(parse_json_number);
+    match (av, tr) {
+        (Some(a), _) if a > 0.0 => Some(a),
+        (_, Some(t)) if t > 0.0 => Some(t),
+        (Some(a), Some(t)) => Some(a.max(t)),
+        (Some(a), None) => Some(a),
+        (None, Some(t)) => Some(t),
+        _ => None,
+    }
+}
+
+/// Perp `clearinghouseState` → USD egyenleg méretbázishoz: margin blokkok + opcionálisan `withdrawable`.
+///
+/// Ha az API `accountValue`-t 0-nak adja, de `totalRawUsd` / `withdrawable` pozitív, azt használjuk
+/// (ritka séma/állapot; segít elkerülni a téves $0 olvasást).
+pub fn parse_clearinghouse_account_value_usd(state: &Value) -> Option<f64> {
+    let mut best: Option<f64> = None;
+    for key in ["marginSummary", "crossMarginSummary"] {
+        if let Some(ms) = state.get(key) {
+            if let Some(x) = margin_block_equity_usd(ms) {
+                best = Some(best.map_or(x, |b| b.max(x)));
+            }
+        }
+    }
+    if let Some(w) = state.get("withdrawable").and_then(parse_json_number) {
+        if w > 0.0 {
+            best = Some(best.map_or(w, |b| b.max(w)));
+        }
+    }
+    best
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn parse_prefers_positive_account_value() {
+        let v = json!({"marginSummary": {"accountValue": "100.5", "totalRawUsd": "50"}});
+        assert!((parse_clearinghouse_account_value_usd(&v).unwrap() - 100.5).abs() < 1e-6);
+    }
+    #[test]
+    fn parse_falls_back_to_total_raw_when_account_zero() {
+        let v = json!({"marginSummary": {"accountValue": "0", "totalRawUsd": "87.3"}});
+        assert!((parse_clearinghouse_account_value_usd(&v).unwrap() - 87.3).abs() < 1e-6);
+    }
+    #[test]
+    fn parse_falls_back_to_withdrawable() {
+        let v = json!({
+            "marginSummary": {"accountValue": "0", "totalRawUsd": "0"},
+            "withdrawable": "42"
+        });
+        assert!((parse_clearinghouse_account_value_usd(&v).unwrap() - 42.0).abs() < 1e-6);
+    }
+    #[test]
+    fn parse_all_zero() {
+        let v = json!({
+            "marginSummary": {"accountValue": "0", "totalRawUsd": "0"},
+            "crossMarginSummary": {"accountValue": "0", "totalRawUsd": "0"},
+            "withdrawable": "0"
+        });
+        assert_eq!(parse_clearinghouse_account_value_usd(&v), Some(0.0));
+    }
+
+    #[test]
+    fn parse_spot_usdc_sums() {
+        let s = json!({
+            "balances": [
+                {"coin": "USDC", "total": "50.5", "hold": "0"},
+                {"coin": "PURR", "total": "1", "hold": "0"}
+            ]
+        });
+        assert!((parse_spot_usdc_total_usd(&s) - 50.5).abs() < 1e-9);
+    }
 }
