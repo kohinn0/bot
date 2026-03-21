@@ -7,6 +7,7 @@ use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::Instant;
 use crate::config::AppConfig;
 use crate::logic::signer::HyperliquidSigner;
 use crate::logic::bot_pnl::PnlTracker;
@@ -199,6 +200,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Aláíró és Kliens felkészítése a Hálózathoz
     let signer = Arc::new(signer);
     let rest_client = Arc::new(rest_client);
+    /// Fill utáni sikeres TP/SL (idő + pozíció) → failsafe ne duplikáljon, ha a méret nem változott.
+    let last_fill_tpsl_ok = Arc::new(tokio::sync::Mutex::new(None::<(Instant, f64)>));
     // === VALÓS IDEJŰ FILL ÉS POZÍCIÓ FIGYELŐ ===
     let mut fill_rx = feed.fill_tx.subscribe();
     let pnl_t = pnl_tracker.clone();
@@ -209,6 +212,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state_for_fill = state_ref.clone();
     let signer_f = signer.clone();
     let rest_client_f = rest_client.clone();
+    let last_fill_tpsl_ok_f = last_fill_tpsl_ok.clone();
     let om_f = Arc::new(OrderManager::new(app_config.strategy.clone(), asset_idx, sz_decimals));
     let min_tick = app_config.strategy.min_tick_size;
     let is_mainnet_f = is_mainnet;
@@ -268,6 +272,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     {
                         Ok(body) => {
                             if exchange_order_submission_ok(&body) {
+                                *last_fill_tpsl_ok_f.lock().await =
+                                    Some((Instant::now(), *pos));
                                 info!(
                                     "🛡️ EXCHANGE TP/SL (HTTP): {} TP @ {:.2} | SL @ {:.2}",
                                     tp_side, tp_price, sl_price
@@ -320,6 +326,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let vol_reconcile_t = last_volatility.clone();
     let state_t = state_ref.clone();
     let state_reconcile = state_ref.clone();
+    let last_fill_tpsl_ok_r = last_fill_tpsl_ok.clone();
     let om_reconcile = Arc::new(OrderManager::new(app_config.strategy.clone(), asset_idx, sz_decimals));
     let max_pos_limit = app_config.strategy.max_positions;
     let mut last_signal_time = std::time::Instant::now() - std::time::Duration::from_secs(60);
@@ -570,25 +577,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                             if rejected_post_only {
-                                let (best_bid_r, best_ask_r, ladder_mid_r) = {
-                                    let s = state_t.read().await;
-                                    let mid = if s.best_bid > 0.0 && s.best_ask > 0.0 {
-                                        (s.best_bid + s.best_ask) / 2.0
-                                    } else {
-                                        signal.target_mid
-                                    };
-                                    (s.best_bid, s.best_ask, mid)
-                                };
                                 let target_usd_retry = *target_notional_t.lock().await;
-                                let retry_action = order_manager.build_ladder_payload_with_passive_buffer(
-                                    &signal.side,
-                                    ladder_mid_r,
-                                    best_bid_r,
-                                    best_ask_r,
-                                    target_usd_retry,
-                                    10.0,
-                                );
-                                if !retry_action.orders.is_empty() {
+                                for (attempt, buf_ticks) in [(1_u32, 28.0_f64), (2, 55.0_f64)] {
+                                    let (bb, ba, mid_r) = {
+                                        let s = state_t.read().await;
+                                        let m = if s.best_bid > 0.0 && s.best_ask > 0.0 {
+                                            (s.best_bid + s.best_ask) / 2.0
+                                        } else {
+                                            signal.target_mid
+                                        };
+                                        (s.best_bid, s.best_ask, m)
+                                    };
+                                    let retry_action = order_manager.build_ladder_payload_with_passive_buffer(
+                                        &signal.side,
+                                        mid_r,
+                                        bb,
+                                        ba,
+                                        target_usd_retry,
+                                        buf_ticks,
+                                    );
+                                    if retry_action.orders.is_empty() {
+                                        break;
+                                    }
                                     let retry_nonce = std::time::SystemTime::now()
                                         .duration_since(std::time::UNIX_EPOCH)
                                         .unwrap()
@@ -613,19 +623,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                         t.extend(ro);
                                                     }
                                                     info!(
-                                                        "🔁 POST-ONLY RETRY (HTTP), buffer=10 tick"
+                                                        "🔁 POST-ONLY RETRY (HTTP) #{}, buffer={} tick",
+                                                        attempt, buf_ticks as i32
                                                     );
-                                                } else {
-                                                    tracing::warn!(
-                                                        "🔁 Retry HTTP válasz: {:?}",
-                                                        rb
-                                                    );
+                                                    break;
                                                 }
+                                                if exchange_response_has_post_only_reject(&rb)
+                                                    && attempt == 1
+                                                {
+                                                    tracing::warn!(
+                                                        "🔁 Post-only még mindig, második próba ({buf_ticks}→55 tick)…"
+                                                    );
+                                                    continue;
+                                                }
+                                                tracing::warn!("🔁 Retry HTTP válasz: {:?}", rb);
+                                                break;
                                             }
                                             Err(e) => {
-                                                tracing::error!("🔁 Retry HTTP hiba: {}", e)
+                                                tracing::error!("🔁 Retry HTTP hiba: {}", e);
+                                                break;
                                             }
                                         }
+                                    } else {
+                                        break;
                                     }
                                 }
                             }
@@ -676,6 +696,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     // Re-arm protection if position changed materially or wasn't protected yet.
                     if (exchange_pos.abs() - last_protected_pos.abs()).abs() >= 0.001 {
+                        if let Some((t, sz_at_fill)) = *last_fill_tpsl_ok_r.lock().await {
+                            if t.elapsed() < std::time::Duration::from_secs(15)
+                                && (exchange_pos - sz_at_fill).abs() < 0.002
+                            {
+                                last_protected_pos = exchange_pos;
+                                continue;
+                            }
+                        }
+
                         if let Ok(fe_prot) =
                             rest_client_r.get_frontend_open_orders(hl_user_r.as_str()).await
                         {
