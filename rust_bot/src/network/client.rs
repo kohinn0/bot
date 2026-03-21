@@ -3,6 +3,7 @@ use serde_json::{json, Value};
 use std::collections::HashSet;
 use ethers::core::types::Signature;
 
+#[derive(Clone)]
 pub struct HyperliquidClient {
     pub rest_client: Client,
     pub info_url: String,

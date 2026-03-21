@@ -145,23 +145,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_secs(sec)).await;
                 match rest_w.get_account_value_usd(&addr_w).await {
-                    Ok(v) if v.is_finite() && v > 0.0 => {
-                        let n = strat_w.notional_per_level_usd(v);
-                        {
-                            let mut w = wallet_w.lock().await;
-                            *w = v;
+                    Ok(v) => {
+                        if v.is_finite() && v > 0.0 {
+                            let n = strat_w.notional_per_level_usd(v);
+                            {
+                                let mut w = wallet_w.lock().await;
+                                *w = v;
+                            }
+                            {
+                                let mut t = target_w.lock().await;
+                                *t = n;
+                            }
+                            tracing::debug!(
+                                "🔄 HL egyenleg frissítve: ${:.2} → notional/szint ${:.2}",
+                                v,
+                                n
+                            );
+                        } else {
+                            tracing::warn!("⚠️ HL accountValue kihagyva (érvénytelen): {}", v);
                         }
-                        {
-                            let mut t = target_w.lock().await;
-                            *t = n;
-                        }
-                        tracing::debug!(
-                            "🔄 HL egyenleg frissítve: ${:.2} → notional/szint ${:.2}",
-                            v,
-                            n
-                        );
                     }
-                    Ok(v) => tracing::warn!("⚠️ HL accountValue kihagyva (érvénytelen): {}", v),
                     Err(e) => tracing::warn!("⚠️ HL egyenleg frissítés hiba: {}", e),
                 }
             }
