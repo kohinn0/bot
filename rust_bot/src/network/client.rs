@@ -229,6 +229,58 @@ pub fn exchange_order_submission_ok(body: &Value) -> bool {
     true
 }
 
+/// Cancel válasz: minden sor hibája „oid már nem él” jellegű (nem valódi hiba).
+pub fn cancel_response_only_benign_errors(body: &Value) -> bool {
+    if body.get("status").and_then(|s| s.as_str()) != Some("ok") {
+        return false;
+    }
+    let Some(arr) = body.pointer("/response/data/statuses").and_then(|x| x.as_array()) else {
+        return true;
+    };
+    for st in arr {
+        let Some(e) = st.get("error").and_then(|x| x.as_str()) else {
+            continue;
+        };
+        let benign = e.contains("never placed")
+            || e.contains("already canceled")
+            || e.contains("already cancelled")
+            || e.contains("filled")
+            || e.contains("Filled");
+        if !benign {
+            return false;
+        }
+    }
+    true
+}
+
+/// Van-e nyitott `isPositionTpsl` order a coinon, amelynek `sz` megegyezik a pozíció abszolút méretével.
+pub fn frontend_position_tpsl_matches_pos(frontend_orders: &Value, coin: &str, pos_abs: f64) -> bool {
+    if !pos_abs.is_finite() || pos_abs < 1e-9 {
+        return false;
+    }
+    let eps = (pos_abs * 0.02).max(1e-6).min(0.5);
+    let Some(arr) = frontend_orders.as_array() else {
+        return false;
+    };
+    for ord in arr {
+        if ord["coin"].as_str() != Some(coin) {
+            continue;
+        }
+        if ord["isPositionTpsl"].as_bool() != Some(true) {
+            continue;
+        }
+        let sz = ord["sz"]
+            .as_str()
+            .and_then(|s| s.parse::<f64>().ok())
+            .or_else(|| ord["sz"].as_f64())
+            .unwrap_or(0.0);
+        if (sz - pos_abs).abs() <= eps {
+            return true;
+        }
+    }
+    false
+}
+
 fn parse_order_oid(ord: &Value) -> Option<u64> {
     ord["oid"]
         .as_u64()

@@ -14,8 +14,10 @@ use crate::logic::signal::SignalEngine;
 use crate::logic::order_manager::OrderManager;
 use crate::network::client::{
     collect_ladder_cancel_oids_from_frontend, collect_ladder_cancel_oids_from_open_orders,
-    collect_resting_oids_from_exchange_response, exchange_order_submission_ok,
-    exchange_response_has_post_only_reject, filter_cancel_oids_excluding_position_tpsl_triggers,
+    cancel_response_only_benign_errors, collect_resting_oids_from_exchange_response,
+    exchange_order_submission_ok, exchange_response_has_post_only_reject,
+    filter_cancel_oids_excluding_position_tpsl_triggers,
+    frontend_position_tpsl_matches_pos,
     HyperliquidClient,
 };
 use crate::network::feed::HyperliquidFeed;
@@ -476,6 +478,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             "🧹 SZELLEM-ORDERS TÖRÖLVE ({} db Cancel, HTTP)",
                                             cancel_oids.len()
                                         );
+                                    } else if cancel_response_only_benign_errors(&body) {
+                                        info!(
+                                            "🧹 Cancel: oid(ek) már nem élnek (kitöltve/törölve) — rendben."
+                                        );
                                     } else {
                                         tracing::warn!("🧹 Cancel HTTP válasz: {:?}", body);
                                     }
@@ -670,10 +676,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     // Re-arm protection if position changed materially or wasn't protected yet.
                     if (exchange_pos.abs() - last_protected_pos.abs()).abs() >= 0.001 {
-                            let reference_px = if let Some(px) = entry_px {
+                        if let Ok(fe_prot) =
+                            rest_client_r.get_frontend_open_orders(hl_user_r.as_str()).await
+                        {
+                            if frontend_position_tpsl_matches_pos(
+                                &fe_prot,
+                                &coin_reconcile,
+                                exchange_pos.abs(),
+                            ) {
+                                last_protected_pos = exchange_pos;
+                                tracing::debug!(
+                                    "🛡️ FAILSAFE TP/SL kihagyva: már van position TP/SL a méretnek megfelelően"
+                                );
+                                continue;
+                            }
+                        }
+
+                        let reference_px = if let Some(px) = entry_px {
                             px
                         } else {
-                                let s = state_reconcile.read().await;
+                            let s = state_reconcile.read().await;
                             s.mid_price
                         };
 
