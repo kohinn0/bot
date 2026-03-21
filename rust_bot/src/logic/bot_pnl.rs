@@ -99,7 +99,7 @@ impl PnlTracker {
         self.save_state(current_account_value);
 
         info!(
-            "💎 TRADE ZÁRVA | Net PnL: ${:.2} | Új Egyenleg: ${:.2}",
+            "💎 TRADE ZÁRVA | Net (trade−díj): ${:.2} | Session kumulatív PnL: ${:.2} (nem HL egyenleg)",
             net_profit, self.state.cumulative_pnl
         );
     }

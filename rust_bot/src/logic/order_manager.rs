@@ -210,10 +210,21 @@ impl OrderManager {
         best_bid: f64,
         best_ask: f64,
         sz_usd: f64,
+        max_close_total_sz: Option<f64>,
     ) -> OrderAction {
-        self.build_ladder_payload_with_passive_buffer(side, mid_price, best_bid, best_ask, sz_usd, 2.0)
+        self.build_ladder_payload_with_passive_buffer(
+            side,
+            mid_price,
+            best_bid,
+            best_ask,
+            sz_usd,
+            2.0,
+            max_close_total_sz,
+        )
     }
 
+    /// `max_close_total_sz`: ha Sell + long (vagy Buy + short), a létra **összes** új szintjének
+    /// összmérete nem haladja meg ezt (kerekítés / más ár miatt ne menjünk „túl” zárásból).
     pub fn build_ladder_payload_with_passive_buffer(
         &self,
         side: &str,
@@ -222,12 +233,14 @@ impl OrderManager {
         best_ask: f64,
         sz_usd: f64,
         passive_buffer_ticks: f64,
+        max_close_total_sz: Option<f64>,
     ) -> OrderAction {
         let is_buy = side.to_lowercase() == "buy";
         let tick = self.config.min_tick_size;
         let sz_step = 10_f64.powi(-(self.sz_decimals as i32));
 
         let mut orders = Vec::new();
+        let mut remaining_close = max_close_total_sz;
 
         for level_cfg in &self.config.ladder_levels {
             let skew_adj = self.current_pos * self.config.skew_penalty.unwrap_or(0.0);
@@ -260,8 +273,19 @@ impl OrderManager {
             } else {
                 rounded_price = rounded_price.max(best_ask + (passive_buffer_ticks * tick));
             }
+            if let Some(rem) = remaining_close.as_ref() {
+                if *rem <= 0.0 {
+                    continue;
+                }
+            }
+
             let size_usd = sz_usd * level_cfg.size_pct;
-            let sz = ((size_usd / rounded_price) / sz_step).floor() * sz_step;
+            let mut sz = ((size_usd / rounded_price) / sz_step).floor() * sz_step;
+
+            if let Some(rem) = remaining_close.as_ref() {
+                sz = sz.min(*rem);
+                sz = (sz / sz_step).floor() * sz_step;
+            }
 
             if sz < self.config.min_shares || (rounded_price * sz) < 10.0 {
                 continue;
@@ -280,6 +304,9 @@ impl OrderManager {
                     trigger: None,
                 }
             });
+            if let Some(rem) = remaining_close.as_mut() {
+                *rem -= sz;
+            }
         }
 
         // Exchange rejects empty order lists ("Orders are empty.").
@@ -298,7 +325,15 @@ impl OrderManager {
             };
             let min_notional = 10.0_f64;
             let fallback_notional = sz_usd.max(min_notional);
-            let sz = ((fallback_notional / rounded_price) / sz_step).floor() * sz_step;
+            let mut sz = ((fallback_notional / rounded_price) / sz_step).floor() * sz_step;
+            if let Some(rem) = remaining_close {
+                if rem <= 0.0 {
+                    sz = 0.0;
+                } else {
+                    sz = sz.min(rem);
+                    sz = (sz / sz_step).floor() * sz_step;
+                }
+            }
             if sz >= self.config.min_shares && (rounded_price * sz) >= min_notional {
                 orders.push(OrderWire {
                     a: self.asset_idx,

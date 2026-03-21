@@ -394,6 +394,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Szinkronizáljuk a pozíciót az order managerrel a skew hatáshoz
                 order_manager.current_pos = current_pos;
 
+                // Zárás irány: ne legyen több fill-méret, mint a nyitott pozíció (kerekítés → -0.01 SOL „túlzárás”).
+                let max_close_sz = {
+                    let s = signal.side.to_lowercase();
+                    if s == "sell" && current_pos > 0.001 {
+                        Some(order_manager.quantize_position_sz(current_pos))
+                    } else if s == "buy" && current_pos < -0.001 {
+                        Some(order_manager.quantize_position_sz(-current_pos))
+                    } else {
+                        None
+                    }
+                };
+
                 if is_dry_run {
                     info!("🧪 DRY RUN: Szimulált megbízás elkészítve.");
                     let mut acc = acc_sim_t.lock().await;
@@ -528,6 +540,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         best_bid,
                         best_ask,
                         target_usd,
+                        max_close_sz,
                     );
                     if action.orders.is_empty() {
                         tracing::warn!("⚠️ Üres order lista, létra küldés kihagyva (szűrők minden szintet eldobtak).");
@@ -595,6 +608,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         ba,
                                         target_usd_retry,
                                         buf_ticks,
+                                        max_close_sz,
                                     );
                                     if retry_action.orders.is_empty() {
                                         break;
