@@ -215,6 +215,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let last_fill_tpsl_ok_f = last_fill_tpsl_ok.clone();
     let om_f = Arc::new(OrderManager::new(app_config.strategy.clone(), asset_idx, sz_decimals));
     let min_tick = app_config.strategy.min_tick_size;
+    let tp_min_ticks = app_config.strategy.tp_min_ticks;
+    let sl_min_ticks = app_config.strategy.sl_min_ticks;
     let is_mainnet_f = is_mainnet;
 
     tokio::spawn(async move {
@@ -238,12 +240,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let vol = { *vol_t.lock().await };
                 let tp_side = if *pos > 0.0 { "Sell" } else { "Buy" };
                 
-                // Dinamikus TP: 1.5x szórás, de minimum 5 tick
-                let tp_dist = f64::max(vol * 1.5, 5.0 * min_tick); 
+                // Dinamikus TP: vol×1.5 vagy config minimum (profit > díjak)
+                let tp_dist = f64::max(vol * 1.5, tp_min_ticks * min_tick);
                 let raw_tp = if *pos > 0.0 { fill.px + tp_dist } else { fill.px - tp_dist };
 
-                // Dinamikus SL: 3x szórás, de minimum 10 tick
-                let sl_dist = f64::max(vol * 3.0, 10.0 * min_tick);
+                // Dinamikus SL: vol×3 vagy config minimum (~1.5× TP R:R)
+                let sl_dist = f64::max(vol * 3.0, sl_min_ticks * min_tick);
                 let raw_sl = if *pos > 0.0 { fill.px - sl_dist } else { fill.px + sl_dist };
 
                 let mark_mid = { state_for_fill.read().await.mid_price };
@@ -676,6 +678,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // === FAILSAFE: REST reconcile a pozícióra + védő TP/SL újraküldés ===
     let coin_reconcile = coin.clone();
     let min_tick_reconcile = min_tick;
+    let tp_min_ticks_reconcile = app_config.strategy.tp_min_ticks;
+    let sl_min_ticks_reconcile = app_config.strategy.sl_min_ticks;
     let is_mainnet_reconcile = is_mainnet;
     tokio::spawn(async move {
         let mut last_protected_pos: f64 = 0.0;
@@ -745,8 +749,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if reference_px > 0.0 {
                             let vol = { *vol_reconcile_t.lock().await };
                             let tp_side = if exchange_pos > 0.0 { "Sell" } else { "Buy" };
-                            let tp_dist = f64::max(vol * 1.5, 5.0 * min_tick_reconcile);
-                            let sl_dist = f64::max(vol * 3.0, 10.0 * min_tick_reconcile);
+                            let tp_dist = f64::max(vol * 1.5, tp_min_ticks_reconcile * min_tick_reconcile);
+                            let sl_dist = f64::max(vol * 3.0, sl_min_ticks_reconcile * min_tick_reconcile);
                             let raw_tp = if exchange_pos > 0.0 {
                                 reference_px + tp_dist
                             } else {

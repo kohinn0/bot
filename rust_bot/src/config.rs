@@ -27,6 +27,10 @@ pub struct StrategyConfig {
     pub min_signal_interval_ms: u64,
     pub max_daily_loss_usd: f64,
     pub max_daily_trades: u32,
+    /// TP minimum távolság (tick), hogy a bruttó profit > díjak; ajánlott 10–15 SOL-on.
+    pub tp_min_ticks: f64,
+    /// SL minimum távolság (tick); legyen ~1.5–2× TP a R:R kedvéért.
+    pub sl_min_ticks: f64,
 }
 
 impl StrategyConfig {
@@ -122,9 +126,16 @@ impl AppConfig {
             skew_penalty: Some(1.0),
             min_signal_interval_ms: parsed["signal_engine"]["debounce"]["min_time_between_entries_ms"]
                 .as_u64()
-                .unwrap_or(8000),
+                .unwrap_or(12000),
             max_daily_loss_usd: rm["daily_limits"]["max_daily_loss_usd"].as_f64().unwrap_or(10.0),
             max_daily_trades: rm["daily_limits"]["max_daily_trades"].as_u64().unwrap_or(25) as u32,
+            tp_min_ticks: {
+                let raw = om["exit"]["take_profit"]["min_profit_ticks"].as_f64().unwrap_or(12.0);
+                if raw > 50.0 { 15.0 } else { raw.max(8.0) }
+            },
+            sl_min_ticks: om["exit"]["take_profit"].get("min_sl_ticks")
+                .and_then(|v| v.as_f64())
+                .unwrap_or_else(|| 20.0),
         };
 
         info!("✅ Konfiguráció betöltve: {}, Dry Run: {}", strategy.coin, is_dry_run);
