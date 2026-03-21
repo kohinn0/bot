@@ -182,6 +182,53 @@ impl HyperliquidClient {
     }
 }
 
+/// HL `/exchange` order válasz: `response.data.statuses[].resting.oid`
+pub fn collect_resting_oids_from_exchange_response(body: &Value) -> Vec<u64> {
+    let mut out = Vec::new();
+    let Some(arr) = body.pointer("/response/data/statuses").and_then(|x| x.as_array()) else {
+        return out;
+    };
+    for st in arr {
+        let oid = st
+            .pointer("/resting/oid")
+            .and_then(|o| o.as_u64().or_else(|| o.as_str().and_then(|s| s.parse().ok())));
+        if let Some(o) = oid {
+            out.push(o);
+        }
+    }
+    out
+}
+
+/// Van-e „post only would cross” jellegű hiba a válaszban.
+pub fn exchange_response_has_post_only_reject(body: &Value) -> bool {
+    let Some(arr) = body.pointer("/response/data/statuses").and_then(|x| x.as_array()) else {
+        return false;
+    };
+    for st in arr {
+        if let Some(e) = st.get("error").and_then(|e| e.as_str()) {
+            if e.contains("Post only") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Top `status` == ok és nincs `error` mező egyetlen order status sorban sem.
+pub fn exchange_order_submission_ok(body: &Value) -> bool {
+    if body.get("status").and_then(|s| s.as_str()) != Some("ok") {
+        return false;
+    }
+    if let Some(arr) = body.pointer("/response/data/statuses").and_then(|x| x.as_array()) {
+        for st in arr {
+            if st.get("error").is_some() {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 fn parse_order_oid(ord: &Value) -> Option<u64> {
     ord["oid"]
         .as_u64()

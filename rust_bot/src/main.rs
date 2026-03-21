@@ -14,7 +14,8 @@ use crate::logic::signal::SignalEngine;
 use crate::logic::order_manager::OrderManager;
 use crate::network::client::{
     collect_ladder_cancel_oids_from_frontend, collect_ladder_cancel_oids_from_open_orders,
-    filter_cancel_oids_excluding_position_tpsl_triggers,
+    collect_resting_oids_from_exchange_response, exchange_order_submission_ok,
+    exchange_response_has_post_only_reject, filter_cancel_oids_excluding_position_tpsl_triggers,
     HyperliquidClient,
 };
 use crate::network::feed::HyperliquidFeed;
@@ -206,6 +207,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let vol_t = last_volatility.clone();
     let feed_f = feed.clone();
     let signer_f = signer.clone();
+    let rest_client_f = rest_client.clone();
     let om_f = Arc::new(OrderManager::new(app_config.strategy.clone(), asset_idx, sz_decimals));
     let min_tick = app_config.strategy.min_tick_size;
     let is_mainnet_f = is_mainnet;
@@ -245,17 +247,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let e_nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
 
                 if let Ok(sig) = signer_f.sign_l1_action(&exit_action, e_nonce, is_mainnet_f).await {
-                    let mut s_b = [0u8; 32]; sig.s.to_big_endian(&mut s_b);
-                    let mut r_b = [0u8; 32]; sig.r.to_big_endian(&mut r_b);
-                    let v = if sig.v < 27 { (sig.v + 27) as u8 } else { sig.v as u8 };
-                    
-                    let action_obj = exit_action; 
-                    feed_f.send_action(serde_json::json!({
-                        "action": action_obj,
-                        "nonce": e_nonce,
-                        "signature": {"r": format!("0x{}", hex::encode(r_b)), "s": format!("0x{}", hex::encode(s_b)), "v": v}
-                    }));
-                    info!("🛡️ EXCHANGE TP/SL KIHELYEZVE: {} TP @ {:.2} | SL @ {:.2}", tp_side, tp_price, sl_price);
+                    match rest_client_f
+                        .send_l1_action(&exit_action, e_nonce, sig)
+                        .await
+                    {
+                        Ok(body) => {
+                            if exchange_order_submission_ok(&body) {
+                                info!(
+                                    "🛡️ EXCHANGE TP/SL (HTTP): {} TP @ {:.2} | SL @ {:.2}",
+                                    tp_side, tp_price, sl_price
+                                );
+                            } else {
+                                tracing::warn!(
+                                    "🛡️ TP/SL HTTP válasz (nem ok): {:?}",
+                                    body
+                                );
+                            }
+                        }
+                        Err(e) => tracing::error!("🛡️ TP/SL HTTP küldés hiba: {}", e),
+                    }
                 }
             }
         }
@@ -444,16 +454,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let cancel_action = order_manager.build_cancel_payload(&cancel_oids);
                         let c_nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
                         if let Ok(sig) = signer_t.sign_l1_action(&cancel_action, c_nonce, is_mainnet).await {
-                            let mut s_b = [0u8; 32]; sig.s.to_big_endian(&mut s_b);
-                            let mut r_b = [0u8; 32]; sig.r.to_big_endian(&mut r_b);
-                            let v = if sig.v < 27 { (sig.v + 27) as u8 } else { sig.v as u8 };
-
-                            feed_t.send_action(serde_json::json!({
-                                "action": cancel_action,
-                                "nonce": c_nonce,
-                                "signature": {"r": format!("0x{}", hex::encode(r_b)), "s": format!("0x{}", hex::encode(s_b)), "v": v}
-                            }));
-                            info!("🧹 SZELLEM-ORDERS TÖRÖLVE ({} db Cancel)", cancel_oids.len());
+                            match rest_client
+                                .send_l1_action(&cancel_action, c_nonce, sig)
+                                .await
+                            {
+                                Ok(body) => {
+                                    if exchange_order_submission_ok(&body) {
+                                        info!(
+                                            "🧹 SZELLEM-ORDERS TÖRÖLVE ({} db Cancel, HTTP)",
+                                            cancel_oids.len()
+                                        );
+                                    } else {
+                                        tracing::warn!("🧹 Cancel HTTP válasz: {:?}", body);
+                                    }
+                                }
+                                Err(e) => tracing::error!("🧹 Cancel HTTP hiba: {}", e),
+                            }
                         }
                     } else {
                         info!("🧹 Nincs törlendő nyitott order ezen a coinon.");
@@ -497,21 +513,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     match signer_t.sign_l1_action(&action, nonce, is_mainnet).await {
                         Ok(signature) => {
-                            let mut s_bytes = [0u8; 32]; signature.s.to_big_endian(&mut s_bytes);
-                            let mut r_bytes = [0u8; 32]; signature.r.to_big_endian(&mut r_bytes);
-                            let v = if signature.v < 27 { (signature.v + 27) as u8 } else { signature.v as u8 };
-
-                            let payload = serde_json::json!({
-                                "action": action,
-                                "nonce": nonce,
-                                "signature": {"r": format!("0x{}", hex::encode(r_bytes)), "s": format!("0x{}", hex::encode(s_bytes)), "v": v}
-                            });
-
                             let oids_before = feed_t.open_order_oids.lock().await.len();
                             feed_t.clear_post_only_reject_flag().await;
-                            feed_t.send_action(payload);
-                            info!("🚀 ÉLES LÉTRA KILŐVE (Dinamikus árazás)");
-                            // WS post feedback often arrives after 200–800ms; poll instead of a single short sleep.
+
+                            match rest_client
+                                .send_l1_action(&action, nonce, signature)
+                                .await
+                            {
+                                Ok(body) => {
+                                    if exchange_order_submission_ok(&body) {
+                                        let new_oids =
+                                            collect_resting_oids_from_exchange_response(&body);
+                                        if !new_oids.is_empty() {
+                                            let mut t = feed_t.open_order_oids.lock().await;
+                                            t.extend(new_oids);
+                                        }
+                                        info!("🚀 ÉLES LÉTRA KILŐVE (HTTP)");
+                                    } else {
+                                        tracing::warn!("🚀 LÉTRA HTTP válasz (nem ok): {:?}", body);
+                                        if exchange_response_has_post_only_reject(&body) {
+                                            feed_t.set_post_only_reject_flag(true).await;
+                                        }
+                                    }
+                                }
+                                Err(e) => tracing::error!("🚀 Létra HTTP hiba: {}", e),
+                            }
+
                             let mut rejected_post_only = false;
                             for _ in 0..22 {
                                 tokio::time::sleep(tokio::time::Duration::from_millis(45)).await;
@@ -548,24 +575,44 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         .duration_since(std::time::UNIX_EPOCH)
                                         .unwrap()
                                         .as_millis() as u64;
-                                    if let Ok(retry_sig) = signer_t.sign_l1_action(&retry_action, retry_nonce, is_mainnet).await {
-                                        let mut s2 = [0u8; 32];
-                                        retry_sig.s.to_big_endian(&mut s2);
-                                        let mut r2 = [0u8; 32];
-                                        retry_sig.r.to_big_endian(&mut r2);
-                                        let v2 = if retry_sig.v < 27 { (retry_sig.v + 27) as u8 } else { retry_sig.v as u8 };
+                                    if let Ok(retry_sig) =
+                                        signer_t.sign_l1_action(&retry_action, retry_nonce, is_mainnet).await
+                                    {
                                         feed_t.clear_post_only_reject_flag().await;
-                                        feed_t.send_action(serde_json::json!({
-                                            "action": retry_action,
-                                            "nonce": retry_nonce,
-                                            "signature": {"r": format!("0x{}", hex::encode(r2)), "s": format!("0x{}", hex::encode(s2)), "v": v2}
-                                        }));
-                                        info!("🔁 POST-ONLY RETRY elküldve mélyebb passzív árral (buffer=10 tick).");
+                                        match rest_client
+                                            .send_l1_action(&retry_action, retry_nonce, retry_sig)
+                                            .await
+                                        {
+                                            Ok(rb) => {
+                                                if exchange_order_submission_ok(&rb) {
+                                                    let ro =
+                                                        collect_resting_oids_from_exchange_response(
+                                                            &rb,
+                                                        );
+                                                    if !ro.is_empty() {
+                                                        let mut t =
+                                                            feed_t.open_order_oids.lock().await;
+                                                        t.extend(ro);
+                                                    }
+                                                    info!(
+                                                        "🔁 POST-ONLY RETRY (HTTP), buffer=10 tick"
+                                                    );
+                                                } else {
+                                                    tracing::warn!(
+                                                        "🔁 Retry HTTP válasz: {:?}",
+                                                        rb
+                                                    );
+                                                }
+                                            }
+                                            Err(e) => {
+                                                tracing::error!("🔁 Retry HTTP hiba: {}", e)
+                                            }
+                                        }
                                     }
                                 }
                             }
                             last_signal_time = std::time::Instant::now();
-                        },
+                        }
                         Err(e) => tracing::error!("❌ Hiba az order aláírásakor: {}", e),
                     }
                 }
@@ -637,23 +684,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 .unwrap()
                                 .as_millis() as u64;
 
-                            if let Ok(sig) = signer_r.sign_l1_action(&protection, nonce, is_mainnet_reconcile).await {
-                                let mut s_b = [0u8; 32];
-                                sig.s.to_big_endian(&mut s_b);
-                                let mut r_b = [0u8; 32];
-                                sig.r.to_big_endian(&mut r_b);
-                                let v = if sig.v < 27 { (sig.v + 27) as u8 } else { sig.v as u8 };
-
-                                feed_r.send_action(serde_json::json!({
-                                    "action": protection,
-                                    "nonce": nonce,
-                                    "signature": {"r": format!("0x{}", hex::encode(r_b)), "s": format!("0x{}", hex::encode(s_b)), "v": v}
-                                }));
-                                info!(
-                                    "🛡️ FAILSAFE TP/SL RECONCILE: pos={:.4}, TP={:.4}, SL={:.4}",
-                                    exchange_pos, tp_price, sl_price
-                                );
-                                last_protected_pos = exchange_pos;
+                            if let Ok(sig) =
+                                signer_r.sign_l1_action(&protection, nonce, is_mainnet_reconcile).await
+                            {
+                                match rest_client_r
+                                    .send_l1_action(&protection, nonce, sig)
+                                    .await
+                                {
+                                    Ok(body) => {
+                                        if exchange_order_submission_ok(&body) {
+                                            info!(
+                                                "🛡️ FAILSAFE TP/SL RECONCILE (HTTP): pos={:.4}, TP={:.4}, SL={:.4}",
+                                                exchange_pos, tp_price, sl_price
+                                            );
+                                            last_protected_pos = exchange_pos;
+                                        } else {
+                                            tracing::warn!(
+                                                "🛡️ FAILSAFE TP/SL HTTP válasz: {:?}",
+                                                body
+                                            );
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("🛡️ FAILSAFE TP/SL HTTP küldés: {}", e)
+                                    }
+                                }
                             }
                         }
                     }

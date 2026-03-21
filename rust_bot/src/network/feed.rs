@@ -128,6 +128,12 @@ impl HyperliquidFeed {
         current
     }
 
+    /// HTTP `/exchange` válasz feldolgozásához (WS post helyett).
+    pub async fn set_post_only_reject_flag(&self, pending: bool) {
+        let mut f = self.post_only_reject_flag.lock().await;
+        *f = pending;
+    }
+
     pub async fn start(self: Arc<Self>, mut cmd_rx: mpsc::UnboundedReceiver<serde_json::Value>) {
         let this = self.clone();
         
@@ -258,7 +264,12 @@ impl HyperliquidFeed {
         let resp_type = payload["response"]["type"].as_str().unwrap_or("");
 
         if status != "ok" {
-            info!("📡 POST id={} status={}", id, status);
+            warn!(
+                "❌ WS POST id={} status={} — teljes válasz: {}",
+                id,
+                status,
+                serde_json::to_string(data).unwrap_or_else(|_| "(serialize fail)".to_string())
+            );
             return;
         }
 
