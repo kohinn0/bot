@@ -17,6 +17,8 @@
 Description=SebessegBot Hyperliquid (Rust)
 After=network-online.target
 Wants=network-online.target
+# StartLimit* csak [Unit]-ban érvényes (régebbi systemd „Unknown key” hiba elkerülése)
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -28,9 +30,6 @@ ExecStart=/home/ubuntu/sebessegbot/rust_bot/target/release/sebessegbot_rs
 # Bármilyen kilépés után újraindul (kivéve: systemctl stop)
 Restart=always
 RestartSec=20
-
-# Ne add fel 5 próba után (alap systemd limit) – sok restart engedélyezve
-StartLimitIntervalSec=0
 
 KillSignal=SIGTERM
 TimeoutStopSec=45

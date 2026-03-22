@@ -239,6 +239,68 @@ impl OrderManager {
         let tick = self.config.min_tick_size;
         let sz_step = 10_f64.powi(-(self.sz_decimals as i32));
 
+        // Pozíció zárás: a többszintű létra %-os USD szeletei gyakran egyenként < $10 HL min
+        // → minden szint kiesik, üres lista. Egy passive maker a teljes záró mérettel.
+        if let Some(close_sz) = max_close_total_sz {
+            if close_sz >= self.config.min_shares {
+                let (off_ticks, clamp_like_l1) = self
+                    .config
+                    .ladder_levels
+                    .first()
+                    .map(|l| (l.offset_from_mid_ticks as f64, l.level == 1))
+                    .unwrap_or((0.0_f64, true));
+
+                let skew_adj = self.current_pos * self.config.skew_penalty.unwrap_or(0.0);
+                let offset_ticks = off_ticks + if is_buy { skew_adj } else { -skew_adj };
+                let abs_offset = offset_ticks.abs();
+                let mut raw_price = if is_buy {
+                    mid_price - (abs_offset * tick)
+                } else {
+                    mid_price + (abs_offset * tick)
+                };
+
+                if clamp_like_l1 {
+                    if is_buy {
+                        raw_price = raw_price.max(best_bid).min(best_ask - (0.5 * tick));
+                    } else {
+                        raw_price = raw_price.min(best_ask).max(best_bid + (0.5 * tick));
+                    }
+                }
+
+                let mut rounded_price = if is_buy {
+                    (raw_price / tick).floor() * tick
+                } else {
+                    (raw_price / tick).ceil() * tick
+                };
+                if is_buy {
+                    rounded_price = rounded_price.min(best_bid - (passive_buffer_ticks * tick));
+                } else {
+                    rounded_price = rounded_price.max(best_ask + (passive_buffer_ticks * tick));
+                }
+
+                let sz = ((close_sz / sz_step).floor() * sz_step).max(self.config.min_shares);
+                if sz >= self.config.min_shares && (rounded_price * sz) >= 10.0 {
+                    return OrderAction {
+                        type_: "order".to_string(),
+                        orders: vec![OrderWire {
+                            a: self.asset_idx,
+                            b: is_buy,
+                            p: Self::float_to_wire(rounded_price),
+                            s: Self::float_to_wire(sz),
+                            r: false,
+                            t: OrderTypeWire {
+                                limit: Some(LimitOrderType {
+                                    tif: "Alo".to_string(),
+                                }),
+                                trigger: None,
+                            },
+                        }],
+                        grouping: "na".to_string(),
+                    };
+                }
+            }
+        }
+
         let mut orders = Vec::new();
         let mut remaining_close = max_close_total_sz;
 

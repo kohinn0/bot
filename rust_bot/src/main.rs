@@ -535,6 +535,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         };
                         (s.best_bid, s.best_ask, mid)
                     };
+
+                    const HL_MIN_ORDER_NOTIONAL_USD: f64 = 10.0;
+
+                    if best_bid <= 0.0 || best_ask <= 0.0 {
+                        tracing::warn!(
+                            "⚠️ Létra kihagyva: érvénytelen könyv (bid={:.4} ask={:.4})",
+                            best_bid,
+                            best_ask
+                        );
+                        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                        continue;
+                    }
+
+                    if let Some(close_sz) = max_close_sz {
+                        let est = close_sz * ladder_mid;
+                        if est < HL_MIN_ORDER_NOTIONAL_USD {
+                            info!(
+                                "⛔ Záró létra kihagyva: pozíció × mid ≈ ${:.2} < HL min ~${} (kézi zárás / nagyobb méret kell)",
+                                est,
+                                HL_MIN_ORDER_NOTIONAL_USD as i32
+                            );
+                            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                            continue;
+                        }
+                    }
+
                     let target_usd = *target_notional_t.lock().await;
                     let action = order_manager.build_ladder_payload(
                         &signal.side,
@@ -545,7 +571,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         max_close_sz,
                     );
                     if action.orders.is_empty() {
-                        tracing::warn!("⚠️ Üres order lista, létra küldés kihagyva (szűrők minden szintet eldobtak).");
+                        if max_close_sz.is_some() {
+                            tracing::warn!(
+                                "⚠️ Üres létra (zárás): maradék méret vagy ár miatt minden szint < HL min notional (~${})",
+                                HL_MIN_ORDER_NOTIONAL_USD as i32
+                            );
+                        } else {
+                            tracing::warn!(
+                                "⚠️ Üres létra (belépés): szűrők / post-only árak — bid {:.4} ask {:.4} target_usd {:.2}",
+                                best_bid,
+                                best_ask,
+                                target_usd
+                            );
+                        }
                         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
                         continue;
                     }
