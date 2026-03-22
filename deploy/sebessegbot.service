@@ -1,13 +1,17 @@
-# Hyperliquid SebessegBot – systemd (SSH bezárása után is fut)
+# Hyperliquid SebessegBot – systemd (SSH bezárása után is fut, crash után újraindul)
 #
-# Telepítés (egyszer):
+# Telepítés:
 #   sudo cp deploy/sebessegbot.service /etc/systemd/system/
-#   sudo nano /etc/systemd/system/sebessegbot.service   # User, WorkingDirectory, ExecStart útvonalak!
+#   sudo nano /etc/systemd/system/sebessegbot.service   # User + útvonalak!
 #   sudo systemctl daemon-reload
 #   sudo systemctl enable --now sebessegbot
 #
-# Log: journalctl -u sebessegbot -f
-# Stop: sudo systemctl stop sebessegbot
+# Állapot / miért állt meg:
+#   sudo systemctl status sebessegbot
+#   journalctl -u sebessegbot -n 80 --no-pager
+#   journalctl -u sebessegbot -f
+#
+# Leállítás (szándékosan): sudo systemctl stop sebessegbot
 
 [Unit]
 Description=SebessegBot Hyperliquid (Rust)
@@ -16,21 +20,24 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-# VPS-en általában ubuntu – ha más user, írd át:
 User=ubuntu
 Group=ubuntu
 WorkingDirectory=/home/ubuntu/sebessegbot/rust_bot
-# A bináris a rust_bot mappából indul; a .env-t a program dotenv-vel betölti (cwd = rust_bot)
 ExecStart=/home/ubuntu/sebessegbot/rust_bot/target/release/sebessegbot_rs
-Restart=on-failure
-RestartSec=15
-# Ne öljük meg a gyerek folyamatokat (Tokio)
-KillSignal=SIGINT
-TimeoutStopSec=30
 
-# Opcionális: log fájlba is (journal mellett)
-# StandardOutput=append:/home/ubuntu/sebessegbot/rust_bot/bot.log
-# StandardError=append:/home/ubuntu/sebessegbot/rust_bot/bot.log
+# Bármilyen kilépés után újraindul (kivéve: systemctl stop)
+Restart=always
+RestartSec=20
+
+# Ne add fel 5 próba után (alap systemd limit) – sok restart engedélyezve
+StartLimitIntervalSec=0
+
+KillSignal=SIGTERM
+TimeoutStopSec=45
+
+# Napló: journal + fájl (könnyebb grep)
+StandardOutput=append:/home/ubuntu/sebessegbot/rust_bot/bot.log
+StandardError=append:/home/ubuntu/sebessegbot/rust_bot/bot.log
 
 [Install]
 WantedBy=multi-user.target
