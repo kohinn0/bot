@@ -117,6 +117,31 @@ impl OrderManager {
         }
     }
 
+    /// TP/SL célárak egy referencia árból (fill vagy entryPx) + vol alapján — fill és failsafe közös logika.
+    pub fn tp_sl_prices_for_position(
+        exchange_pos: f64,
+        ref_px: f64,
+        vol_px: f64,
+        min_tick: f64,
+        tp_min_ticks: f64,
+        sl_min_ticks: f64,
+        mark_mid: f64,
+    ) -> Option<(f64, f64)> {
+        let tp_dist = f64::max(vol_px * 1.5, tp_min_ticks * min_tick);
+        let sl_dist = f64::max(vol_px * 3.0, sl_min_ticks * min_tick);
+        let raw_tp = if exchange_pos > 0.0 {
+            ref_px + tp_dist
+        } else {
+            ref_px - tp_dist
+        };
+        let raw_sl = if exchange_pos > 0.0 {
+            ref_px - sl_dist
+        } else {
+            ref_px + sl_dist
+        };
+        Self::clamp_tpsl_prices_for_mark(exchange_pos, raw_tp, raw_sl, mark_mid, min_tick)
+    }
+
     /// Pozíció méret kvantálása `szDecimals` szerint (TP/SL méret = teljes pozíció).
     pub fn quantize_position_sz(&self, sz: f64) -> f64 {
         let step = 10_f64.powi(-(self.sz_decimals as i32));

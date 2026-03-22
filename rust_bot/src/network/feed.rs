@@ -376,7 +376,6 @@ impl HyperliquidFeed {
                     side: fill["side"].as_str().unwrap_or("").to_string(),
                     fee: fill["fee"].as_str().unwrap_or("0").parse().unwrap_or(0.0),
                 };
-                info!("💎 FILL ÉSZLELVE: {} {} @ {} (Fee: ${})", event.side, event.sz, event.px, event.fee);
                 let _ = self.fill_tx.send(event);
             }
         }

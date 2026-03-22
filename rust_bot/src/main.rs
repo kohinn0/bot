@@ -10,7 +10,6 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Instant;
 use crate::config::AppConfig;
 use crate::logic::signer::HyperliquidSigner;
-use crate::logic::bot_pnl::PnlTracker;
 use crate::logic::signal::SignalEngine;
 use crate::logic::order_manager::OrderManager;
 use crate::network::client::{
@@ -145,8 +144,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let trade_count = Arc::new(AtomicU32::new(0));
     let current_position = Arc::new(tokio::sync::Mutex::new(0.0));
-    let last_volatility = Arc::new(tokio::sync::Mutex::new(0.01)); // Kezdeti volatilitás becslés
-    let pnl_tracker = Arc::new(tokio::sync::Mutex::new(PnlTracker::new("../logs/pnl_state.json")));
+    let last_volatility = Arc::new(tokio::sync::Mutex::new(0.01));
 
     info!(
         "💰 Kereskedési méret (notional): ${:.2} per szint (követi a számlaértéket, ha HL frissítés fut)",
@@ -204,9 +202,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let last_fill_tpsl_ok = Arc::new(tokio::sync::Mutex::new(None::<(Instant, f64)>));
     // === VALÓS IDEJŰ FILL ÉS POZÍCIÓ FIGYELŐ ===
     let mut fill_rx = feed.fill_tx.subscribe();
-    let pnl_t = pnl_tracker.clone();
     let trades_t = trade_count.clone();
-    let acc_t = wallet_equity.clone();
     let pos_t = current_position.clone();
     let vol_t = last_volatility.clone();
     let state_for_fill = state_ref.clone();
@@ -221,42 +217,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tokio::spawn(async move {
         while let Ok(fill) = fill_rx.recv().await {
-            info!("📈 PNL/POS UPDATE: {} fill @ {} (Sz: {})", fill.coin, fill.px, fill.sz);
-            
-            let mut pnl = pnl_t.lock().await;
             let mut pos = pos_t.lock().await;
-            
+
             let fill_sz = if fill.side == "B" { fill.sz } else { -fill.sz };
             *pos += fill_sz;
 
-            let eq_for_pnl = *acc_t.lock().await;
-            pnl.add_trade(0.0, fill.fee, eq_for_pnl);
             trades_t.fetch_add(1, Ordering::Relaxed);
-            info!("📊 Aktuális Pozíció: {:.4} {}", *pos, fill.coin);
+            info!(
+                "📈 Fill {} @ {} sz={} fee=${:.4} → pos {:.4}",
+                fill.coin, fill.px, fill.sz, fill.fee, *pos
+            );
 
-            // 💡 MENTOR TRÜKK: Azonnali TP és SL elhelyezése kitöltés után
-            // A volatilitást (std_dev) használjuk a szintek belövéséhez
             if *pos != 0.0 {
                 let vol = { *vol_t.lock().await };
                 let tp_side = if *pos > 0.0 { "Sell" } else { "Buy" };
-                
-                // Dinamikus TP: vol×1.5 vagy config minimum (profit > díjak)
-                let tp_dist = f64::max(vol * 1.5, tp_min_ticks * min_tick);
-                let raw_tp = if *pos > 0.0 { fill.px + tp_dist } else { fill.px - tp_dist };
-
-                // Dinamikus SL: vol×3 vagy config minimum (~1.5× TP R:R)
-                let sl_dist = f64::max(vol * 3.0, sl_min_ticks * min_tick);
-                let raw_sl = if *pos > 0.0 { fill.px - sl_dist } else { fill.px + sl_dist };
 
                 let mark_mid = { state_for_fill.read().await.mid_price };
-                let (tp_price, sl_price) = match OrderManager::clamp_tpsl_prices_for_mark(
-                    *pos, raw_tp, raw_sl, mark_mid, min_tick,
+                let (tp_price, sl_price) = match OrderManager::tp_sl_prices_for_position(
+                    *pos,
+                    fill.px,
+                    vol,
+                    min_tick,
+                    tp_min_ticks,
+                    sl_min_ticks,
+                    mark_mid,
                 ) {
                     Some(p) => p,
                     None => {
                         tracing::warn!(
-                            "🛡️ TP/SL kihagyva (clamp): mark={:.4} pos={:.4} raw_tp={:.4} raw_sl={:.4}",
-                            mark_mid, *pos, raw_tp, raw_sl
+                            "🛡️ TP/SL kihagyva (clamp): mark={:.4} pos={:.4}",
+                            mark_mid, *pos
                         );
                         continue;
                     }
@@ -320,8 +310,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let hl_user_t = hl_user.clone();
     let hl_user_r = hl_user.clone();
     let rest_client_r = rest_client.clone();
-    let pnl_sim_t = pnl_tracker.clone();
-    let acc_sim_t = wallet_equity.clone();
     let pos_sim_t = current_position.clone();
     let pos_reconcile_t = current_position.clone();
     let vol_sim_t = last_volatility.clone();
@@ -409,15 +397,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 };
 
                 if is_dry_run {
-                    info!("🧪 DRY RUN: Szimulált megbízás elkészítve.");
-                    let mut acc = acc_sim_t.lock().await;
-                    let mut pnl = pnl_sim_t.lock().await;
+                    info!("🧪 DRY RUN: szignál (nincs küldés)");
                     let mut pos = pos_sim_t.lock().await;
-                    
-                    *acc += 2.50; 
-                    let fill_sz = if signal.side == "Buy" { 0.1 } else { -0.1 }; // fiktív méret
+                    let fill_sz = if signal.side == "Buy" { 0.1 } else { -0.1 };
                     *pos += fill_sz;
-                    pnl.add_trade(2.55, 0.05, *acc);
                 } else {
                     // --- 1. CLEAN SLATE: ELŐZŐ LÉTRA ORDEREK (TP/SL trigger NEM törlődik) ---
                     let addr = hl_user_t.as_str();
@@ -787,32 +770,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if reference_px > 0.0 {
                             let vol = { *vol_reconcile_t.lock().await };
                             let tp_side = if exchange_pos > 0.0 { "Sell" } else { "Buy" };
-                            let tp_dist = f64::max(vol * 1.5, tp_min_ticks_reconcile * min_tick_reconcile);
-                            let sl_dist = f64::max(vol * 3.0, sl_min_ticks_reconcile * min_tick_reconcile);
-                            let raw_tp = if exchange_pos > 0.0 {
-                                reference_px + tp_dist
-                            } else {
-                                reference_px - tp_dist
-                            };
-                            let raw_sl = if exchange_pos > 0.0 {
-                                reference_px - sl_dist
-                            } else {
-                                reference_px + sl_dist
-                            };
-
                             let mark_mid = { state_reconcile.read().await.mid_price };
-                            let (tp_price, sl_price) = match OrderManager::clamp_tpsl_prices_for_mark(
+                            let (tp_price, sl_price) = match OrderManager::tp_sl_prices_for_position(
                                 exchange_pos,
-                                raw_tp,
-                                raw_sl,
-                                mark_mid,
+                                reference_px,
+                                vol,
                                 min_tick_reconcile,
+                                tp_min_ticks_reconcile,
+                                sl_min_ticks_reconcile,
+                                mark_mid,
                             ) {
                                 Some(p) => p,
                                 None => {
                                     tracing::warn!(
-                                        "🛡️ FAILSAFE TP/SL clamp skip: mark={:.4} pos={:.4} ref={:.4} raw_tp={:.4} raw_sl={:.4}",
-                                        mark_mid, exchange_pos, reference_px, raw_tp, raw_sl
+                                        "🛡️ FAILSAFE TP/SL clamp skip: mark={:.4} pos={:.4} ref={:.4}",
+                                        mark_mid, exchange_pos, reference_px
                                     );
                                     continue;
                                 }
@@ -862,19 +834,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     tracing::warn!("⚠️ REST reconcile hiba (user_state): {}", e);
                 }
             }
-        }
-    });
-
-    // Diagnosztikai kiírás
-    let diag_state_ref = feed.state.clone();
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
-            let current = diag_state_ref.read().await;
-            info!(
-                "📊 [{} L2Book] Mid: {:.4} | Bid: {:.4} | Ask: {:.4} | Imbalance: {:.2}",
-                current.coin, current.mid_price, current.best_bid, current.best_ask, current.imbalance
-            );
         }
     });
 
