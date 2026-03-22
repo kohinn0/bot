@@ -15,6 +15,8 @@ __pycache__/
 
 # Naplók
 logs/
+rust_bot/bot.log
+rust_bot/bot.pid
 
 # IDE
 .vscode/
