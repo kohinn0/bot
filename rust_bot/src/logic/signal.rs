@@ -28,7 +28,7 @@ impl SignalEngine {
             config,
             state_ref,
             return_history: VecDeque::new(),
-            history_limit: 500, // 200-ról 500-ra emelve a stabilitásért
+            history_limit: 200, // gyorsabb warmup és reagálás
             sum_x: 0.0,
             sum_x2: 0.0,
             tick_count: 0,
@@ -114,13 +114,14 @@ impl SignalEngine {
         // Ha nagy a vételi nyomás (Imbalance + Momentum), ne csak a Mid-re várjunk,
         // hanem próbáljunk agresszívabban "ráülni" a Bid falra.
         
-        if z_score < -vol_adj_threshold && (imbalance > 0.72 || imb_momentum > 0.12) {
+        // Lazább küszöbök: base_threshold (nem sigma_r-rel szorzott), közepesebb imbalance
+        if z_score < -base_threshold && (imbalance > 0.58 || imb_momentum > 0.08) {
             return Some(SignalResult {
                 side: "Buy".to_string(),
-                target_mid: mid_price, // Visszaállítva Mid-re, az eltolást az OrderManager intézi a spread-en belülre
+                target_mid: mid_price,
                 volatility: volatility_px,
             });
-        } else if z_score > vol_adj_threshold && (imbalance < 0.28 || imb_momentum < -0.12) {
+        } else if z_score > base_threshold && (imbalance < 0.42 || imb_momentum < -0.08) {
             return Some(SignalResult {
                 side: "Sell".to_string(),
                 target_mid: mid_price,
