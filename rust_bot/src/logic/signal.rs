@@ -115,13 +115,13 @@ impl SignalEngine {
         // hanem próbáljunk agresszívabban "ráülni" a Bid falra.
         
         // Lazább küszöbök: base_threshold (nem sigma_r-rel szorzott), közepesebb imbalance
-        if z_score < -base_threshold && (imbalance > 0.58 || imb_momentum > 0.08) {
+        if z_score < -base_threshold && (imbalance > 0.65 || imb_momentum > 0.10) {
             return Some(SignalResult {
                 side: "Buy".to_string(),
                 target_mid: mid_price,
                 volatility: volatility_px,
             });
-        } else if z_score > base_threshold && (imbalance < 0.42 || imb_momentum < -0.08) {
+        } else if z_score > base_threshold && (imbalance < 0.35 || imb_momentum < -0.10) {
             return Some(SignalResult {
                 side: "Sell".to_string(),
                 target_mid: mid_price,
