@@ -52,8 +52,8 @@
         "position_limits": {
             "max_open_positions": 1,
             "max_notional_usd_per_trade": 40,
-            "balance_pct_per_trade": 2.0,
-            "comment": "~$100 számla: 2% × 10x = $20/szint; cap 40 USD"
+            "balance_pct_per_trade": 4.0,
+            "comment": "~$100 számla: 4% × 10x = $40 (cap) → szintenkint $16/$12/$12, mind > HL $10 min"
         },
         "leverage": {
             "max_leverage": 10,

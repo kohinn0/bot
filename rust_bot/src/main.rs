@@ -519,7 +519,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         (s.best_bid, s.best_ask, mid)
                     };
 
-                    const HL_MIN_ORDER_NOTIONAL_USD: f64 = 10.0;
+                    const HL_MIN_ORDER_NOTIONAL_USD: f64 = 10.05;
 
                     if best_bid <= 0.0 || best_ask <= 0.0 {
                         tracing::warn!(
