@@ -108,7 +108,6 @@ impl SignalEngine {
 
         // Stratégiai paraméterek
         let base_threshold = self.config.z_score_threshold; // Most már a config-ból olvassuk!
-        let vol_adj_threshold = base_threshold * self.config.sigma_r;
 
         // 4. "HÚSEVŐ" HFT ÁRAZÁS
         // Ha nagy a vételi nyomás (Imbalance + Momentum), ne csak a Mid-re várjunk,

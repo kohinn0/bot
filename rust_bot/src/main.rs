@@ -198,7 +198,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Aláíró és Kliens felkészítése a Hálózathoz
     let signer = Arc::new(signer);
     let rest_client = Arc::new(rest_client);
-    /// Fill utáni sikeres TP/SL (idő + pozíció) → failsafe ne duplikáljon, ha a méret nem változott.
+    // Fill utáni sikeres TP/SL (idő + pozíció) → failsafe ne duplikáljon, ha a méret nem változott.
     let last_fill_tpsl_ok = Arc::new(tokio::sync::Mutex::new(None::<(Instant, f64)>));
     // === VALÓS IDEJŰ FILL ÉS POZÍCIÓ FIGYELŐ ===
     let mut fill_rx = feed.fill_tx.subscribe();
