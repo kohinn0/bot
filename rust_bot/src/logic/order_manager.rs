@@ -118,6 +118,10 @@ impl OrderManager {
     }
 
     /// TP/SL célárak egy referencia árból (fill vagy entryPx) + vol alapján — fill és failsafe közös logika.
+    ///
+    /// A minimum TP távolság tartalmazza a round-trip fee-t:
+    ///   fee_dist = ref_px × (maker_fee + taker_fee)  [entry maker + TP taker]
+    /// Ez biztosítja, hogy a bruttó profit >= díjak, azaz nem veszítünk fee-n.
     pub fn tp_sl_prices_for_position(
         exchange_pos: f64,
         ref_px: f64,
@@ -126,8 +130,16 @@ impl OrderManager {
         tp_min_ticks: f64,
         sl_min_ticks: f64,
         mark_mid: f64,
+        maker_fee_rate: f64,
+        taker_fee_rate: f64,
     ) -> Option<(f64, f64)> {
-        let tp_dist = f64::max(vol_px * 1.5, tp_min_ticks * min_tick);
+        // Round-trip fee (entry maker + TP/SL taker) pixelben kifejezve
+        let round_trip_fee_px = ref_px * (maker_fee_rate + taker_fee_rate);
+        // Fee-t is tartalmazó TP minimum: a fee-t KÉTSZERESEN adjuk, hogy
+        // a nettó profit min 1× fee legyen (nem csak nullás)
+        let fee_min_dist = round_trip_fee_px * 2.0;
+        let config_min_dist = tp_min_ticks * min_tick;
+        let tp_dist = f64::max(vol_px * 1.5, f64::max(config_min_dist, fee_min_dist));
         let sl_dist = f64::max(vol_px * 3.0, sl_min_ticks * min_tick);
         let raw_tp = if exchange_pos > 0.0 {
             ref_px + tp_dist

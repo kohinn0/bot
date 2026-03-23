@@ -42,11 +42,17 @@
         "exit": {
             "take_profit": {
                 "enabled": true,
-                "min_profit_ticks": 12,
-                "min_sl_ticks": 20,
-                "max_profit_ticks": 500
+                "min_profit_ticks": 20,
+                "min_sl_ticks": 35,
+                "max_profit_ticks": 500,
+                "comment": "SOL ~$130: 20 tick=0.20$ brutto, fee~0.09$ → netto ~0.11$; SL 35 tick=0.35$ R:R ~1.75:1"
             }
         }
+    },
+    "fees": {
+        "maker_fee_rate": 0.0002,
+        "taker_fee_rate": 0.0005,
+        "comment": "HL standard dijak: maker 0.02% (post-only GTX entry), taker 0.05% (TP/SL trigger piac)"
     },
     "risk_management": {
         "position_limits": {

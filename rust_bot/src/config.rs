@@ -31,6 +31,10 @@ pub struct StrategyConfig {
     pub tp_min_ticks: f64,
     /// SL minimum távolság (tick); legyen ~1.5–2× TP a R:R kedvéért.
     pub sl_min_ticks: f64,
+    /// Maker fee (entry order, post-only GTX): HL alapértelmezett 0.0002 (0.02%)
+    pub maker_fee_rate: f64,
+    /// Taker fee (TP/SL trigger piaci végrehajtáskor): HL alapértelmezett 0.0005 (0.05%)
+    pub taker_fee_rate: f64,
 }
 
 impl StrategyConfig {
@@ -136,6 +140,8 @@ impl AppConfig {
             sl_min_ticks: om["exit"]["take_profit"].get("min_sl_ticks")
                 .and_then(|v| v.as_f64())
                 .unwrap_or_else(|| 20.0),
+            maker_fee_rate: parsed["fees"]["maker_fee_rate"].as_f64().unwrap_or(0.0002),
+            taker_fee_rate: parsed["fees"]["taker_fee_rate"].as_f64().unwrap_or(0.0005),
         };
 
         info!("✅ Konfiguráció betöltve: {}, Dry Run: {}", strategy.coin, is_dry_run);

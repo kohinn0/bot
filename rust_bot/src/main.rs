@@ -213,6 +213,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let min_tick = app_config.strategy.min_tick_size;
     let tp_min_ticks = app_config.strategy.tp_min_ticks;
     let sl_min_ticks = app_config.strategy.sl_min_ticks;
+    let maker_fee_rate_f = app_config.strategy.maker_fee_rate;
+    let taker_fee_rate_f = app_config.strategy.taker_fee_rate;
     let is_mainnet_f = is_mainnet;
 
     tokio::spawn(async move {
@@ -241,6 +243,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     tp_min_ticks,
                     sl_min_ticks,
                     mark_mid,
+                    maker_fee_rate_f,
+                    taker_fee_rate_f,
                 ) {
                     Some(p) => p,
                     None => {
@@ -725,6 +729,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let min_tick_reconcile = min_tick;
     let tp_min_ticks_reconcile = app_config.strategy.tp_min_ticks;
     let sl_min_ticks_reconcile = app_config.strategy.sl_min_ticks;
+    let maker_fee_rate_reconcile = app_config.strategy.maker_fee_rate;
+    let taker_fee_rate_reconcile = app_config.strategy.taker_fee_rate;
     let is_mainnet_reconcile = is_mainnet;
     tokio::spawn(async move {
         let mut last_protected_pos: f64 = 0.0;
@@ -803,6 +809,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 tp_min_ticks_reconcile,
                                 sl_min_ticks_reconcile,
                                 mark_mid,
+                                maker_fee_rate_reconcile,
+                                taker_fee_rate_reconcile,
                             ) {
                                 Some(p) => p,
                                 None => {
