@@ -328,7 +328,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 6. A fő "szívverés" (Heartbeat) - Extrém gyors polling az RwLock-ból
     tokio::spawn(async move {
+        let mut last_reset_day: u32 = {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            (now / 86400) as u32
+        };
+        let mut session_start_equity = session_start_equity; // árnyékolás: mutable lokális
         loop {
+            // UTC éjféli reset: trade counter + drawdown bázis nullázása napváltáskor
+            let today = {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
+                (now / 86400) as u32
+            };
+            if today != last_reset_day {
+                last_reset_day = today;
+                trade_guard_t.store(0, Ordering::Relaxed);
+                let eq = *account_guard_t.lock().await;
+                session_start_equity = eq;
+                info!("🔄 Napi reset (UTC éjfél): trade_count=0, drawdown bázis=${:.2}", eq);
+            }
+
             if let Some(signal) = signal_engine.tick().await {
                 // Hard risk stop: halt new entries after daily loss/trade caps.
                 let current_equity = *account_guard_t.lock().await;

@@ -61,7 +61,7 @@
         },
         "daily_limits": {
             "max_daily_loss_usd": 10,
-            "max_daily_trades": 25
+            "max_daily_trades": 100
         }
     },
     "technical_precision": {
