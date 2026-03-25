@@ -50,8 +50,8 @@
         }
     },
     "fees": {
-        "maker_fee_rate": 0.0002,
-        "taker_fee_rate": 0.0005,
+        "maker_fee_rate": 0.00015,
+        "taker_fee_rate": 0.00045,
         "comment": "HL standard dijak: maker 0.02% (post-only GTX entry), taker 0.05% (TP/SL trigger piac)"
     },
     "risk_management": {
@@ -67,7 +67,7 @@
         },
         "daily_limits": {
             "max_daily_loss_usd": 10,
-            "max_daily_trades": 100
+            "max_daily_trades": 10
         }
     },
     "technical_precision": {

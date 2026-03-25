@@ -422,7 +422,7 @@ impl OrderManager {
             } else {
                 (tick_price / tick).ceil() * tick
             };
-            let min_notional = 10.05_f64;
+            let min_notional = 15.0_f64; // raised to avoid tiny orders
             let fallback_notional = sz_usd.max(min_notional);
             let mut sz = ((fallback_notional / rounded_price) / sz_step).floor() * sz_step;
             if let Some(rem) = remaining_close {

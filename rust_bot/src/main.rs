@@ -388,27 +388,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Hard risk stop: halt new entries after daily loss/trade caps.
                 let current_equity = *account_guard_t.lock().await;
                 let drawdown = (session_start_equity - current_equity).max(0.0);
+                let profit = (current_equity - session_start_equity).max(0.0);
                 let trades_done = trade_guard_t.load(Ordering::Relaxed);
+                // Hard risk stop: halt new entries after daily loss/trade caps.
                 if drawdown >= max_daily_loss_usd {
                     tracing::warn!(
-                        "🛑 DAILY LOSS LIMIT ELÉRVE (dd=${:.2} >= ${:.2}), új belépések tiltva.",
+                        "🛑 DAILY LOSS LIMIT REACHED (dd=${:.2} >= ${:.2}), trading halted.",
                         drawdown,
                         max_daily_loss_usd
                     );
                     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                     continue;
                 }
+                // Daily profit target: stop trading when profit >= 1% of starting equity
+                if profit >= session_start_equity * 0.01 {
+                    tracing::info!(
+                        "✅ DAILY PROFIT TARGET REACHED (profit=${:.2} >= 1% of start equity ${:.2}), stopping entries.",
+                        profit,
+                        session_start_equity
+                    );
+                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                    continue;
+                }
                 if trades_done >= max_daily_trades {
                     tracing::warn!(
-                        "🛑 DAILY TRADE LIMIT ELÉRVE ({} >= {}), új belépések tiltva.",
+                        "🛑 DAILY TRADE LIMIT REACHED ({} >= {}), trading halted.",
                         trades_done,
                         max_daily_trades
                     );
                     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                     continue;
                 }
-
-                // Cooldown ellenőrzése: ne küldjünk 500ms-on belül újabb létrát
+                // Cooldown check: avoid sending new ladder within 500ms
                 if last_signal_time.elapsed() < min_signal_interval {
                     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
                     continue;
