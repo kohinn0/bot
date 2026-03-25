@@ -253,6 +253,26 @@ pub fn cancel_response_only_benign_errors(body: &Value) -> bool {
     true
 }
 
+/// Összegyűjti az összes `isPositionTpsl` trigger order OID-jét egy coinon — törléshez.
+pub fn collect_position_tpsl_oids(frontend_orders: &Value, coin: &str) -> Vec<u64> {
+    let Some(arr) = frontend_orders.as_array() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for ord in arr {
+        if ord["coin"].as_str() != Some(coin) {
+            continue;
+        }
+        if ord["isPositionTpsl"].as_bool() != Some(true) {
+            continue;
+        }
+        if let Some(oid) = parse_order_oid(ord) {
+            out.push(oid);
+        }
+    }
+    out
+}
+
 /// Van-e nyitott `isPositionTpsl` order a coinon, amelynek `sz` megegyezik a pozíció abszolút méretével.
 pub fn frontend_position_tpsl_matches_pos(frontend_orders: &Value, coin: &str, pos_abs: f64) -> bool {
     if !pos_abs.is_finite() || pos_abs < 1e-9 {

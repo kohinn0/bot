@@ -18,6 +18,7 @@ use crate::network::client::{
     exchange_order_submission_ok, exchange_response_has_post_only_reject,
     filter_cancel_oids_excluding_position_tpsl_triggers,
     frontend_position_tpsl_matches_pos,
+    collect_position_tpsl_oids,
     HyperliquidClient,
 };
 use crate::network::feed::HyperliquidFeed;
@@ -216,6 +217,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let maker_fee_rate_f = app_config.strategy.maker_fee_rate;
     let taker_fee_rate_f = app_config.strategy.taker_fee_rate;
     let is_mainnet_f = is_mainnet;
+    let hl_user_f = hl_user.clone();
 
     tokio::spawn(async move {
         while let Ok(fill) = fill_rx.recv().await {
@@ -231,6 +233,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
 
             if *pos != 0.0 {
+                // ⏳ DEBOUNCE: Várunk 60ms-t, hátha további fill-ek is jönnek (ladder részleges kitöltés).
+                // Ez megakadályozza, hogy minden egyes részleges fill külön TP/SL-t indítson.
+                drop(pos); // Oldjuk fel a lockt a sleep alatt
+                tokio::time::sleep(tokio::time::Duration::from_millis(60)).await;
+
+                let mut pos = pos_t.lock().await; // Kérjük vissza a friss pozíciót
+                if *pos == 0.0 {
+                    continue; // Ha közben zárt, hagyja ki
+                }
+
                 let vol = { *vol_t.lock().await };
                 let tp_side = if *pos > 0.0 { "Sell" } else { "Buy" };
 
@@ -256,7 +268,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 };
 
-                // Teljes nyitott pozíció méretére TP/SL (nem csak az utolsó fill chunk).
+                // 🧹 CANCEL EXISTING TP/SL: Töröljük a régi positionTpsl ordereket, mielőtt újat teszünk.
+                // Ez megakadályozza a duplikált Triggered + Rejected párosokat.
+                if let Ok(fe_orders) = rest_client_f.get_frontend_open_orders(hl_user_f.as_str()).await {
+                    let old_tpsl_oids = collect_position_tpsl_oids(&fe_orders, &fill.coin);
+                    if !old_tpsl_oids.is_empty() {
+                        info!("🧹 Régi TP/SL orderek törlése ({} db) fill után...", old_tpsl_oids.len());
+                        let cancel_action_f = om_f.build_cancel_payload(&old_tpsl_oids);
+                        let cancel_nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+                        if let Ok(csig) = signer_f.sign_l1_action(&cancel_action_f, cancel_nonce, is_mainnet_f).await {
+                            let _ = rest_client_f.send_l1_action(&cancel_action_f, cancel_nonce, csig).await;
+                            tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+                        }
+                    }
+                }
+
+                // TP/SL a teljes nyitott pozíció méretére (nem csak az utolsó fill chunk).
                 let protective_sz = om_f.quantize_position_sz(*pos);
                 let exit_action = om_f.build_protective_tpsl_payload(tp_side, tp_price, sl_price, protective_sz);
                 let e_nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
@@ -787,6 +814,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     "🛡️ FAILSAFE TP/SL kihagyva: már van position TP/SL a méretnek megfelelően"
                                 );
                                 continue;
+                            }
+
+                            // 🧹 CANCEL EXISTING TP/SL: Töröljük a régi (nem megfelelő méretű) positionTpsl ordereket
+                            // mielőtt újat rakunk ki. Ez megakadályozza a Triggered + Rejected duplikátumokat.
+                            let stale_oids = collect_position_tpsl_oids(&fe_prot, &coin_reconcile);
+                            if !stale_oids.is_empty() {
+                                info!("🧹 FAILSAFE: Régi TP/SL orderek törlése ({} db) reconcile előtt...", stale_oids.len());
+                                let cancel_a = om_reconcile.build_cancel_payload(&stale_oids);
+                                let cn = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+                                if let Ok(csig) = signer_r.sign_l1_action(&cancel_a, cn, is_mainnet_reconcile).await {
+                                    let _ = rest_client_r.send_l1_action(&cancel_a, cn, csig).await;
+                                    tokio::time::sleep(tokio::time::Duration::from_millis(30)).await;
+                                }
                             }
                         }
 
