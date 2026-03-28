@@ -42,10 +42,10 @@
         "exit": {
             "take_profit": {
                 "enabled": true,
-                "min_profit_ticks": 20,
-                "min_sl_ticks": 35,
+                "min_profit_ticks": 35,
+                "min_sl_ticks": 20,
                 "max_profit_ticks": 500,
-                "comment": "SOL ~$130: 20 tick=0.20$ brutto, fee~0.09$ → netto ~0.11$; SL 35 tick=0.35$ R:R ~1.75:1"
+                "comment": "SOL ~$130: TP 35 tick=0.35$ brutto, SL 20 tick=0.20$ → R:R ~1.75:1 (reward:risk)"
             }
         }
     },

@@ -400,10 +400,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                     continue;
                 }
-                // Daily profit target: stop trading when profit >= 1% of starting equity
-                if profit >= session_start_equity * 0.01 {
+                // Daily profit target: stop trading when profit >= 5% of starting equity
+                if profit >= session_start_equity * 0.05 {
                     tracing::info!(
-                        "✅ DAILY PROFIT TARGET REACHED (profit=${:.2} >= 1% of start equity ${:.2}), stopping entries.",
+                        "✅ DAILY PROFIT TARGET REACHED (profit=${:.2} >= 5% of start equity ${:.2}), stopping entries.",
                         profit,
                         session_start_equity
                     );
