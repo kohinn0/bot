@@ -139,8 +139,8 @@ impl OrderManager {
         // a nettó profit min 1× fee legyen (nem csak nullás)
         let fee_min_dist = round_trip_fee_px * 2.0;
         let config_min_dist = tp_min_ticks * min_tick;
-        let tp_dist = f64::max(vol_px * 1.5, f64::max(config_min_dist, fee_min_dist));
-        let sl_dist = f64::max(vol_px * 3.0, sl_min_ticks * min_tick);
+        let tp_dist = f64::max(vol_px * 2.5, f64::max(config_min_dist, fee_min_dist));
+        let sl_dist = f64::max(vol_px * 1.5, sl_min_ticks * min_tick);
         let raw_tp = if exchange_pos > 0.0 {
             ref_px + tp_dist
         } else {
@@ -255,7 +255,7 @@ impl OrderManager {
             best_bid,
             best_ask,
             sz_usd,
-            2.0,
+            1.0,
             max_close_total_sz,
         )
     }

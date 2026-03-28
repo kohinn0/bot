@@ -131,7 +131,7 @@ impl AppConfig {
             min_signal_interval_ms: parsed["signal_engine"]["debounce"]["min_time_between_entries_ms"]
                 .as_u64()
                 .unwrap_or(12000),
-            max_daily_loss_usd: rm["daily_limits"]["max_daily_loss_usd"].as_f64().unwrap_or(10.0).min(5.0),
+            max_daily_loss_usd: rm["daily_limits"]["max_daily_loss_usd"].as_f64().unwrap_or(50.0),
             max_daily_trades: rm["daily_limits"]["max_daily_trades"].as_u64().unwrap_or(25).min(10) as u32,
             tp_min_ticks: { // increase minimum TP ticks
                 let raw = om["exit"]["take_profit"]["min_profit_ticks"].as_f64().unwrap_or(12.0);
@@ -147,10 +147,9 @@ impl AppConfig {
 
         info!("✅ Konfiguráció betöltve: {}, Dry Run: {}", strategy.coin, is_dry_run);
         // Apply post‑load adjustments for profitability
-        strategy.z_score_threshold = strategy.z_score_threshold.max(5.0);
         strategy.tp_min_ticks = strategy.tp_min_ticks.max(15.0);
-        strategy.sl_min_ticks = strategy.sl_min_ticks.max(30.0);
-        strategy.max_daily_loss_usd = strategy.max_daily_loss_usd.min(5.0);
+        strategy.sl_min_ticks = strategy.sl_min_ticks.max(10.0);
+        strategy.max_daily_loss_usd = strategy.max_daily_loss_usd.min(50.0);
         strategy.max_daily_trades = strategy.max_daily_trades.min(10);
         let strategy = strategy; // re‑bind as immutable for later use
 
