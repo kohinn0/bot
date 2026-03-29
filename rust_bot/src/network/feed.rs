@@ -74,11 +74,9 @@ pub struct HyperliquidFeed {
 }
 
 impl HyperliquidFeed {
-    /// Megbízások HTTP-n mennek (`/exchange`); a WS csak L2 + userEvents.
     pub fn new(coin: &str, user_address: &str, is_mainnet: bool) -> Self {
         let (fill_tx, _) = broadcast::channel(100);
         let ws_url = if is_mainnet { HL_MAINNET_WSS_URL } else { HL_TESTNET_WSS_URL };
-
         Self {
             coin: coin.to_string(),
             user_address: user_address.to_string(),
@@ -94,8 +92,7 @@ impl HyperliquidFeed {
     }
 
     pub async fn clear_post_only_reject_flag(&self) {
-        let mut f = self.post_only_reject_flag.lock().await;
-        *f = false;
+        *self.post_only_reject_flag.lock().await = false;
     }
 
     pub async fn post_only_reject_pending(&self) -> bool {
@@ -109,15 +106,12 @@ impl HyperliquidFeed {
         current
     }
 
-    /// HTTP `/exchange` válasz feldolgozásához (WS post helyett).
     pub async fn set_post_only_reject_flag(&self, pending: bool) {
-        let mut f = self.post_only_reject_flag.lock().await;
-        *f = pending;
+        *self.post_only_reject_flag.lock().await = pending;
     }
 
     pub async fn start(self: Arc<Self>) {
         let this = self.clone();
-
         tokio::spawn(async move {
             loop {
                 info!("🔗 Kapcsolódás a Hyperliquid WS-hez...");
@@ -125,25 +119,17 @@ impl HyperliquidFeed {
 
                 match connect_async(url).await {
                     Ok((mut ws_stream, _)) => {
-                        info!("✅ Hyperliquid WS Connected (Market + User stream)");
+                        info!("✅ Hyperliquid WS Connected");
 
                         let sub_l2 = WsRequest::Subscribe {
                             subscription: SubscriptionData::L2Book { coin: this.coin.clone() },
                         };
-                        ws_stream
-                            .send(Message::Text(serde_json::to_string(&sub_l2).unwrap()))
-                            .await
-                            .ok();
+                        ws_stream.send(Message::Text(serde_json::to_string(&sub_l2).unwrap())).await.ok();
 
                         let sub_user = WsRequest::Subscribe {
-                            subscription: SubscriptionData::UserEvents {
-                                user: this.user_address.clone(),
-                            },
+                            subscription: SubscriptionData::UserEvents { user: this.user_address.clone() },
                         };
-                        ws_stream
-                            .send(Message::Text(serde_json::to_string(&sub_user).unwrap()))
-                            .await
-                            .ok();
+                        ws_stream.send(Message::Text(serde_json::to_string(&sub_user).unwrap())).await.ok();
 
                         while let Some(msg) = ws_stream.next().await {
                             match msg {
@@ -154,12 +140,10 @@ impl HyperliquidFeed {
                             }
                         }
                     }
-                    Err(e) => {
-                        error!("❌ Sikertelen WS kapcsolódás: {}", e);
-                    }
+                    Err(e) => error!("❌ Sikertelen WS kapcsolódás: {}", e),
                 }
 
-                warn!("⚠️ WS Kapcsolat megszakadt. Újracsatlakozás 1mp múlva...");
+                warn!("⚠️ WS megszakadt. Újracsatlakozás 1mp múlva...");
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
             }
         });
@@ -169,14 +153,10 @@ impl HyperliquidFeed {
         if let Ok(response) = serde_json::from_str::<WsResponse>(text) {
             match response.channel.as_str() {
                 "l2Book" => {
-                    if let Some(data) = response.data {
-                        self.process_l2_book(data).await;
-                    }
+                    if let Some(data) = response.data { self.process_l2_book(data).await; }
                 }
                 "userEvents" | "user" => {
-                    if let Some(data) = response.data {
-                        self.process_user_event(data).await;
-                    }
+                    if let Some(data) = response.data { self.process_user_event(data).await; }
                 }
                 "post" => {
                     if let Some(data) = response.data {
@@ -185,48 +165,33 @@ impl HyperliquidFeed {
                     }
                 }
                 "info" | "error" => {
-                    info!("📡 WS {} üzenet érkezett", response.channel);
+                    info!("📡 WS {} üzenet", response.channel);
                 }
-                _ => {
-                    // Ignore noisy channels we don't explicitly track.
-                }
+                _ => {}
             }
             return;
         }
 
-        // WS "post" responses often don't include "channel" and would be missed otherwise.
         if let Ok(raw) = serde_json::from_str::<serde_json::Value>(text) {
-            let has_id = raw.get("id").is_some();
-            let has_status = raw.get("status").is_some();
-            let has_response = raw.get("response").is_some();
-            let has_error = raw.get("error").is_some();
-
-            if has_error {
+            if raw.get("error").is_some() {
                 error!("❌ WS POST ERROR: {}", text);
                 return;
             }
-
-            if has_id || has_status || has_response {
+            if raw.get("id").is_some() || raw.get("status").is_some() || raw.get("response").is_some() {
                 info!("📡 WS POST FEEDBACK érkezett");
-                return;
             }
         }
     }
 
     async fn log_post_summary(&self, data: &serde_json::Value) {
         let id = data["id"].as_u64().unwrap_or(0);
-        let response = &data["response"];
-        let payload = &response["payload"];
+        let payload = &data["response"]["payload"];
         let status = payload["status"].as_str().unwrap_or("unknown");
         let resp_type = payload["response"]["type"].as_str().unwrap_or("");
 
         if status != "ok" {
-            warn!(
-                "❌ WS POST id={} status={} — teljes válasz: {}",
-                id,
-                status,
-                serde_json::to_string(data).unwrap_or_else(|_| "(serialize fail)".to_string())
-            );
+            warn!("❌ WS POST id={} status={} — válasz: {}", id, status,
+                serde_json::to_string(data).unwrap_or_default());
             return;
         }
 
@@ -241,101 +206,78 @@ impl HyperliquidFeed {
 
             if let Some(arr) = statuses {
                 for s in arr {
-                    if s.get("resting").is_some() {
-                        resting += 1;
-                    } else if s.get("filled").is_some() {
-                        filled += 1;
-                    } else if s.get("error").is_some() {
+                    if s.get("resting").is_some() { resting += 1; }
+                    else if s.get("filled").is_some() { filled += 1; }
+                    else if s.get("error").is_some() {
                         errored += 1;
                         if sample_error.is_none() {
-                            sample_error = s
-                                .get("error")
-                                .and_then(|v| v.as_str())
-                                .map(|v| v.to_string());
+                            sample_error = s.get("error").and_then(|v| v.as_str()).map(|v| v.to_string());
                         }
-                    } else {
-                        other += 1;
-                    }
+                    } else { other += 1; }
                 }
             }
 
-            if let Some(err) = sample_error {
+            if let Some(ref err) = sample_error {
                 if err.contains("Post only order would have immediately matched") {
-                    let mut f = self.post_only_reject_flag.lock().await;
-                    *f = true;
+                    *self.post_only_reject_flag.lock().await = true;
                 }
-                warn!(
-                    "⚠️ POST order status detail (id={}): resting={}, filled={}, errored={}, other={}, sample_error={}",
-                    id, resting, filled, errored, other, err
-                );
+                warn!("⚠️ POST order (id={}): resting={} filled={} errored={} other={} err={}",
+                    id, resting, filled, errored, other, err);
             } else {
-                let mut f = self.post_only_reject_flag.lock().await;
-                *f = false;
-                info!(
-                    "✅ POST order ok (id={}, statuses={}, resting={}, filled={}, errored={}, other={})",
-                    id, count, resting, filled, errored, other
-                );
+                *self.post_only_reject_flag.lock().await = false;
+                info!("✅ POST order ok (id={} statuses={} resting={} filled={} errored={} other={})",
+                    id, count, resting, filled, errored, other);
             }
             return;
         }
 
         if resp_type == "cancel" {
             let statuses = payload["response"]["data"]["statuses"].as_array();
-            let mut success = 0usize;
-            let mut non_success = 0usize;
+            let (mut success, mut non_success) = (0usize, 0usize);
             if let Some(arr) = statuses {
                 for s in arr {
-                    if s.as_str() == Some("success") {
-                        success += 1;
-                    } else {
-                        non_success += 1;
-                    }
+                    if s.as_str() == Some("success") { success += 1; } else { non_success += 1; }
                 }
             }
-            info!("🧹 POST cancel ok (id={}, success={}, other={})", id, success, non_success);
+            info!("🧹 POST cancel ok (id={} success={} other={})", id, success, non_success);
             return;
         }
 
-        info!("📡 POST ok (id={}, type={})", id, resp_type);
+        info!("📡 POST ok (id={} type={})", id, resp_type);
     }
 
     async fn track_post_order_oids(&self, data: &serde_json::Value) {
         let response = &data["response"];
-        if response["type"].as_str().unwrap_or("") != "action" {
-            return;
-        }
+        if response["type"].as_str().unwrap_or("") != "action" { return; }
         let action_payload = &response["payload"];
-        if action_payload["status"].as_str().unwrap_or("") != "ok" {
-            return;
-        }
-        if action_payload["response"]["type"].as_str().unwrap_or("") != "order" {
-            return;
-        }
+        if action_payload["status"].as_str().unwrap_or("") != "ok" { return; }
+        if action_payload["response"]["type"].as_str().unwrap_or("") != "order" { return; }
+
         if let Some(statuses) = action_payload["response"]["data"]["statuses"].as_array() {
             let mut tracked = self.open_order_oids.lock().await;
             let before = tracked.len();
             for status in statuses {
-                let oid = status["resting"]["oid"]
-                    .as_u64()
-                    .or_else(|| status["resting"]["oid"].as_str().and_then(|v| v.parse::<u64>().ok()))
+                let oid = status["resting"]["oid"].as_u64()
+                    .or_else(|| status["resting"]["oid"].as_str().and_then(|v| v.parse().ok()))
                     .or_else(|| status["oid"].as_u64())
-                    .or_else(|| status["oid"].as_str().and_then(|v| v.parse::<u64>().ok()));
-                if let Some(oid) = oid {
-                    tracked.push(oid);
-                }
+                    .or_else(|| status["oid"].as_str().and_then(|v| v.parse().ok()));
+                if let Some(oid) = oid { tracked.push(oid); }
             }
             let added = tracked.len().saturating_sub(before);
             if added > 0 {
-                info!("🧷 OID TRACK: {} új nyitott order OID mentve", added);
+                info!("🧷 OID TRACK: {} új OID mentve", added);
             } else {
-                warn!("⚠️ OID TRACK: order POST ok, de nem találtam OID-t a statuses mezőben");
+                warn!("⚠️ OID TRACK: order POST ok, de nincs OID a statuses-ban");
             }
         }
     }
 
     async fn process_l2_book(&self, data: serde_json::Value) {
-        // [Paroljuk a bonyolult L2 struktúrát...]
-        if let (Some(levels), Some(time), Some(coin)) = (data["levels"].as_array(), data["time"].as_u64(), data["coin"].as_str()) {
+        if let (Some(levels), Some(time), Some(coin)) = (
+            data["levels"].as_array(),
+            data["time"].as_u64(),
+            data["coin"].as_str(),
+        ) {
             if levels.len() == 2 && coin == self.coin {
                 let bids = &levels[0];
                 let asks = &levels[1];
@@ -343,13 +285,15 @@ impl HyperliquidFeed {
                 if let (Some(best_bid), Some(best_ask)) = (bids.get(0), asks.get(0)) {
                     let bid_px: f64 = best_bid["px"].as_str().unwrap_or("0").parse().unwrap_or(0.0);
                     let ask_px: f64 = best_ask["px"].as_str().unwrap_or("0").parse().unwrap_or(0.0);
-                    
-                    let mut bid_vol = 0.0;
-                    let mut ask_vol = 0.0;
-                    for i in 0..std::cmp::min(3, bids.as_array().map(|a| a.len()).unwrap_or(0)) {
+
+                    let mut bid_vol = 0.0f64;
+                    let mut ask_vol = 0.0f64;
+                    let bid_depth = bids.as_array().map(|a| a.len()).unwrap_or(0).min(3);
+                    let ask_depth = asks.as_array().map(|a| a.len()).unwrap_or(0).min(3);
+                    for i in 0..bid_depth {
                         bid_vol += bids[i]["sz"].as_str().unwrap_or("0").parse::<f64>().unwrap_or(0.0);
                     }
-                    for i in 0..std::cmp::min(3, asks.as_array().map(|a| a.len()).unwrap_or(0)) {
+                    for i in 0..ask_depth {
                         ask_vol += asks[i]["sz"].as_str().unwrap_or("0").parse::<f64>().unwrap_or(0.0);
                     }
 
@@ -366,7 +310,6 @@ impl HyperliquidFeed {
     }
 
     async fn process_user_event(&self, data: serde_json::Value) {
-        // User events: fills, fundings, etc.
         if let Some(fills) = data["fills"].as_array() {
             for fill in fills {
                 let event = FillEvent {
