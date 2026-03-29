@@ -33,9 +33,6 @@ pub struct SignalEngine {
 
     // Imbalance momentum
     prev_imbalance: f64,
-
-    // Utolsó valós adat timestamp (staleness check)
-    last_data_ts: u64,
 }
 
 impl SignalEngine {
@@ -50,7 +47,6 @@ impl SignalEngine {
             bar_open_mid: 0.0,
             bar_start_ms: 0,
             prev_imbalance: 0.5,
-            last_data_ts: 0,
         }
     }
 
