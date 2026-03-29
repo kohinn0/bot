@@ -235,17 +235,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let profit = (current_equity - session_start_equity).max(0.0);
                 let trades_done = trade_guard_t.load(Ordering::Relaxed);
 
-                if drawdown >= max_daily_loss_usd {
+                // Daily loss limit: fix USD cap VAGY az aznapi egyenleg 15%-a,
+                // amelyik KISEBB (így nagyobb számlánal is arányos a védelem)
+                let effective_loss_limit = max_daily_loss_usd
+                    .min(session_start_equity * 0.15);
+
+                if drawdown >= effective_loss_limit {
                     tracing::warn!(
-                        "🛑 DAILY LOSS LIMIT (dd=${:.2} >= ${:.2}), trading halted.",
-                        drawdown, max_daily_loss_usd
+                        "🛑 DAILY LOSS LIMIT (dd=${:.2} >= ${:.2} = min(${:.2}, 15% of ${:.2})), trading halted.",
+                        drawdown, effective_loss_limit, max_daily_loss_usd, session_start_equity
                     );
                     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                     continue;
                 }
+                // Daily profit target: aznapi induló egyenleg 5%-a
                 if profit >= session_start_equity * 0.05 {
                     tracing::info!(
-                        "✅ DAILY PROFIT TARGET (profit=${:.2} >= 5% of ${:.2}), stopping entries.",
+                        "✅ DAILY PROFIT TARGET (profit=${:.2} >= 5% of today's ${:.2}), stopping entries.",
                         profit, session_start_equity
                     );
                     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
