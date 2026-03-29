@@ -4,22 +4,38 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+// ── Időalapú bar (100ms aggregált return) ────────────────────────────────────
+// A probléma az eredeti kódban: WS L2 tick ~1ms-enként jön, 200 tick = ~200ms.
+// Ennyi tick-en a log_ret-ek szinte mind 0.0 → std_dev → 0 → z_score robban
+// bármilyen apró elmozdulásra → folyamatos false signal.
+//
+// Megoldás: 100ms-es aggregált OHLC bar-ok. Minden bar = 100ms legjobb mid-je.
+// 300 bar = 30 másodperc statisztikai ablak → stabil std_dev, megbízható z-score.
+const BAR_DURATION_MS: u64 = 100;
+const BAR_HISTORY: usize = 300; // 300 × 100ms = 30 másodperc
+const WARMUP_BARS: usize = 30;  // legalább 3mp adat kell a z-score-hoz
+
 pub struct SignalEngine {
     config: StrategyConfig,
     state_ref: Arc<RwLock<L2BookState>>,
-    return_history: VecDeque<f64>,
-    history_limit: usize,
-    
-    // O(1) running stats
+
+    // Időalapú bar-ok (log_return-ök)
+    bar_returns: VecDeque<f64>,
+
+    // O(1) futó összesítők (numerikusan stabil)
     sum_x: f64,
     sum_x2: f64,
-    
-    // Stability tracking
-    tick_count: u64,
-    
-    // Imbalance tracking
+    recalc_counter: u64,
+
+    // Aktuális bar állapota
+    bar_open_mid: f64,
+    bar_start_ms: u64,
+
+    // Imbalance momentum
     prev_imbalance: f64,
-    prev_mid_price: Option<f64>,
+
+    // Utolsó valós adat timestamp (staleness check)
+    last_data_ts: u64,
 }
 
 impl SignalEngine {
@@ -27,104 +43,141 @@ impl SignalEngine {
         Self {
             config,
             state_ref,
-            return_history: VecDeque::new(),
-            history_limit: 200, // gyorsabb warmup és reagálás
+            bar_returns: VecDeque::with_capacity(BAR_HISTORY + 1),
             sum_x: 0.0,
             sum_x2: 0.0,
-            tick_count: 0,
+            recalc_counter: 0,
+            bar_open_mid: 0.0,
+            bar_start_ms: 0,
             prev_imbalance: 0.5,
-            prev_mid_price: None,
+            last_data_ts: 0,
         }
     }
 
-    /// Matematikailag stabil, HFT-optimalizált szignál generátor
     pub async fn tick(&mut self) -> Option<SignalResult> {
-        // 1. Gyors, non-allocating adat lekérés
-        let (mid_price, imbalance, ts) = {
+        // 1. Adat lekérés – nem allokál
+        let (mid_price, imbalance, ws_ts) = {
             let lock = self.state_ref.read().await;
             (lock.mid_price, lock.imbalance, lock.last_update_ts)
         };
-        
-        // STALENESS CHECK: Ha az adat régebbi mint 500ms, eldobjuk (Latency védelem)
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
-        if now - ts > 500 {
-            return None;
-        }
-        
-        if mid_price == 0.0 {
+
+        if mid_price <= 0.0 {
             return None;
         }
 
-        self.tick_count += 1;
+        // 2. Staleness check: ha a WS adat >500ms régi, hagyjuk ki
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
 
-        // 2. STABILITÁS: Lebegőpontos hiba (Drift) kezelése
-        // 1000 tickenként újraszámoljuk a teljes összeget a VecDeque-ből,
-        // hogy elkerüljük a folyamatos hozzáadás/kivonás okozta pontatlanságot.
-        if self.tick_count % 1000 == 0 {
-            self.sum_x = self.return_history.iter().sum::<f64>();
-            self.sum_x2 = self.return_history.iter().map(|&x| x * x).sum::<f64>();
-        }
-
-        // Return-based signal: numerically more stable across price regimes.
-        let prev_mid = if let Some(v) = self.prev_mid_price {
-            v
-        } else {
-            self.prev_mid_price = Some(mid_price);
-            return None;
-        };
-        self.prev_mid_price = Some(mid_price);
-        if prev_mid <= 0.0 || mid_price <= 0.0 {
+        if ws_ts > 0 && now_ms.saturating_sub(ws_ts) > 500 {
             return None;
         }
-        let log_ret = (mid_price / prev_mid).ln();
 
-        // Running update logic on returns
-        if self.return_history.len() >= self.history_limit {
-            if let Some(old_ret) = self.return_history.pop_front() {
-                self.sum_x -= old_ret;
-                self.sum_x2 -= old_ret * old_ret;
+        // 3. Bar inicializálás első tick-nél
+        if self.bar_start_ms == 0 {
+            self.bar_open_mid = mid_price;
+            self.bar_start_ms = now_ms;
+            return None;
+        }
+
+        // 4. Bar zárás időzítés: ha eltelt BAR_DURATION_MS
+        let bar_age_ms = now_ms.saturating_sub(self.bar_start_ms);
+        if bar_age_ms < BAR_DURATION_MS {
+            // Még nem telt el a bar ideje – nem generálunk szignált
+            return None;
+        }
+
+        // 5. Bar lezárása: log_return számítása (open → close = mid_price)
+        let open = self.bar_open_mid;
+        if open <= 0.0 || mid_price <= 0.0 {
+            // Reset bar
+            self.bar_open_mid = mid_price;
+            self.bar_start_ms = now_ms;
+            return None;
+        }
+
+        let log_ret = (mid_price / open).ln();
+
+        // 6. Futó összesítők frissítése
+        if self.bar_returns.len() >= BAR_HISTORY {
+            if let Some(old) = self.bar_returns.pop_front() {
+                self.sum_x -= old;
+                self.sum_x2 -= old * old;
             }
         }
-        
-        self.return_history.push_back(log_ret);
+        self.bar_returns.push_back(log_ret);
         self.sum_x += log_ret;
         self.sum_x2 += log_ret * log_ret;
 
-        let n = self.return_history.len() as f64;
-        if n < 15.0 {
+        // Lebegőpontos drift-újraszámítás 200 bar-onként
+        self.recalc_counter += 1;
+        if self.recalc_counter % 200 == 0 {
+            self.sum_x = self.bar_returns.iter().sum();
+            self.sum_x2 = self.bar_returns.iter().map(|&x| x * x).sum();
+        }
+
+        // Új bar nyitása
+        self.bar_open_mid = mid_price;
+        self.bar_start_ms = now_ms;
+
+        // 7. Warmup: minimum WARMUP_BARS bar kell
+        let n = self.bar_returns.len() as f64;
+        if (n as usize) < WARMUP_BARS {
             return None;
         }
 
-        // Variancia és Z-Score (numerikusan biztonságos formában)
+        // 8. Z-score számítás (numerikusan stabil)
         let mean = self.sum_x / n;
-        let variance = ((self.sum_x2 / n) - (mean * mean)).max(0.0); // Nincs negatív variancia!
-        let std_dev = variance.sqrt().max(0.0000001);
+        let variance = ((self.sum_x2 / n) - (mean * mean)).max(0.0);
+        let std_dev = variance.sqrt();
+
+        // Minimális std_dev guard: ha a piac teljesen mozdulatlan,
+        // ne generáljunk szignált (pl. éjjeli alacsony volumen).
+        // SOL-on 0.001% alatti napi volatilitás nem reális kereskedési ablak.
+        let min_std_dev = 0.00005; // ~0.005% per 100ms bar → évi ~25% vol
+        if std_dev < min_std_dev {
+            return None;
+        }
+
         let z_score = (log_ret - mean) / std_dev;
         let volatility_px = (std_dev * mid_price).abs();
 
-        // 3. IMBALANCE MOMENTUM (A mentor kedvence)
+        // 9. Imbalance momentum
         let imb_momentum = imbalance - self.prev_imbalance;
         self.prev_imbalance = imbalance;
 
-        // Stratégiai paraméterek
-        let base_threshold = self.config.z_score_threshold; // Most már a config-ból olvassuk!
+        // 10. Szignál logika
+        // Küszöbök:
+        //   z_threshold: config-ból (strategy_maker.json: 3.5 ajánlott)
+        //   imbalance: 0.65/0.35 (közepes vételi/eladói nyomás)
+        //   VAGY momentum: ±0.08 (gyors imbalance elmozdulás)
+        //
+        // Mean-reversion logika:
+        //   z < -threshold → ár erősen esett → Buy (visszapattanás várható)
+        //   z > +threshold → ár erősen nőtt → Sell (visszapattanás várható)
+        //
+        // Megerősítés: imbalance irány megegyezik a várható elmozdulással
+        let threshold = self.config.z_score_threshold;
 
-        // 4. "HÚSEVŐ" HFT ÁRAZÁS
-        // Ha nagy a vételi nyomás (Imbalance + Momentum), ne csak a Mid-re várjunk,
-        // hanem próbáljunk agresszívabban "ráülni" a Bid falra.
-        
-        // Lazább küszöbök: base_threshold (nem sigma_r-rel szorzott), közepesebb imbalance
-        if z_score < -base_threshold && (imbalance > 0.65 || imb_momentum > 0.10) {
+        if z_score < -threshold && (imbalance > 0.65 || imb_momentum > 0.08) {
             return Some(SignalResult {
                 side: "Buy".to_string(),
                 target_mid: mid_price,
                 volatility: volatility_px,
+                z_score,
+                bar_count: self.bar_returns.len(),
             });
-        } else if z_score > base_threshold && (imbalance < 0.35 || imb_momentum < -0.10) {
+        }
+
+        if z_score > threshold && (imbalance < 0.35 || imb_momentum < -0.08) {
             return Some(SignalResult {
                 side: "Sell".to_string(),
                 target_mid: mid_price,
                 volatility: volatility_px,
+                z_score,
+                bar_count: self.bar_returns.len(),
             });
         }
 
@@ -136,4 +189,8 @@ pub struct SignalResult {
     pub side: String,
     pub target_mid: f64,
     pub volatility: f64,
+    /// Debug: z-score értéke a szignálnál (logoláshoz)
+    pub z_score: f64,
+    /// Debug: hány bar van a history-ban (warmup követés)
+    pub bar_count: usize,
 }
