@@ -227,63 +227,60 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
  info!(" Napi reset (UTC éjfél): trade_count=0, drawdown bázis=${:.2}", eq);
  }
 
- if let Some(signal) = signal_engine.tick().await {
- let current_equity = *account_guard_t.lock().await;
- let drawdown = (session_start_equity - current_equity).max(0.0);
- let profit = (current_equity - session_start_equity).max(0.0);
- let trades_done = trade_guard_t.load(Ordering::Relaxed);
+if let Some(signal) = signal_engine.tick().await {
+                let current_equity = *account_guard_t.lock().await;
+                let drawdown = (session_start_equity - current_equity).max(0.0);
+                let profit = (current_equity - session_start_equity).max(0.0);
 
- let effective_loss_limit = max_daily_loss_usd
- .min(session_start_equity * 0.15);
+                // 🚀 1. POZÍCIÓ ELLENŐRZÉSE: Zárni akarunk vagy nyitni?
+                let current_pos: f64 = *pos_sim_t.lock().await;
+                let is_reducing = (current_pos > 0.001 && signal.side == "Sell")
+                    || (current_pos < -0.001 && signal.side == "Buy");
 
- if drawdown >= effective_loss_limit {
- tracing::warn!(
- " DAILY LOSS LIMIT (dd=${:.2} >= ${:.2}), trading halted.",
- drawdown, effective_loss_limit
- );
- tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
- continue;
- }
- 
- if profit >= session_start_equity * 0.05 {
- tracing::info!(
- " DAILY PROFIT TARGET (profit=${:.2} >= 5%), stopping entries.",
- profit
- );
- tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
- continue;
- }
- 
- if trades_done >= max_daily_trades {
- tracing::warn!(" DAILY TRADE LIMIT ({} >= {}), trading halted.", trades_done, max_daily_trades);
- tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
- continue;
- }
- 
- if last_signal_time.elapsed() < min_signal_interval {
- tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
- continue;
- }
+                // 🛡️ 2. KOCKÁZATKEZELÉS: Csak akkor blokkolunk, ha ÚJ pozíciót nyitnánk!
+                if !is_reducing {
+                    // Maximum 10% napi veszteség
+                    let max_loss_pct = 0.10; 
+                    let effective_loss_limit = session_start_equity * max_loss_pct;
 
- *vol_sim_t.lock().await = signal.volatility;
+                    if drawdown >= effective_loss_limit {
+                        tracing::error!(
+                            "🛑 MAX DRAWDOWN ELÉRVE (-{:.1}% / -${:.2}). Új belépés letiltva!", 
+                            max_loss_pct * 100.0, drawdown
+                        );
+                        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                        continue;
+                    }
+                    
+                    // Napi 5% profit cél. Ha nem akarod, hogy leálljon nyerőben, ezt a részt kommenteld ki!
+                    if profit >= session_start_equity * 0.05 {
+                        tracing::info!("✅ DAILY PROFIT TARGET (+5% / +${:.2}), új belépés blokkolva.", profit);
+                        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                        continue;
+                    }
 
- // POZÍCIÓ ELLENŐRZÉSE A SZIGNÁL BEFOGADÁSAKOR
- let current_pos: f64 = *pos_sim_t.lock().await;
- let is_reducing = (current_pos > 0.001 && signal.side == "Sell")
- || (current_pos < -0.001 && signal.side == "Buy");
+                    // ⚠️ A TRADE LIMITET INNEN TELJESEN KIGYOMLÁLTUK. SOSEM FOG LEOKADNI.
+                }
 
- if max_pos_limit == 1 && current_pos.abs() > 0.001 {
- if !is_reducing {
- // Kíméletlen blokkolás, ha nem zárni akarunk. Nincs tovább!
- tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
- continue;
- }
- }
+                if last_signal_time.elapsed() < min_signal_interval {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                    continue;
+                }
 
- info!(
- " SZIGNÁL: {} @ {:.4} | z={:.2} | bars={} | vol={:.4} | pos={:.4}",
- signal.side, signal.target_mid, signal.z_score, signal.bar_count, signal.volatility, current_pos
- );
+                *vol_sim_t.lock().await = signal.volatility;
+
+                // 🛡️ 3. HARD LIMIT: Ha van pozíciónk, és nem zárni akarunk, kíméletlen stop.
+                if max_pos_limit == 1 && current_pos.abs() > 0.001 {
+                    if !is_reducing {
+                        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                        continue;
+                    }
+                }
+
+                info!(
+                    "🚨 SZIGNÁL: {} @ {:.4} | z={:.2} | bars={} | vol={:.4} | pos={:.4}",
+                    signal.side, signal.target_mid, signal.z_score, signal.bar_count, signal.volatility, current_pos
+                );
 
  order_manager.current_pos = current_pos;
 
