@@ -199,119 +199,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Aláíró és Kliens felkészítése a Hálózathoz
     let signer = Arc::new(signer);
     let rest_client = Arc::new(rest_client);
-    // Fill utáni sikeres TP/SL (idő + pozíció) → failsafe ne duplikáljon, ha a méret nem változott.
-    let last_fill_tpsl_ok = Arc::new(tokio::sync::Mutex::new(None::<(Instant, f64)>));
-    // === VALÓS IDEJŰ FILL ÉS POZÍCIÓ FIGYELŐ ===
+    // === VALÓS IDEJŰ FILL FIGYELŐ (csak logolás + trade számláló) ===
     let mut fill_rx = feed.fill_tx.subscribe();
     let trades_t = trade_count.clone();
     let pos_t = current_position.clone();
-    let vol_t = last_volatility.clone();
-    let state_for_fill = state_ref.clone();
-    let signer_f = signer.clone();
-    let rest_client_f = rest_client.clone();
-    let last_fill_tpsl_ok_f = last_fill_tpsl_ok.clone();
-    let om_f = Arc::new(OrderManager::new(app_config.strategy.clone(), asset_idx, sz_decimals));
-    let min_tick = app_config.strategy.min_tick_size;
-    let tp_min_ticks = app_config.strategy.tp_min_ticks;
-    let sl_min_ticks = app_config.strategy.sl_min_ticks;
-    let maker_fee_rate_f = app_config.strategy.maker_fee_rate;
-    let taker_fee_rate_f = app_config.strategy.taker_fee_rate;
-    let is_mainnet_f = is_mainnet;
-    let hl_user_f = hl_user.clone();
 
     tokio::spawn(async move {
         while let Ok(fill) = fill_rx.recv().await {
-            let mut pos = pos_t.lock().await;
-
-            let fill_sz = if fill.side == "B" { fill.sz } else { -fill.sz };
-            *pos += fill_sz;
-
             trades_t.fetch_add(1, Ordering::Relaxed);
+            let pos = { *pos_t.lock().await };
             info!(
-                "📈 Fill {} @ {} sz={} fee=${:.4} → pos {:.4}",
-                fill.coin, fill.px, fill.sz, fill.fee, *pos
+                "📈 Fill {} @ {} sz={} fee=${:.4} (pos from reconcile: {:.4})",
+                fill.coin, fill.px, fill.sz, fill.fee, pos
             );
-
-            if *pos != 0.0 {
-                // ⏳ DEBOUNCE: Várunk 60ms-t, hátha további fill-ek is jönnek (ladder részleges kitöltés).
-                // Ez megakadályozza, hogy minden egyes részleges fill külön TP/SL-t indítson.
-                drop(pos); // Oldjuk fel a lockt a sleep alatt
-                tokio::time::sleep(tokio::time::Duration::from_millis(60)).await;
-
-                let mut pos = pos_t.lock().await; // Kérjük vissza a friss pozíciót
-                if *pos == 0.0 {
-                    continue; // Ha közben zárt, hagyja ki
-                }
-
-                let vol = { *vol_t.lock().await };
-                let tp_side = if *pos > 0.0 { "Sell" } else { "Buy" };
-
-                let mark_mid = { state_for_fill.read().await.mid_price };
-                let (tp_price, sl_price) = match OrderManager::tp_sl_prices_for_position(
-                    *pos,
-                    fill.px,
-                    vol,
-                    min_tick,
-                    tp_min_ticks,
-                    sl_min_ticks,
-                    mark_mid,
-                    maker_fee_rate_f,
-                    taker_fee_rate_f,
-                ) {
-                    Some(p) => p,
-                    None => {
-                        tracing::warn!(
-                            "🛡️ TP/SL kihagyva (clamp): mark={:.4} pos={:.4}",
-                            mark_mid, *pos
-                        );
-                        continue;
-                    }
-                };
-
-                // 🧹 CANCEL EXISTING TP/SL: Töröljük a régi positionTpsl ordereket, mielőtt újat teszünk.
-                // Ez megakadályozza a duplikált Triggered + Rejected párosokat.
-                if let Ok(fe_orders) = rest_client_f.get_frontend_open_orders(hl_user_f.as_str()).await {
-                    let old_tpsl_oids = collect_position_tpsl_oids(&fe_orders, &fill.coin);
-                    if !old_tpsl_oids.is_empty() {
-                        info!("🧹 Régi TP/SL orderek törlése ({} db) fill után...", old_tpsl_oids.len());
-                        let cancel_action_f = om_f.build_cancel_payload(&old_tpsl_oids);
-                        let cancel_nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
-                        if let Ok(csig) = signer_f.sign_l1_action(&cancel_action_f, cancel_nonce, is_mainnet_f).await {
-                            let _ = rest_client_f.send_l1_action(&cancel_action_f, cancel_nonce, csig).await;
-                            tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
-                        }
-                    }
-                }
-
-                // TP/SL a teljes nyitott pozíció méretére (nem csak az utolsó fill chunk).
-                let protective_sz = om_f.quantize_position_sz(*pos);
-                let exit_action = om_f.build_protective_tpsl_payload(tp_side, tp_price, sl_price, protective_sz);
-                let e_nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
-
-                if let Ok(sig) = signer_f.sign_l1_action(&exit_action, e_nonce, is_mainnet_f).await {
-                    match rest_client_f
-                        .send_l1_action(&exit_action, e_nonce, sig)
-                        .await
-                    {
-                        Ok(body) => {
-                            if exchange_order_submission_ok(&body) {
-                                *last_fill_tpsl_ok_f.lock().await =
-                                    Some((Instant::now(), *pos));
-                                info!(
-                                    "🛡️ EXCHANGE TP/SL (HTTP): {} TP @ {:.2} | SL @ {:.2}",
-                                    tp_side, tp_price, sl_price
-                                );
-                            } else {
-                                tracing::warn!(
-                                    "🛡️ TP/SL HTTP válasz (nem ok): {:?}",
-                                    body
-                                );
-                            }
-                        }
-                        Err(e) => tracing::error!("🛡️ TP/SL HTTP küldés hiba: {}", e),
-                    }
-                }
-            }
+            // TP/SL védelmet kizárólag a reconcile loop kezeli (2 mp-enként),
+            // az exchange-ről olvasott valós pozícióval. A fill listener nem
+            // módosítja a pozíciót és nem rak ki TP/SL-t, mert a részleges
+            // fill-ek és a reconcile kölcsönhatása duplikált/rossz méretű
+            // TP/SL ordereket okozott.
         }
     });
 
@@ -347,7 +252,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let vol_reconcile_t = last_volatility.clone();
     let state_t = state_ref.clone();
     let state_reconcile = state_ref.clone();
-    let last_fill_tpsl_ok_r = last_fill_tpsl_ok.clone();
     let om_reconcile = Arc::new(OrderManager::new(app_config.strategy.clone(), asset_idx, sz_decimals));
     let max_pos_limit = app_config.strategy.max_positions;
     let mut last_signal_time = std::time::Instant::now() - std::time::Duration::from_secs(60);
@@ -432,9 +336,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
 
                 // Pozíció lekérése (BBO-t a megbízás előtt frissítjük — cancel után már más lehet)
-                let current_pos = { *pos_sim_t.lock().await };
+                let current_pos: f64 = { *pos_sim_t.lock().await };
 
-                // Egyszerűsített max_positions kontroll: ha 1 a limit, és van pozíciónk, 
+                // Egyszerűsített max_positions kontroll: ha 1 a limit, és van pozíciónk,
                 // csak akkor engedünk újabb jelet, ha az ellentétes irányú (zárás)
                 if max_pos_limit == 1 && current_pos.abs() > 0.001 {
                     let is_reducing = (current_pos > 0.0 && signal.side == "Sell") || (current_pos < 0.0 && signal.side == "Buy");
@@ -764,7 +668,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // === FAILSAFE: REST reconcile a pozícióra + védő TP/SL újraküldés ===
     let coin_reconcile = coin.clone();
-    let min_tick_reconcile = min_tick;
+    let min_tick_reconcile = app_config.strategy.min_tick_size;
     let tp_min_ticks_reconcile = app_config.strategy.tp_min_ticks;
     let sl_min_ticks_reconcile = app_config.strategy.sl_min_ticks;
     let maker_fee_rate_reconcile = app_config.strategy.maker_fee_rate;
@@ -773,7 +677,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::spawn(async move {
         let mut last_protected_pos: f64 = 0.0;
         loop {
-            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
             match rest_client_r.get_user_state(hl_user_r.as_str()).await {
                 Ok(state) => {
@@ -803,15 +707,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     // Re-arm protection if position changed materially or wasn't protected yet.
                     if (exchange_pos.abs() - last_protected_pos.abs()).abs() >= 0.001 {
-                        if let Some((t, sz_at_fill)) = *last_fill_tpsl_ok_r.lock().await {
-                            if t.elapsed() < std::time::Duration::from_secs(15)
-                                && (exchange_pos - sz_at_fill).abs() < 0.002
-                            {
-                                last_protected_pos = exchange_pos;
-                                continue;
-                            }
-                        }
-
                         if let Ok(fe_prot) =
                             rest_client_r.get_frontend_open_orders(hl_user_r.as_str()).await
                         {
