@@ -1,11 +1,14 @@
 {
-    "strategy_name": "pm_ambush_ladder_maker_v2",
+    "strategy_name": "pm_ambush_ladder_maker_v3",
     "strategy_type": "MAKER_ONLY_PRO",
+
     "signal_engine": {
         "debounce": {
-            "min_time_between_entries_ms": 15000
+            "min_time_between_entries_ms": 15000,
+            "comment": "15s cooldown szignálok között – megelőzi a gyors létra-dömpinget sideways piacon"
         }
     },
+
     "order_management": {
         "mode": "ambush_ladder_maker",
         "entry": {
@@ -13,63 +16,74 @@
             "reference_price": "mid",
             "sigma_multiplier": 1.5,
             "min_level_gap_ticks": 5,
+
             "ladder_config": [
                 {
                     "level": 1,
-                    "offset_from_mid_ticks": 0,
-                    "size_pct": 0.4
+                    "offset_from_mid_ticks": 2,
+                    "size_pct": 0.5,
+                    "comment": "Legjobb szint: 2 tick-kel a mid alatt/felett (passive, jó kitöltési arány)"
                 },
                 {
                     "level": 2,
-                    "offset_from_mid_ticks": 0,
-                    "size_pct": 0.3
+                    "offset_from_mid_ticks": 5,
+                    "size_pct": 0.3,
+                    "comment": "Második szint: 5 tick mélyebben (jobb ár, kisebb valószínűség)"
                 },
                 {
                     "level": 3,
-                    "offset_from_mid_ticks": -1,
-                    "size_pct": 0.3
+                    "offset_from_mid_ticks": 10,
+                    "size_pct": 0.2,
+                    "comment": "Harmadik szint: 10 tick – csak erős mozgásnál tölt, legjobb entry"
                 }
             ],
+
             "signal_params": {
-                "z_threshold": 2.3,
-                "comment": "2.3 sigma + 0.65 imbalance = szelektív de aktív; 15s debounce"
+                "z_threshold": 3.5,
+                "comment": "3.5 sigma + bar-alapú számítás = ritka, de megbízható szignál. Az eredeti 2.3 túl sűrűn triggerelt (noise trading)."
             },
+
             "execution": {
                 "post_only": true,
                 "time_in_force": "GTX"
             }
         },
+
         "exit": {
             "take_profit": {
                 "enabled": true,
                 "min_profit_ticks": 35,
                 "min_sl_ticks": 20,
                 "max_profit_ticks": 500,
-                "comment": "SOL ~$130: TP 35 tick=0.35$ brutto, SL 20 tick=0.20$ → R:R ~1.75:1 (reward:risk)"
+                "comment": "SOL ~$82: TP 35 tick = $0.35 bruttó. Round-trip fee (maker+taker) ~$0.049 → nettó ~$0.30 nyereség. R:R ~1.75:1"
             }
         }
     },
+
     "fees": {
         "maker_fee_rate": 0.00015,
         "taker_fee_rate": 0.00045,
-        "comment": "HL standard dijak: maker 0.02% (post-only GTX entry), taker 0.05% (TP/SL trigger piac)"
+        "comment": "Tényleges Hyperliquid Perps díjak: maker 0.015% (post-only GTX entry), taker 0.045% (TP/SL trigger piac). Round-trip = 0.060%."
     },
+
     "risk_management": {
         "position_limits": {
             "max_open_positions": 1,
             "max_notional_usd_per_trade": 40,
             "balance_pct_per_trade": 4.0,
-            "comment": "~$100 számla: 4% × 10x = $40 (cap) → szintenkint $16/$12/$12, mind > HL $10 min"
+            "comment": "$107 számla: 4% × 10x leverage = $42.8 notional (cap $40). Szintenkint: $20/$12/$8 – mind > HL $10 min."
         },
         "leverage": {
             "max_leverage": 10,
             "cross_margin": false
         },
         "daily_limits": {
-            "max_daily_loss_usd": 25,
-            "max_daily_trades": 50
+            "max_daily_loss_usd": 20,
+            "max_daily_trades": 30,
+            "comment": "Konzervatív limitek: $20 veszteség limit (tőke ~19%), 30 trade/nap (15s cooldown-nal max ~60 szignál lehetséges, de 30-nál megáll)"
         }
     },
+
     "technical_precision": {
         "tick_size": 0.01,
         "min_shares": 0.001,
