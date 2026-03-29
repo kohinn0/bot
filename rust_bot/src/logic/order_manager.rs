@@ -400,4 +400,44 @@ impl OrderManager {
 
         OrderAction { type_: "order".to_string(), orders, grouping: "na".to_string() }
     }
+    /// Tick méret lekérése (dust záráshoz a main.rs-ből)
+    pub fn config_tick(&self) -> f64 {
+        self.config.min_tick_size
+    }
+
+    /// Piaci (IOC) zárás dust pozícióhoz – limit order aggresiv árral,
+    /// reduce-only flag-gel. A HL a keresztező limit ordert taker-ként tölt.
+    pub fn build_market_close_payload(
+        &self,
+        is_buy: bool,
+        price: f64,
+        sz: f64,
+    ) -> OrderAction {
+        let sz_step = 10_f64.powi(-(self.sz_decimals as i32));
+        let quantized_sz = ((sz / sz_step).floor() * sz_step).max(self.config.min_shares);
+        let rounded_px = if is_buy {
+            (price / self.config.min_tick_size).ceil() * self.config.min_tick_size
+        } else {
+            (price / self.config.min_tick_size).floor() * self.config.min_tick_size
+        };
+
+        OrderAction {
+            type_: "order".to_string(),
+            orders: vec![OrderWire {
+                a: self.asset_idx,
+                b: is_buy,
+                p: Self::float_to_wire(rounded_px),
+                s: Self::float_to_wire(quantized_sz),
+                r: true, // reduce-only
+                t: OrderTypeWire {
+                    limit: Some(LimitOrderType {
+                        tif: "Ioc".to_string(), // Immediate-or-Cancel = piaci viselkedés
+                    }),
+                    trigger: None,
+                },
+            }],
+            grouping: "na".to_string(),
+        }
+    }
+
 }
