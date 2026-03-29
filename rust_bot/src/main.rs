@@ -413,11 +413,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if let Some(close_sz) = max_close_sz {
                         let est = close_sz * ladder_mid;
                         if est < HL_MIN_ORDER_NOTIONAL_USD {
+                            // DUST POSITION: túl kis méret limit orderhez → piaci (taker) zárás
                             info!(
-                                "⛔ Záró létra kihagyva: ${:.2} < HL min ~${}",
-                                est, HL_MIN_ORDER_NOTIONAL_USD as i32
+                                "🧹 DUST pozíció piaci zárás: {:.4} SOL ≈ ${:.2} (< HL min ${})",
+                                close_sz, est, HL_MIN_ORDER_NOTIONAL_USD as i32
                             );
-                            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                            let is_buy_close = current_pos < 0.0;
+                            let market_px = if is_buy_close {
+                                (best_ask * 1.01 / order_manager.config_tick()).ceil()
+                                    * order_manager.config_tick()
+                            } else {
+                                (best_bid * 0.99 / order_manager.config_tick()).floor()
+                                    * order_manager.config_tick()
+                            };
+                            let market_action = order_manager.build_market_close_payload(
+                                is_buy_close,
+                                market_px,
+                                close_sz,
+                            );
+                            let m_nonce = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+                            if let Ok(sig) = signer_t.sign_l1_action(&market_action, m_nonce, is_mainnet).await {
+                                match rest_client.send_l1_action(&market_action, m_nonce, sig).await {
+                                    Ok(body) => {
+                                        if exchange_order_submission_ok(&body) {
+                                            info!("✅ DUST piaci zárás OK");
+                                        } else {
+                                            tracing::warn!("⚠️ DUST piaci zárás válasz: {:?}", body);
+                                        }
+                                    }
+                                    Err(e) => tracing::error!("❌ DUST piaci zárás hiba: {}", e),
+                                }
+                            }
+                            tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
                             continue;
                         }
                     }
