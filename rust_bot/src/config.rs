@@ -132,7 +132,7 @@ impl AppConfig {
                 .as_u64()
                 .unwrap_or(12000),
             max_daily_loss_usd: rm["daily_limits"]["max_daily_loss_usd"].as_f64().unwrap_or(50.0),
-            max_daily_trades: rm["daily_limits"]["max_daily_trades"].as_u64().unwrap_or(25).min(10) as u32,
+            max_daily_trades: rm["daily_limits"]["max_daily_trades"].as_u64().unwrap_or(25) as u32,
             tp_min_ticks: { // increase minimum TP ticks
                 let raw = om["exit"]["take_profit"]["min_profit_ticks"].as_f64().unwrap_or(12.0);
                 if raw > 50.0 { 20.0 } else { raw.max(15.0) }
@@ -150,7 +150,7 @@ impl AppConfig {
         strategy.tp_min_ticks = strategy.tp_min_ticks.max(15.0);
         strategy.sl_min_ticks = strategy.sl_min_ticks.max(10.0);
         strategy.max_daily_loss_usd = strategy.max_daily_loss_usd.min(50.0);
-        strategy.max_daily_trades = strategy.max_daily_trades.min(10);
+        // max_daily_trades: JSON értéket használjuk, nincs hard cap
         let strategy = strategy; // re‑bind as immutable for later use
 
         let is_mainnet = env::var("IS_MAINNET")
