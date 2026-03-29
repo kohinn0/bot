@@ -8,19 +8,17 @@ pub struct HyperliquidClient {
     pub rest_client: Client,
     pub info_url: String,
     pub exchange_url: String,
-    /// Builder perp DEX; `None` = ne küldjünk `dex` mezőt (alap HL perp).
     perp_dex: Option<String>,
 }
 
 impl HyperliquidClient {
     pub fn new(is_mainnet: bool, perp_dex: Option<String>) -> Self {
-        // Pre-wärmte Verbindung für low latency
         let client = Client::builder()
             .pool_idle_timeout(None)
-            .tcp_nodelay(true) // Disable Nagle's algorithm for min ping
+            .tcp_nodelay(true)
             .build()
             .unwrap();
-            
+
         let base = if is_mainnet {
             "https://api.hyperliquid.xyz"
         } else {
@@ -52,34 +50,22 @@ impl HyperliquidClient {
 
     pub async fn get_meta(&self) -> Result<Value, reqwest::Error> {
         let payload = json!({"type": "meta"});
-        let resp = self.rest_client.post(&self.info_url).json(&payload).send().await?;
-        resp.json::<Value>().await
+        self.rest_client.post(&self.info_url).json(&payload).send().await?.json().await
     }
 
     pub async fn get_user_state(&self, user: &str) -> Result<Value, reqwest::Error> {
         let payload = self.clearinghouse_state_payload(user);
-        let resp = self.rest_client.post(&self.info_url).json(&payload).send().await?;
-        resp.json::<Value>().await
+        self.rest_client.post(&self.info_url).json(&payload).send().await?.json().await
     }
 
     pub async fn get_spot_clearinghouse_state(&self, user: &str) -> Result<Value, reqwest::Error> {
-        let payload = json!({
-            "type": "spotClearinghouseState",
-            "user": user.trim(),
-        });
-        let resp = self.rest_client.post(&self.info_url).json(&payload).send().await?;
-        resp.json::<Value>().await
+        let payload = json!({"type": "spotClearinghouseState", "user": user.trim()});
+        self.rest_client.post(&self.info_url).json(&payload).send().await?.json().await
     }
 
-    /// Hyperliquid egyenleg méretbázishoz: **perp** (`clearinghouseState`) + **spot USDC** (`spotClearinghouseState` összes `USDC.total`).
-    ///
-    /// A webes „Portfolio / Total equity” gyakran több forrást mutat; ha az API itt 0, ellenőrizd, hogy a bot `Pénztárca cím`
-    /// megegyezik-e a Hyperliquid fiók címével, és builder DEX esetén állítsd a `HL_PERP_DEX` env-et.
     pub async fn get_account_value_usd(&self, user: &str) -> Result<f64, String> {
         let user = user.trim();
-        let perp_state = self
-            .get_user_state(user)
-            .await
+        let perp_state = self.get_user_state(user).await
             .map_err(|e| format!("clearinghouseState HTTP: {}", e))?;
 
         if let Some(err) = perp_state.get("error") {
@@ -107,61 +93,46 @@ impl HyperliquidClient {
             return Ok(total);
         }
 
-        let ms_av = perp_state
-            .pointer("/marginSummary/accountValue")
+        let ms_av = perp_state.pointer("/marginSummary/accountValue")
             .map(|v| v.to_string())
             .unwrap_or_else(|| "n/a".to_string());
-        let spot_n = spot_state
-            .get("balances")
+        let spot_n = spot_state.get("balances")
             .and_then(|b| b.as_array())
             .map(|a| a.len());
 
         Err(format!(
-            "HL egyenleg ~0 USD (perp {:.4} + spot USDC {:.4}). perp marginSummary.accountValue={} | spot USDC sorok: {:?}. \
-             Ha a weben van egyenleg: (1) a bot `Pénztárca cím` = Hyperliquid bejelentkezési cím, (2) builder perp → HL_PERP_DEX, (3) perp margin vs spot.",
+            "HL egyenleg ~0 USD (perp {:.4} + spot USDC {:.4}). perp marginSummary.accountValue={} | spot sorok: {:?}.",
             perp_usd, spot_usd, ms_av, spot_n
         ))
     }
 
     pub async fn get_open_orders(&self, user: &str) -> Result<Value, reqwest::Error> {
-        let payload = json!({
-            "type": "openOrders",
-            "user": user
-        });
-        let resp = self.rest_client.post(&self.info_url).json(&payload).send().await?;
-        resp.json::<Value>().await
+        let payload = json!({"type": "openOrders", "user": user});
+        self.rest_client.post(&self.info_url).json(&payload).send().await?.json().await
     }
 
-    /// Nyitott orderek + `isPositionTpsl` / `isTrigger` / `orderType` — TP/SL szűréshez a törlés előtt.
     pub async fn get_frontend_open_orders(&self, user: &str) -> Result<Value, reqwest::Error> {
-        let payload = json!({
-            "type": "frontendOpenOrders",
-            "user": user
-        });
-        let resp = self.rest_client.post(&self.info_url).json(&payload).send().await?;
-        resp.json::<Value>().await
+        let payload = json!({"type": "frontendOpenOrders", "user": user});
+        self.rest_client.post(&self.info_url).json(&payload).send().await?.json().await
     }
 
-    /// Küldi az EIP-712-vel aláírt actiont az exchange végpontra
     pub async fn send_l1_action<T: serde::Serialize>(
         &self,
         action: &T,
         nonce: u64,
         signature: Signature,
     ) -> Result<Value, reqwest::Error> {
-        
-        // Ethers Signature (U256) konvertálás HL formátumba (Hex string)
         let mut r_bytes = [0u8; 32];
         signature.r.to_big_endian(&mut r_bytes);
         let r_hex = hex::encode(r_bytes);
-        
+
         let mut s_bytes = [0u8; 32];
         signature.s.to_big_endian(&mut s_bytes);
         let s_hex = hex::encode(s_bytes);
-        // HL expects legacy Ethereum v (27 or 28) for EIP-712 L1 actions
+
         let v_val = signature.v as u8;
         let v = if v_val < 27 { v_val + 27 } else { v_val };
-        
+
         let payload = json!({
             "action": action,
             "nonce": nonce,
@@ -172,25 +143,17 @@ impl HyperliquidClient {
             }
         });
 
-        let resp = self.rest_client
-            .post(&self.exchange_url)
-            .json(&payload)
-            .send()
-            .await?;
-            
-        resp.json::<Value>().await
+        self.rest_client.post(&self.exchange_url).json(&payload).send().await?.json().await
     }
 }
 
-/// HL `/exchange` order válasz: `response.data.statuses[].resting.oid`
 pub fn collect_resting_oids_from_exchange_response(body: &Value) -> Vec<u64> {
     let mut out = Vec::new();
     let Some(arr) = body.pointer("/response/data/statuses").and_then(|x| x.as_array()) else {
         return out;
     };
     for st in arr {
-        let oid = st
-            .pointer("/resting/oid")
+        let oid = st.pointer("/resting/oid")
             .and_then(|o| o.as_u64().or_else(|| o.as_str().and_then(|s| s.parse().ok())));
         if let Some(o) = oid {
             out.push(o);
@@ -199,7 +162,6 @@ pub fn collect_resting_oids_from_exchange_response(body: &Value) -> Vec<u64> {
     out
 }
 
-/// Van-e „post only would cross” jellegű hiba a válaszban.
 pub fn exchange_response_has_post_only_reject(body: &Value) -> bool {
     let Some(arr) = body.pointer("/response/data/statuses").and_then(|x| x.as_array()) else {
         return false;
@@ -214,7 +176,6 @@ pub fn exchange_response_has_post_only_reject(body: &Value) -> bool {
     false
 }
 
-/// Top `status` == ok és nincs `error` mező egyetlen order status sorban sem.
 pub fn exchange_order_submission_ok(body: &Value) -> bool {
     if body.get("status").and_then(|s| s.as_str()) != Some("ok") {
         return false;
@@ -229,7 +190,6 @@ pub fn exchange_order_submission_ok(body: &Value) -> bool {
     true
 }
 
-/// Cancel válasz: minden sor hibája „oid már nem él” jellegű (nem valódi hiba).
 pub fn cancel_response_only_benign_errors(body: &Value) -> bool {
     if body.get("status").and_then(|s| s.as_str()) != Some("ok") {
         return false;
@@ -238,178 +198,112 @@ pub fn cancel_response_only_benign_errors(body: &Value) -> bool {
         return true;
     };
     for st in arr {
-        let Some(e) = st.get("error").and_then(|x| x.as_str()) else {
-            continue;
-        };
+        let Some(e) = st.get("error").and_then(|x| x.as_str()) else { continue; };
         let benign = e.contains("never placed")
             || e.contains("already canceled")
             || e.contains("already cancelled")
             || e.contains("filled")
             || e.contains("Filled");
-        if !benign {
-            return false;
-        }
+        if !benign { return false; }
     }
     true
 }
 
-/// Összegyűjti az összes `isPositionTpsl` trigger order OID-jét egy coinon — törléshez.
 pub fn collect_position_tpsl_oids(frontend_orders: &Value, coin: &str) -> Vec<u64> {
-    let Some(arr) = frontend_orders.as_array() else {
-        return Vec::new();
-    };
+    let Some(arr) = frontend_orders.as_array() else { return Vec::new(); };
     let mut out = Vec::new();
     for ord in arr {
-        if ord["coin"].as_str() != Some(coin) {
-            continue;
-        }
-        if ord["isPositionTpsl"].as_bool() != Some(true) {
-            continue;
-        }
-        if let Some(oid) = parse_order_oid(ord) {
-            out.push(oid);
-        }
+        if ord["coin"].as_str() != Some(coin) { continue; }
+        if ord["isPositionTpsl"].as_bool() != Some(true) { continue; }
+        if let Some(oid) = parse_order_oid(ord) { out.push(oid); }
     }
     out
 }
 
-/// Van-e nyitott `isPositionTpsl` order a coinon, amelynek `sz` megegyezik a pozíció abszolút méretével.
-pub fn frontend_position_tpsl_matches_pos(frontend_orders: &Value, coin: &str, pos_abs: f64) -> bool {
-    if !pos_abs.is_finite() || pos_abs < 1e-9 {
-        return false;
-    }
+pub fn frontend_position_tpsl_matches_pos(
+    frontend_orders: &Value,
+    coin: &str,
+    pos_abs: f64,
+) -> bool {
+    if !pos_abs.is_finite() || pos_abs < 1e-9 { return false; }
     let eps = (pos_abs * 0.02).max(1e-6).min(0.5);
-    let Some(arr) = frontend_orders.as_array() else {
-        return false;
-    };
+    let Some(arr) = frontend_orders.as_array() else { return false; };
     for ord in arr {
-        if ord["coin"].as_str() != Some(coin) {
-            continue;
-        }
-        if ord["isPositionTpsl"].as_bool() != Some(true) {
-            continue;
-        }
-        let sz = ord["sz"]
-            .as_str()
+        if ord["coin"].as_str() != Some(coin) { continue; }
+        if ord["isPositionTpsl"].as_bool() != Some(true) { continue; }
+        let sz = ord["sz"].as_str()
             .and_then(|s| s.parse::<f64>().ok())
             .or_else(|| ord["sz"].as_f64())
             .unwrap_or(0.0);
-        if (sz - pos_abs).abs() <= eps {
-            return true;
-        }
+        if (sz - pos_abs).abs() <= eps { return true; }
     }
     false
 }
 
 fn parse_order_oid(ord: &Value) -> Option<u64> {
-    ord["oid"]
-        .as_u64()
+    ord["oid"].as_u64()
         .or_else(|| ord["oid"].as_str().and_then(|v| v.parse().ok()))
 }
 
-/// Nem töröljük a position TP/SL és trigger típusú orderek OID-jét (clean slate előtt).
 pub fn filter_cancel_oids_excluding_position_tpsl_triggers(
     frontend_orders: &Value,
     coin: &str,
     oids: Vec<u64>,
 ) -> Vec<u64> {
-    let Some(arr) = frontend_orders.as_array() else {
-        return oids;
-    };
+    let Some(arr) = frontend_orders.as_array() else { return oids; };
     let mut protected = HashSet::new();
     for ord in arr {
-        if ord["coin"].as_str() != Some(coin) {
-            continue;
-        }
+        if ord["coin"].as_str() != Some(coin) { continue; }
         let protect = ord["isPositionTpsl"].as_bool() == Some(true)
             || ord["isTrigger"].as_bool() == Some(true);
         if protect {
-            if let Some(oid) = parse_order_oid(ord) {
-                protected.insert(oid);
-            }
+            if let Some(oid) = parse_order_oid(ord) { protected.insert(oid); }
         }
     }
-    oids.into_iter()
-        .filter(|o| !protected.contains(o))
-        .collect()
+    oids.into_iter().filter(|o| !protected.contains(o)).collect()
 }
 
-/// Létra / sima limit OID-ek `frontendOpenOrders`-ból (TP/SL trigger nélkül).
 pub fn collect_ladder_cancel_oids_from_frontend(frontend_orders: &Value, coin: &str) -> Vec<u64> {
-    let Some(arr) = frontend_orders.as_array() else {
-        return Vec::new();
-    };
+    let Some(arr) = frontend_orders.as_array() else { return Vec::new(); };
     let mut out = Vec::new();
     for ord in arr {
-        if ord["coin"].as_str() != Some(coin) {
-            continue;
-        }
-        if ord["isPositionTpsl"].as_bool() == Some(true) {
-            continue;
-        }
-        if ord["isTrigger"].as_bool() == Some(true) {
-            continue;
-        }
-        if let Some(oid) = parse_order_oid(ord) {
-            out.push(oid);
-        }
+        if ord["coin"].as_str() != Some(coin) { continue; }
+        if ord["isPositionTpsl"].as_bool() == Some(true) { continue; }
+        if ord["isTrigger"].as_bool() == Some(true) { continue; }
+        if let Some(oid) = parse_order_oid(ord) { out.push(oid); }
     }
     out
 }
 
-/// `openOrders` (info) — kevesebb mező mint a `frontendOpenOrders`-nél; trigger / reduce-only kihagyása, ahol látszik.
 pub fn collect_ladder_cancel_oids_from_open_orders(orders: &Value, coin: &str) -> Vec<u64> {
-    let Some(arr) = orders.as_array() else {
-        return Vec::new();
-    };
+    let Some(arr) = orders.as_array() else { return Vec::new(); };
     let mut out = Vec::new();
     for ord in arr {
-        if ord["coin"].as_str() != Some(coin) {
-            continue;
-        }
-        if ord["reduceOnly"].as_bool() == Some(true) {
-            continue;
-        }
-        let has_trigger_px = ord
-            .get("triggerPx")
+        if ord["coin"].as_str() != Some(coin) { continue; }
+        if ord["reduceOnly"].as_bool() == Some(true) { continue; }
+        let has_trigger_px = ord.get("triggerPx")
             .map(|v| !(v.is_null() || v.as_str() == Some("")))
             .unwrap_or(false);
-        if has_trigger_px {
-            continue;
-        }
-        if let Some(oid) = parse_order_oid(ord) {
-            out.push(oid);
-        }
+        if has_trigger_px { continue; }
+        if let Some(oid) = parse_order_oid(ord) { out.push(oid); }
     }
     out
 }
 
 fn parse_json_number(v: &Value) -> Option<f64> {
-    if let Some(s) = v.as_str() {
-        s.parse().ok()
-    } else {
-        v.as_f64()
-    }
+    if let Some(s) = v.as_str() { s.parse().ok() } else { v.as_f64() }
 }
 
-/// Spot USDC összes mennyiség (USD) a `spotClearinghouseState` → `balances` (`coin == "USDC"`, mező: `total`).
 pub fn parse_spot_usdc_total_usd(spot: &Value) -> f64 {
-    let Some(balances) = spot.get("balances").and_then(|b| b.as_array()) else {
-        return 0.0;
-    };
+    let Some(balances) = spot.get("balances").and_then(|b| b.as_array()) else { return 0.0; };
     let mut sum = 0.0;
     for b in balances {
-        if b.get("coin").and_then(|c| c.as_str()) != Some("USDC") {
-            continue;
-        }
-        if let Some(t) = b.get("total").and_then(parse_json_number) {
-            sum += t;
-        }
+        if b.get("coin").and_then(|c| c.as_str()) != Some("USDC") { continue; }
+        if let Some(t) = b.get("total").and_then(parse_json_number) { sum += t; }
     }
     sum
 }
 
-/// Egy `marginSummary` / `crossMarginSummary` blokk: `accountValue`, majd ha az 0, `totalRawUsd`.
 fn margin_block_equity_usd(ms: &Value) -> Option<f64> {
     let av = ms.get("accountValue").and_then(parse_json_number);
     let tr = ms.get("totalRawUsd").and_then(parse_json_number);
@@ -423,10 +317,6 @@ fn margin_block_equity_usd(ms: &Value) -> Option<f64> {
     }
 }
 
-/// Perp `clearinghouseState` → USD egyenleg méretbázishoz: margin blokkok + opcionálisan `withdrawable`.
-///
-/// Ha az API `accountValue`-t 0-nak adja, de `totalRawUsd` / `withdrawable` pozitív, azt használjuk
-/// (ritka séma/állapot; segít elkerülni a téves $0 olvasást).
 pub fn parse_clearinghouse_account_value_usd(state: &Value) -> Option<f64> {
     let mut best: Option<f64> = None;
     for key in ["marginSummary", "crossMarginSummary"] {
@@ -437,9 +327,7 @@ pub fn parse_clearinghouse_account_value_usd(state: &Value) -> Option<f64> {
         }
     }
     if let Some(w) = state.get("withdrawable").and_then(parse_json_number) {
-        if w > 0.0 {
-            best = Some(best.map_or(w, |b| b.max(w)));
-        }
+        if w > 0.0 { best = Some(best.map_or(w, |b| b.max(w))); }
     }
     best
 }
@@ -454,11 +342,13 @@ mod tests {
         let v = json!({"marginSummary": {"accountValue": "100.5", "totalRawUsd": "50"}});
         assert!((parse_clearinghouse_account_value_usd(&v).unwrap() - 100.5).abs() < 1e-6);
     }
+
     #[test]
     fn parse_falls_back_to_total_raw_when_account_zero() {
         let v = json!({"marginSummary": {"accountValue": "0", "totalRawUsd": "87.3"}});
         assert!((parse_clearinghouse_account_value_usd(&v).unwrap() - 87.3).abs() < 1e-6);
     }
+
     #[test]
     fn parse_falls_back_to_withdrawable() {
         let v = json!({
@@ -467,6 +357,7 @@ mod tests {
         });
         assert!((parse_clearinghouse_account_value_usd(&v).unwrap() - 42.0).abs() < 1e-6);
     }
+
     #[test]
     fn parse_all_zero() {
         let v = json!({
