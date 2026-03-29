@@ -7,7 +7,6 @@ use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::Instant;
 use crate::config::AppConfig;
 use crate::logic::signer::HyperliquidSigner;
 use crate::logic::signal::SignalEngine;
@@ -25,25 +24,22 @@ use crate::network::feed::HyperliquidFeed;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Inicializáljuk a loggolást
     let subscriber = FmtSubscriber::builder()
         .with_max_level(Level::INFO)
         .finish();
     tracing::subscriber::set_global_default(subscriber)
         .expect("Failed to set tracing subscriber");
 
-    // Betöltjük a .env fájlt
     dotenv().ok();
-    
+
     info!("🚀 INICIALIZÁLÁS: SebessegBot v3 (Rust/Tokio) 🚀");
 
-    // 1. Konfiguráció Betöltése
+    // 1. Konfiguráció
     let app_config = AppConfig::load();
     let coin = app_config.strategy.coin.clone();
 
-    // 2. Aláíró és Kliens inicializálása
+    // 2. Aláíró és Kliens
     let is_mainnet = app_config.is_mainnet;
-    
     let signer = HyperliquidSigner::new(&app_config.private_key);
     let rest_client = HyperliquidClient::new(is_mainnet, app_config.hl_perp_dex.clone());
 
@@ -57,18 +53,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("🔐 Aláíró cím (PRIVATE_KEY): {}", signer_addr);
     if !hl_user.eq_ignore_ascii_case(&signer_addr) {
-        info!(
-            "👤 HL user (egyenleg, open orders, user WS): {}  ← HL_USER_ADDRESS",
-            hl_user
-        );
+        info!("👤 HL user: {}  ← HL_USER_ADDRESS", hl_user);
     } else {
         info!("👤 HL user = aláíró cím (HL_USER_ADDRESS nincs beállítva)");
     }
 
-    // 3. Asset Meta lekérdezés a HL API-ból (keressük a coin Asset ID-ját és szDecimals-t)
+    // 3. Asset Meta
     let meta = rest_client.get_meta().await.expect("❌ Nem sikerült lekérni a meta adatokat");
-    let mut asset_idx = 0;
-    let mut sz_decimals = 0;
+    let mut asset_idx = 0u32;
+    let mut sz_decimals = 0u32;
     if let Some(universe) = meta["universe"].as_array() {
         for (idx, coin_data) in universe.iter().enumerate() {
             if coin_data["name"].as_str().unwrap_or("") == coin {
@@ -80,7 +73,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     info!("✅ Kereskedési pár: {}, Asset ID: {}, Size Decimals: {}", coin, asset_idx, sz_decimals);
 
-    // 4. WebSocket Feed elindítása
+    // 4. WebSocket Feed
     let feed = Arc::new(HyperliquidFeed::new(&coin, &hl_user, is_mainnet));
     let state_ref = feed.state.clone();
     feed.clone().start().await;
@@ -89,73 +82,46 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let max_daily_loss_usd = app_config.strategy.max_daily_loss_usd;
     let max_daily_trades = app_config.strategy.max_daily_trades;
 
-    // Méret: Hyperliquid perp `accountValue` (clearinghouseState), ha engedélyezett; különben STARTING_EQUITY_USD
-    let use_hl_equity =
-        app_config.use_wallet_balance_for_sizing && !app_config.is_dry_run;
+    // 5. Egyenleg lekérés
+    let use_hl_equity = app_config.use_wallet_balance_for_sizing && !app_config.is_dry_run;
     let (wallet_equity_usd, equity_source): (f64, String) = if use_hl_equity {
         match rest_client.get_account_value_usd(user_address.as_str()).await {
             Ok(v) if v.is_finite() && v > 0.0 => (v, "Hyperliquid perp + spot USDC (API)".to_string()),
             Ok(v) => {
                 tracing::warn!(
-                    "⚠️ HL API egyenleg ~0 (${:.4}) — fallback STARTING_EQUITY_USD. Agent kulcsnál állítsd a HL_USER_ADDRESS-t a Portfolio címre; builder DEX → HL_PERP_DEX; mainnet/testnet.",
+                    "⚠️ HL API egyenleg ~0 (${:.4}) — fallback STARTING_EQUITY_USD.",
                     v
                 );
-                (
-                    app_config.starting_equity_usd,
-                    "fallback STARTING_EQUITY_USD (érvénytelen HL)".to_string(),
-                )
+                (app_config.starting_equity_usd, "fallback STARTING_EQUITY_USD (érvénytelen HL)".to_string())
             }
             Err(e) => {
-                tracing::warn!(
-                    "⚠️ HL egyenleg lekérés sikertelen: {} — fallback STARTING_EQUITY_USD",
-                    e
-                );
-                (
-                    app_config.starting_equity_usd,
-                    "fallback STARTING_EQUITY_USD (API hiba)".to_string(),
-                )
+                tracing::warn!("⚠️ HL egyenleg lekérés sikertelen: {} — fallback", e);
+                (app_config.starting_equity_usd, "fallback STARTING_EQUITY_USD (API hiba)".to_string())
             }
         }
     } else {
-        let why = if app_config.is_dry_run {
-            "DRY_RUN"
-        } else if !app_config.use_wallet_balance_for_sizing {
-            "USE_WALLET_BALANCE_FOR_SIZING=false"
-        } else {
-            "kikapcsolva"
-        };
-        (
-            app_config.starting_equity_usd,
-            format!("STARTING_EQUITY_USD ({})", why),
-        )
+        let why = if app_config.is_dry_run { "DRY_RUN" }
+                  else if !app_config.use_wallet_balance_for_sizing { "USE_WALLET_BALANCE_FOR_SIZING=false" }
+                  else { "kikapcsolva" };
+        (app_config.starting_equity_usd, format!("STARTING_EQUITY_USD ({})", why))
     };
 
-    // Session drawdown: induló HL/fallback egyenleg (bot indítás pillanata)
     let session_start_equity = wallet_equity_usd;
-    info!(
-        "💵 Számlaérték (méret + drawdown bázis): ${:.2} — forrás: {}",
-        wallet_equity_usd, equity_source
-    );
+    info!("💵 Számlaérték: ${:.2} — forrás: {}", wallet_equity_usd, equity_source);
 
     let wallet_equity = Arc::new(tokio::sync::Mutex::new(wallet_equity_usd));
-    let initial_notional = app_config
-        .strategy
-        .notional_per_level_usd(wallet_equity_usd);
+    let initial_notional = app_config.strategy.notional_per_level_usd(wallet_equity_usd);
     let target_notional_usd = Arc::new(tokio::sync::Mutex::new(initial_notional));
-
     let trade_count = Arc::new(AtomicU32::new(0));
-    let current_position = Arc::new(tokio::sync::Mutex::new(0.0));
-    let last_volatility = Arc::new(tokio::sync::Mutex::new(0.01));
+    let current_position = Arc::new(tokio::sync::Mutex::new(0.0f64));
+    let last_volatility = Arc::new(tokio::sync::Mutex::new(0.01f64));
 
-    info!(
-        "💰 Kereskedési méret (notional): ${:.2} per szint (követi a számlaértéket, ha HL frissítés fut)",
-        initial_notional
-    );
+    info!("💰 Kereskedési méret (notional): ${:.2} per szint", initial_notional);
 
-    // Háttérben: számlaérték + cél-notional frissítése a tőzsdéről
+    // Háttér: egyenleg frissítése
     if use_hl_equity {
         let rest_w = rest_client.clone();
-        let addr_w = user_address.clone(); // String — 'static a háttér taskban
+        let addr_w = user_address.clone();
         let wallet_w = wallet_equity.clone();
         let target_w = target_notional_usd.clone();
         let strat_w = app_config.strategy.clone();
@@ -164,85 +130,63 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_secs(sec)).await;
                 match rest_w.get_account_value_usd(&addr_w).await {
-                    Ok(v) => {
-                        if v.is_finite() && v > 0.0 {
-                            let n = strat_w.notional_per_level_usd(v);
-                            {
-                                let mut w = wallet_w.lock().await;
-                                *w = v;
-                            }
-                            {
-                                let mut t = target_w.lock().await;
-                                *t = n;
-                            }
-                            tracing::debug!(
-                                "🔄 HL egyenleg frissítve: ${:.2} → notional/szint ${:.2}",
-                                v,
-                                n
-                            );
-                        } else {
-                            tracing::warn!("⚠️ HL accountValue kihagyva (érvénytelen): {}", v);
-                        }
+                    Ok(v) if v.is_finite() && v > 0.0 => {
+                        let n = strat_w.notional_per_level_usd(v);
+                        *wallet_w.lock().await = v;
+                        *target_w.lock().await = n;
+                        tracing::debug!("🔄 HL egyenleg frissítve: ${:.2} → notional ${:.2}", v, n);
                     }
+                    Ok(v) => tracing::warn!("⚠️ HL accountValue kihagyva (érvénytelen): {}", v),
                     Err(e) => tracing::warn!("⚠️ HL egyenleg frissítés hiba: {}", e),
                 }
             }
         });
     }
-    
-    // 5. Szignál motor és Order Manager inicializálása
+
+    // 6. Signal motor + Order Manager
     let mut signal_engine = SignalEngine::new(app_config.strategy.clone(), state_ref.clone());
     let mut order_manager = OrderManager::new(app_config.strategy.clone(), asset_idx, sz_decimals);
-    
     let is_dry_run = app_config.is_dry_run;
 
-    // Aláíró és Kliens felkészítése a Hálózathoz
     let signer = Arc::new(signer);
     let rest_client = Arc::new(rest_client);
-    // === VALÓS IDEJŰ FILL FIGYELŐ (csak logolás + trade számláló) ===
+
+    // Fill figyelő
     let mut fill_rx = feed.fill_tx.subscribe();
     let trades_t = trade_count.clone();
     let pos_t = current_position.clone();
-
     tokio::spawn(async move {
         while let Ok(fill) = fill_rx.recv().await {
             trades_t.fetch_add(1, Ordering::Relaxed);
-            let pos = { *pos_t.lock().await };
+            let pos = *pos_t.lock().await;
             info!(
                 "📈 Fill {} @ {} sz={} fee=${:.4} (pos from reconcile: {:.4})",
                 fill.coin, fill.px, fill.sz, fill.fee, pos
             );
-            // TP/SL védelmet kizárólag a reconcile loop kezeli (2 mp-enként),
-            // az exchange-ről olvasott valós pozícióval. A fill listener nem
-            // módosítja a pozíciót és nem rak ki TP/SL-t, mert a részleges
-            // fill-ek és a reconcile kölcsönhatása duplikált/rossz méretű
-            // TP/SL ordereket okozott.
         }
     });
 
-    // === INICIALIZÁLÓ LEVERAGE BEÁLLÍTÁS ===
+    // Leverage beállítás
     if !is_dry_run {
-        info!("🔧 Kezdeti Tőkeáttétel {}x beállítása...", app_config.strategy.leverage);
+        info!("🔧 Tőkeáttétel {}x beállítása...", app_config.strategy.leverage);
         let leverage_action = order_manager.build_leverage_payload();
-        let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
-
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
         match signer.sign_l1_action(&leverage_action, nonce, is_mainnet).await {
-            Ok(signature) => {
-                // A leverage beállítást hagyhatjuk HTTP-n, mert csak egyszer fut le az elején
-                match rest_client.send_l1_action(&leverage_action, nonce, signature).await {
-                    Ok(_) => info!("✅ Tőkeáttétel sikeresen beállítva a tőzsdén!"),
-                    Err(e) => tracing::error!("❌ Hiba a tőkeáttétel beállításánál: {}", e),
-                }
+            Ok(sig) => match rest_client.send_l1_action(&leverage_action, nonce, sig).await {
+                Ok(_) => info!("✅ Tőkeáttétel beállítva"),
+                Err(e) => tracing::error!("❌ Tőkeáttétel beállítás hiba: {}", e),
             },
-            Err(e) => tracing::error!("❌ Hiba a tőkeáttétel aláírásánál: {}", e),
+            Err(e) => tracing::error!("❌ Tőkeáttétel aláírás hiba: {}", e),
         }
     }
 
     info!("⚙️ Kereskedési ciklus elindítva...");
 
+    // Arc klónok a spawn-okhoz
     let signer_t = signer.clone();
-    let feed_t = feed.clone();
     let signer_r = signer.clone();
+    let feed_t = feed.clone();
     let hl_user_t = hl_user.clone();
     let hl_user_r = hl_user.clone();
     let rest_client_r = rest_client.clone();
@@ -261,23 +205,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let trade_guard_t = trade_count.clone();
     let target_notional_t = target_notional_usd.clone();
 
-    // 6. A fő "szívverés" (Heartbeat) - Extrém gyors polling az RwLock-ból
+    // 7. Fő heartbeat loop
     tokio::spawn(async move {
         let mut last_reset_day: u32 = {
             let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
             (now / 86400) as u32
         };
-        let mut session_start_equity = session_start_equity; // árnyékolás: mutable lokális
+        let mut session_start_equity = session_start_equity;
+
         loop {
-            // UTC éjféli reset: trade counter + drawdown bázis nullázása napváltáskor
+            // UTC éjféli reset
             let today = {
                 let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs();
+                    .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
                 (now / 86400) as u32
             };
             if today != last_reset_day {
@@ -289,72 +230,66 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             if let Some(signal) = signal_engine.tick().await {
-                // Hard risk stop: halt new entries after daily loss/trade caps.
                 let current_equity = *account_guard_t.lock().await;
                 let drawdown = (session_start_equity - current_equity).max(0.0);
                 let profit = (current_equity - session_start_equity).max(0.0);
                 let trades_done = trade_guard_t.load(Ordering::Relaxed);
-                // Hard risk stop: halt new entries after daily loss/trade caps.
+
                 if drawdown >= max_daily_loss_usd {
                     tracing::warn!(
-                        "🛑 DAILY LOSS LIMIT REACHED (dd=${:.2} >= ${:.2}), trading halted.",
-                        drawdown,
-                        max_daily_loss_usd
+                        "🛑 DAILY LOSS LIMIT (dd=${:.2} >= ${:.2}), trading halted.",
+                        drawdown, max_daily_loss_usd
                     );
                     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                     continue;
                 }
-                // Daily profit target: stop trading when profit >= 5% of starting equity
                 if profit >= session_start_equity * 0.05 {
                     tracing::info!(
-                        "✅ DAILY PROFIT TARGET REACHED (profit=${:.2} >= 5% of start equity ${:.2}), stopping entries.",
-                        profit,
-                        session_start_equity
+                        "✅ DAILY PROFIT TARGET (profit=${:.2} >= 5% of ${:.2}), stopping entries.",
+                        profit, session_start_equity
                     );
                     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                     continue;
                 }
                 if trades_done >= max_daily_trades {
                     tracing::warn!(
-                        "🛑 DAILY TRADE LIMIT REACHED ({} >= {}), trading halted.",
-                        trades_done,
-                        max_daily_trades
+                        "🛑 DAILY TRADE LIMIT ({} >= {}), trading halted.",
+                        trades_done, max_daily_trades
                     );
                     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                     continue;
                 }
-                // Cooldown check: avoid sending new ladder within 500ms
                 if last_signal_time.elapsed() < min_signal_interval {
                     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
                     continue;
                 }
 
-                // Volatilitás mentése a Fill Listener számára
-                {
-                    let mut v = vol_sim_t.lock().await;
-                    *v = signal.volatility;
-                }
+                *vol_sim_t.lock().await = signal.volatility;
 
-                // Pozíció lekérése (BBO-t a megbízás előtt frissítjük — cancel után már más lehet)
-                let current_pos: f64 = { *pos_sim_t.lock().await };
+                let current_pos: f64 = *pos_sim_t.lock().await;
 
-                // Egyszerűsített max_positions kontroll: ha 1 a limit, és van pozíciónk,
-                // csak akkor engedünk újabb jelet, ha az ellentétes irányú (zárás)
                 if max_pos_limit == 1 && current_pos.abs() > 0.001 {
-                    let is_reducing = (current_pos > 0.0 && signal.side == "Sell") || (current_pos < 0.0 && signal.side == "Buy");
+                    let is_reducing = (current_pos > 0.0 && signal.side == "Sell")
+                        || (current_pos < 0.0 && signal.side == "Buy");
                     if !is_reducing {
-                        // Nem engedünk rá több pozíciót ugyanabba az irányba
                         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                         continue;
                     }
                 }
 
-                info!("🚨 SZIGNÁL: {} @ {:.4} (Pos: {:.4})", signal.side, signal.target_mid, current_pos);
-                
-                // Szinkronizáljuk a pozíciót az order managerrel a skew hatáshoz
+                // ── SZIGNÁL LOG: z-score + bar szám is látható ──────────────────
+                info!(
+                    "🚨 SZIGNÁL: {} @ {:.4} | z={:.2} | bars={} | vol={:.4} | pos={:.4}",
+                    signal.side,
+                    signal.target_mid,
+                    signal.z_score,
+                    signal.bar_count,
+                    signal.volatility,
+                    current_pos
+                );
+
                 order_manager.current_pos = current_pos;
 
-                // Zárás irány: ne legyen több fill-méret, mint a nyitott pozíció (kerekítés → -0.01 SOL „túlzárás”).
                 let max_close_sz = {
                     let s = signal.side.to_lowercase();
                     if s == "sell" && current_pos > 0.001 {
@@ -368,19 +303,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 if is_dry_run {
                     info!("🧪 DRY RUN: szignál (nincs küldés)");
-                    let mut pos = pos_sim_t.lock().await;
                     let fill_sz = if signal.side == "Buy" { 0.1 } else { -0.1 };
-                    *pos += fill_sz;
+                    *pos_sim_t.lock().await += fill_sz;
                 } else {
-                    // --- 1. CLEAN SLATE: ELŐZŐ LÉTRA ORDEREK (TP/SL trigger NEM törlődik) ---
+                    // 1. CLEAN SLATE: létra orderek törlése (TP/SL trigger NEM törlődik)
                     let addr = hl_user_t.as_str();
                     let fe_orders = rest_client.get_frontend_open_orders(addr).await.ok();
                     let open_orders_basic = if fe_orders.is_none() {
                         match rest_client.get_open_orders(addr).await {
                             Ok(v) => {
-                                tracing::warn!(
-                                    "🛰️ frontendOpenOrders nem elérhető → openOrders fallback OID-gyűjtéshez"
-                                );
+                                tracing::warn!("🛰️ frontendOpenOrders nem elérhető → openOrders fallback");
                                 Some(v)
                             }
                             Err(e) => {
@@ -399,63 +331,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         oids
                     };
 
-                    // Fallback: WS OID üres → frontend listából csak nem-trigger / nem-positionTpsl
                     if cancel_oids.is_empty() {
                         if let Some(ref fe) = fe_orders {
                             cancel_oids = collect_ladder_cancel_oids_from_frontend(fe, &coin_signal);
                             if !cancel_oids.is_empty() {
-                                info!(
-                                    "🛰️ REST frontendOpenOrders fallback: {} db létra-OID törléshez (TP/SL kihagyva)",
-                                    cancel_oids.len()
-                                );
+                                info!("🛰️ REST frontendOpenOrders fallback: {} db OID törléshez", cancel_oids.len());
                             }
                         } else if let Some(ref oo) = open_orders_basic {
-                            cancel_oids =
-                                collect_ladder_cancel_oids_from_open_orders(oo, &coin_signal);
+                            cancel_oids = collect_ladder_cancel_oids_from_open_orders(oo, &coin_signal);
                             if !cancel_oids.is_empty() {
-                                info!(
-                                    "🛰️ REST openOrders fallback: {} db OID törléshez (csak egyszerű limit; frontend hiányzik)",
-                                    cancel_oids.len()
-                                );
+                                info!("🛰️ REST openOrders fallback: {} db OID törléshez", cancel_oids.len());
                             }
                         }
                     }
 
                     if let Some(ref fe) = fe_orders {
                         let before = cancel_oids.len();
-                        cancel_oids =
-                            filter_cancel_oids_excluding_position_tpsl_triggers(fe, &coin_signal, cancel_oids);
+                        cancel_oids = filter_cancel_oids_excluding_position_tpsl_triggers(fe, &coin_signal, cancel_oids);
                         if before != cancel_oids.len() {
-                            info!(
-                                "🛡️ TP/SL trigger OID-ek kihagyva a törlésből ({} → {} oid)",
-                                before,
-                                cancel_oids.len()
-                            );
+                            info!("🛡️ TP/SL trigger OID-ek kihagyva ({} → {} oid)", before, cancel_oids.len());
                         }
                     } else if open_orders_basic.is_some() && !cancel_oids.is_empty() {
-                        tracing::warn!(
-                            "🛡️ TP/SL OID szűrés kihagyva (nincs frontendOpenOrders); openOrders alapú lista lehet kevésbé biztos"
-                        );
+                        tracing::warn!("🛡️ TP/SL OID szűrés kihagyva (nincs frontendOpenOrders)");
                     }
 
                     if !cancel_oids.is_empty() {
                         let cancel_action = order_manager.build_cancel_payload(&cancel_oids);
-                        let c_nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+                        let c_nonce = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
                         if let Ok(sig) = signer_t.sign_l1_action(&cancel_action, c_nonce, is_mainnet).await {
-                            match rest_client
-                                .send_l1_action(&cancel_action, c_nonce, sig)
-                                .await
-                            {
+                            match rest_client.send_l1_action(&cancel_action, c_nonce, sig).await {
                                 Ok(body) => {
                                     if exchange_order_submission_ok(&body) {
-                                        info!(
-                                            "🧹 SZELLEM-ORDERS TÖRÖLVE ({} db Cancel, HTTP)",
-                                            cancel_oids.len()
-                                        );
+                                        info!("🧹 SZELLEM-ORDERS TÖRÖLVE ({} db)", cancel_oids.len());
                                     } else if cancel_response_only_benign_errors(&body) {
-                                        info!(
-                                            "🧹 Cancel: oid(ek) már nem élnek (kitöltve/törölve) — rendben."
-                                        );
+                                        info!("🧹 Cancel: oid(ek) már nem élnek — rendben.");
                                     } else {
                                         tracing::warn!("🧹 Cancel HTTP válasz: {:?}", body);
                                     }
@@ -464,21 +374,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                     } else {
-                        info!("🧹 Nincs törlendő nyitott order ezen a coinon.");
+                        info!("🧹 Nincs törlendő nyitott order.");
                     }
-                    
-                    // Adunk pár ms-t a tőzsdének, hogy feldolgozza a törlést
+
                     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
-                    // Hard guard: ha van még lokálisan nyitottként követett order, ne küldjünk új létrát.
-                    let has_open_orders = !feed_t.open_order_oids.lock().await.is_empty();
-                    if has_open_orders {
-                        info!("⛔ Új létra kihagyva: még vannak nyitott orderek {} piacon.", coin_signal);
+                    if !feed_t.open_order_oids.lock().await.is_empty() {
+                        info!("⛔ Új létra kihagyva: még vannak nyitott orderek.");
                         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
                         continue;
                     }
 
-                    // --- 2. ÚJ LÉTRA KIHELYEZÉSE ---
+                    // 2. ÚJ LÉTRA KIHELYEZÉSE
                     let (best_bid, best_ask, ladder_mid) = {
                         let s = state_t.read().await;
                         let mid = if s.best_bid > 0.0 && s.best_ask > 0.0 {
@@ -492,11 +399,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     const HL_MIN_ORDER_NOTIONAL_USD: f64 = 10.05;
 
                     if best_bid <= 0.0 || best_ask <= 0.0 {
-                        tracing::warn!(
-                            "⚠️ Létra kihagyva: érvénytelen könyv (bid={:.4} ask={:.4})",
-                            best_bid,
-                            best_ask
-                        );
+                        tracing::warn!("⚠️ Létra kihagyva: érvénytelen könyv (bid={:.4} ask={:.4})", best_bid, best_ask);
                         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
                         continue;
                     }
@@ -505,9 +408,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let est = close_sz * ladder_mid;
                         if est < HL_MIN_ORDER_NOTIONAL_USD {
                             info!(
-                                "⛔ Záró létra kihagyva: pozíció × mid ≈ ${:.2} < HL min ~${} (kézi zárás / nagyobb méret kell)",
-                                est,
-                                HL_MIN_ORDER_NOTIONAL_USD as i32
+                                "⛔ Záró létra kihagyva: ${:.2} < HL min ~${}",
+                                est, HL_MIN_ORDER_NOTIONAL_USD as i32
                             );
                             tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
                             continue;
@@ -523,41 +425,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         target_usd,
                         max_close_sz,
                     );
+
                     if action.orders.is_empty() {
                         if max_close_sz.is_some() {
-                            tracing::warn!(
-                                "⚠️ Üres létra (zárás): maradék méret vagy ár miatt minden szint < HL min notional (~${})",
-                                HL_MIN_ORDER_NOTIONAL_USD as i32
-                            );
+                            tracing::warn!("⚠️ Üres létra (zárás): méret < HL min notional (~${})", HL_MIN_ORDER_NOTIONAL_USD as i32);
                         } else {
                             tracing::warn!(
-                                "⚠️ Üres létra (belépés): szűrők / post-only árak — bid {:.4} ask {:.4} target_usd {:.2}",
-                                best_bid,
-                                best_ask,
-                                target_usd
+                                "⚠️ Üres létra (belépés): bid={:.4} ask={:.4} target_usd={:.2}",
+                                best_bid, best_ask, target_usd
                             );
                         }
                         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
                         continue;
                     }
-                    let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+
+                    let nonce = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
 
                     match signer_t.sign_l1_action(&action, nonce, is_mainnet).await {
                         Ok(signature) => {
                             let oids_before = feed_t.open_order_oids.lock().await.len();
                             feed_t.clear_post_only_reject_flag().await;
 
-                            match rest_client
-                                .send_l1_action(&action, nonce, signature)
-                                .await
-                            {
+                            match rest_client.send_l1_action(&action, nonce, signature).await {
                                 Ok(body) => {
                                     if exchange_order_submission_ok(&body) {
-                                        let new_oids =
-                                            collect_resting_oids_from_exchange_response(&body);
+                                        let new_oids = collect_resting_oids_from_exchange_response(&body);
                                         if !new_oids.is_empty() {
-                                            let mut t = feed_t.open_order_oids.lock().await;
-                                            t.extend(new_oids);
+                                            feed_t.open_order_oids.lock().await.extend(new_oids);
                                         }
                                         info!("🚀 ÉLES LÉTRA KILŐVE (HTTP)");
                                     } else {
@@ -582,6 +477,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     break;
                                 }
                             }
+
                             if rejected_post_only {
                                 let target_usd_retry = *target_notional_t.lock().await;
                                 for (attempt, buf_ticks) in [(1_u32, 28.0_f64), (2, 55.0_f64)] {
@@ -595,61 +491,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         (s.best_bid, s.best_ask, m)
                                     };
                                     let retry_action = order_manager.build_ladder_payload_with_passive_buffer(
-                                        &signal.side,
-                                        mid_r,
-                                        bb,
-                                        ba,
-                                        target_usd_retry,
-                                        buf_ticks,
-                                        max_close_sz,
+                                        &signal.side, mid_r, bb, ba,
+                                        target_usd_retry, buf_ticks, max_close_sz,
                                     );
-                                    if retry_action.orders.is_empty() {
-                                        break;
-                                    }
+                                    if retry_action.orders.is_empty() { break; }
+
                                     let retry_nonce = std::time::SystemTime::now()
-                                        .duration_since(std::time::UNIX_EPOCH)
-                                        .unwrap()
-                                        .as_millis() as u64;
-                                    if let Ok(retry_sig) =
-                                        signer_t.sign_l1_action(&retry_action, retry_nonce, is_mainnet).await
-                                    {
+                                        .duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+
+                                    if let Ok(retry_sig) = signer_t.sign_l1_action(&retry_action, retry_nonce, is_mainnet).await {
                                         feed_t.clear_post_only_reject_flag().await;
-                                        match rest_client
-                                            .send_l1_action(&retry_action, retry_nonce, retry_sig)
-                                            .await
-                                        {
+                                        match rest_client.send_l1_action(&retry_action, retry_nonce, retry_sig).await {
                                             Ok(rb) => {
                                                 if exchange_order_submission_ok(&rb) {
-                                                    let ro =
-                                                        collect_resting_oids_from_exchange_response(
-                                                            &rb,
-                                                        );
+                                                    let ro = collect_resting_oids_from_exchange_response(&rb);
                                                     if !ro.is_empty() {
-                                                        let mut t =
-                                                            feed_t.open_order_oids.lock().await;
-                                                        t.extend(ro);
+                                                        feed_t.open_order_oids.lock().await.extend(ro);
                                                     }
-                                                    info!(
-                                                        "🔁 POST-ONLY RETRY (HTTP) #{}, buffer={} tick",
-                                                        attempt, buf_ticks as i32
-                                                    );
+                                                    info!("🔁 POST-ONLY RETRY #{}, buffer={} tick", attempt, buf_ticks as i32);
                                                     break;
                                                 }
-                                                if exchange_response_has_post_only_reject(&rb)
-                                                    && attempt == 1
-                                                {
-                                                    tracing::warn!(
-                                                        "🔁 Post-only még mindig, második próba ({buf_ticks}→55 tick)…"
-                                                    );
+                                                if exchange_response_has_post_only_reject(&rb) && attempt == 1 {
+                                                    tracing::warn!("🔁 Post-only még mindig, második próba…");
                                                     continue;
                                                 }
                                                 tracing::warn!("🔁 Retry HTTP válasz: {:?}", rb);
                                                 break;
                                             }
-                                            Err(e) => {
-                                                tracing::error!("🔁 Retry HTTP hiba: {}", e);
-                                                break;
-                                            }
+                                            Err(e) => { tracing::error!("🔁 Retry HTTP hiba: {}", e); break; }
                                         }
                                     } else {
                                         break;
@@ -666,7 +535,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // === FAILSAFE: REST reconcile a pozícióra + védő TP/SL újraküldés ===
+    // 8. FAILSAFE reconcile loop
     let coin_reconcile = coin.clone();
     let min_tick_reconcile = app_config.strategy.min_tick_size;
     let tp_min_ticks_reconcile = app_config.strategy.tp_min_ticks;
@@ -674,6 +543,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let maker_fee_rate_reconcile = app_config.strategy.maker_fee_rate;
     let taker_fee_rate_reconcile = app_config.strategy.taker_fee_rate;
     let is_mainnet_reconcile = is_mainnet;
+
     tokio::spawn(async move {
         let mut last_protected_pos: f64 = 0.0;
         loop {
@@ -688,47 +558,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         for ap in arr {
                             let pos = &ap["position"];
                             if pos["coin"].as_str().unwrap_or("") == coin_reconcile {
-                                exchange_pos = pos["szi"].as_str().unwrap_or("0").parse::<f64>().unwrap_or(0.0);
-                                entry_px = pos["entryPx"].as_str().and_then(|v| v.parse::<f64>().ok());
+                                exchange_pos = pos["szi"].as_str().unwrap_or("0")
+                                    .parse::<f64>().unwrap_or(0.0);
+                                entry_px = pos["entryPx"].as_str()
+                                    .and_then(|v| v.parse::<f64>().ok());
                                 break;
                             }
                         }
                     }
 
-                    {
-                        let mut p = pos_reconcile_t.lock().await;
-                        *p = exchange_pos;
-                    }
+                    *pos_reconcile_t.lock().await = exchange_pos;
 
                     if exchange_pos.abs() < 0.0001 {
                         last_protected_pos = 0.0;
                         continue;
                     }
 
-                    // Re-arm protection if position changed materially or wasn't protected yet.
                     if (exchange_pos.abs() - last_protected_pos.abs()).abs() >= 0.001 {
-                        if let Ok(fe_prot) =
-                            rest_client_r.get_frontend_open_orders(hl_user_r.as_str()).await
-                        {
-                            if frontend_position_tpsl_matches_pos(
-                                &fe_prot,
-                                &coin_reconcile,
-                                exchange_pos.abs(),
-                            ) {
+                        if let Ok(fe_prot) = rest_client_r.get_frontend_open_orders(hl_user_r.as_str()).await {
+                            if frontend_position_tpsl_matches_pos(&fe_prot, &coin_reconcile, exchange_pos.abs()) {
                                 last_protected_pos = exchange_pos;
-                                tracing::debug!(
-                                    "🛡️ FAILSAFE TP/SL kihagyva: már van position TP/SL a méretnek megfelelően"
-                                );
+                                tracing::debug!("🛡️ FAILSAFE TP/SL kihagyva: már van megfelelő TP/SL");
                                 continue;
                             }
 
-                            // 🧹 CANCEL EXISTING TP/SL: Töröljük a régi (nem megfelelő méretű) positionTpsl ordereket
-                            // mielőtt újat rakunk ki. Ez megakadályozza a Triggered + Rejected duplikátumokat.
                             let stale_oids = collect_position_tpsl_oids(&fe_prot, &coin_reconcile);
                             if !stale_oids.is_empty() {
-                                info!("🧹 FAILSAFE: Régi TP/SL orderek törlése ({} db) reconcile előtt...", stale_oids.len());
+                                info!("🧹 FAILSAFE: Régi TP/SL törlése ({} db)...", stale_oids.len());
                                 let cancel_a = om_reconcile.build_cancel_payload(&stale_oids);
-                                let cn = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+                                let cn = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
                                 if let Ok(csig) = signer_r.sign_l1_action(&cancel_a, cn, is_mainnet_reconcile).await {
                                     let _ = rest_client_r.send_l1_action(&cancel_a, cn, csig).await;
                                     tokio::time::sleep(tokio::time::Duration::from_millis(30)).await;
@@ -736,17 +595,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
 
-                        let reference_px = if let Some(px) = entry_px {
-                            px
+                        let reference_px = entry_px.unwrap_or_else(|| {
+                            // blocking read nem lehetséges async-ben, futures::executor::block_on sem ajánlott
+                            // ezért a state_reconcile-t itt tokio block-on-nal olvassuk
+                            0.0 // fallback; a state read alább
+                        });
+
+                        let reference_px = if reference_px > 0.0 {
+                            reference_px
                         } else {
-                            let s = state_reconcile.read().await;
-                            s.mid_price
+                            state_reconcile.read().await.mid_price
                         };
 
                         if reference_px > 0.0 {
-                            let vol = { *vol_reconcile_t.lock().await };
+                            let vol = *vol_reconcile_t.lock().await;
                             let tp_side = if exchange_pos > 0.0 { "Sell" } else { "Buy" };
-                            let mark_mid = { state_reconcile.read().await.mid_price };
+                            let mark_mid = state_reconcile.read().await.mid_price;
+
                             let (tp_price, sl_price) = match OrderManager::tp_sl_prices_for_position(
                                 exchange_pos,
                                 reference_px,
@@ -769,54 +634,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             };
 
                             let protection = om_reconcile.build_protective_tpsl_payload(
-                                tp_side,
-                                tp_price,
-                                sl_price,
-                                exchange_pos.abs(),
+                                tp_side, tp_price, sl_price, exchange_pos.abs(),
                             );
                             let nonce = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap()
-                                .as_millis() as u64;
+                                .duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
 
-                            if let Ok(sig) =
-                                signer_r.sign_l1_action(&protection, nonce, is_mainnet_reconcile).await
-                            {
-                                match rest_client_r
-                                    .send_l1_action(&protection, nonce, sig)
-                                    .await
-                                {
+                            if let Ok(sig) = signer_r.sign_l1_action(&protection, nonce, is_mainnet_reconcile).await {
+                                match rest_client_r.send_l1_action(&protection, nonce, sig).await {
                                     Ok(body) => {
                                         if exchange_order_submission_ok(&body) {
                                             info!(
-                                                "🛡️ FAILSAFE TP/SL RECONCILE (HTTP): pos={:.4}, TP={:.4}, SL={:.4}",
+                                                "🛡️ FAILSAFE TP/SL RECONCILE: pos={:.4}, TP={:.4}, SL={:.4}",
                                                 exchange_pos, tp_price, sl_price
                                             );
                                             last_protected_pos = exchange_pos;
                                         } else {
-                                            tracing::warn!(
-                                                "🛡️ FAILSAFE TP/SL HTTP válasz: {:?}",
-                                                body
-                                            );
+                                            tracing::warn!("🛡️ FAILSAFE TP/SL HTTP válasz: {:?}", body);
                                         }
                                     }
-                                    Err(e) => {
-                                        tracing::warn!("🛡️ FAILSAFE TP/SL HTTP küldés: {}", e)
-                                    }
+                                    Err(e) => tracing::warn!("🛡️ FAILSAFE TP/SL küldés hiba: {}", e),
                                 }
                             }
                         }
                     }
                 }
-                Err(e) => {
-                    tracing::warn!("⚠️ REST reconcile hiba (user_state): {}", e);
-                }
+                Err(e) => tracing::warn!("⚠️ REST reconcile hiba (user_state): {}", e),
             }
         }
     });
 
     tokio::signal::ctrl_c().await?;
     info!("🛑 Leállítás...");
-
     Ok(())
 }
