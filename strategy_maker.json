@@ -11,36 +11,36 @@
 
     "order_management": {
         "mode": "ambush_ladder_maker",
-        "entry": {
+"entry": {
             "type": "dynamic_vol_ladder",
             "reference_price": "mid",
             "sigma_multiplier": 1.5,
-            "min_level_gap_ticks": 5,
+            "min_level_gap_ticks": 10,
 
             "ladder_config": [
                 {
                     "level": 1,
-                    "offset_from_mid_ticks": 2,
-                    "size_pct": 0.5,
-                    "comment": "Legjobb szint: 2 tick-kel a mid alatt/felett (passive, jó kitöltési arány)"
+                    "offset_from_mid_ticks": 15,
+                    "size_pct": 0.3,
+                    "comment": "Elővéd: 15 tick (0.15$). Megfogja a kisebb, de hirtelen likviditás-hiányokat."
                 },
                 {
                     "level": 2,
-                    "offset_from_mid_ticks": 5,
+                    "offset_from_mid_ticks": 35,
                     "size_pct": 0.3,
-                    "comment": "Második szint: 5 tick mélyebben (jobb ár, kisebb valószínűség)"
+                    "comment": "Derékhad: 35 tick. Itt már a komolyabb stop-vadászatoknál szállunk be."
                 },
                 {
                     "level": 3,
-                    "offset_from_mid_ticks": 10,
-                    "size_pct": 0.2,
-                    "comment": "Harmadik szint: 10 tick – csak erős mozgásnál tölt, legjobb entry"
+                    "offset_from_mid_ticks": 70,
+                    "size_pct": 0.4,
+                    "comment": "A Mészárszék: 70 tick. Flash crash vagy durva spike esetén teljesül. A legnagyobb méret."
                 }
             ],
 
             "signal_params": {
-                "z_threshold": 3.5,
-                "comment": "3.5 sigma + bar-alapú számítás = ritka, de megbízható szignál. Az eredeti 2.3 túl sűrűn triggerelt (noise trading)."
+                "z_threshold": 3.2,
+                "comment": "Visszavéve 3.5-ről 3.2-re. A 3.5 túl ritka volt, a 3.2 elég magas a zaj szűréséhez, de ad tranzakciót egy átlagos napon is."
             },
 
             "execution": {
@@ -52,10 +52,10 @@
         "exit": {
             "take_profit": {
                 "enabled": true,
-                "min_profit_ticks": 35,
-                "min_sl_ticks": 20,
+                "min_profit_ticks": 45,
+                "min_sl_ticks": 100,
                 "max_profit_ticks": 500,
-                "comment": "SOL ~$82: TP 35 tick = $0.35 bruttó. Round-trip fee (maker+taker) ~$0.049 → nettó ~$0.30 nyereség. R:R ~1.75:1"
+                "comment": "Teret adunk a piacnak. SL 100 tick (1.00$), hogy ne rázzon ki a zaj. TP 45 tick: bőven fedezi a fee-t és hoz profitot a mean-reversionből."
             }
         }
     },
@@ -79,7 +79,7 @@
         },
         "daily_limits": {
             "max_daily_loss_usd": 20,
-            "max_daily_trades": 30,
+            "max_daily_trades": 99999,
             "comment": "Konzervatív limitek: $20 veszteség limit (tőke ~19%), 30 trade/nap (15s cooldown-nal max ~60 szignál lehetséges, de 30-nál megáll)"
         }
     },
