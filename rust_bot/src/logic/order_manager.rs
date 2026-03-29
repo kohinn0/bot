@@ -235,6 +235,9 @@ impl OrderManager {
         let tick = self.config.min_tick_size;
         let sz_step = 10_f64.powi(-(self.sz_decimals as i32));
 
+        // 🛡️ A KULCS: Ha van max_close_total_sz, akkor TUDJUK, hogy ez egy záró order.
+        let is_reduce_only = max_close_total_sz.is_some();
+
         // Zárás: egyetlen passive maker a teljes mérettel
         if let Some(close_sz) = max_close_total_sz {
             if close_sz >= self.config.min_shares {
@@ -281,7 +284,7 @@ impl OrderManager {
                             b: is_buy,
                             p: Self::float_to_wire(rounded_price),
                             s: Self::float_to_wire(sz),
-                            r: false,
+                            r: is_reduce_only, // 🛡️ JAVÍTVA
                             t: OrderTypeWire {
                                 limit: Some(LimitOrderType { tif: "Alo".to_string() }),
                                 trigger: None,
@@ -348,7 +351,7 @@ impl OrderManager {
                 b: is_buy,
                 p: Self::float_to_wire(rounded_price),
                 s: Self::float_to_wire(sz),
-                r: false,
+                r: is_reduce_only, // 🛡️ JAVÍTVA
                 t: OrderTypeWire {
                     limit: Some(LimitOrderType { tif: "Alo".to_string() }),
                     trigger: None,
@@ -389,7 +392,7 @@ impl OrderManager {
                     b: is_buy,
                     p: Self::float_to_wire(rounded_price),
                     s: Self::float_to_wire(sz),
-                    r: false,
+                    r: is_reduce_only, // 🛡️ JAVÍTVA
                     t: OrderTypeWire {
                         limit: Some(LimitOrderType { tif: "Alo".to_string() }),
                         trigger: None,
@@ -400,6 +403,7 @@ impl OrderManager {
 
         OrderAction { type_: "order".to_string(), orders, grouping: "na".to_string() }
     }
+
     /// Tick méret lekérése (dust záráshoz a main.rs-ből)
     pub fn config_tick(&self) -> f64 {
         self.config.min_tick_size
