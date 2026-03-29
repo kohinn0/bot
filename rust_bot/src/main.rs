@@ -603,92 +603,136 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     *pos_reconcile_t.lock().await = exchange_pos;
 
+                    // Nincs pozíció → reset és tovább
                     if exchange_pos.abs() < 0.0001 {
                         last_protected_pos = 0.0;
                         continue;
                     }
 
-                    if (exchange_pos.abs() - last_protected_pos.abs()).abs() >= 0.001 {
-                        if let Ok(fe_prot) = rest_client_r.get_frontend_open_orders(hl_user_r.as_str()).await {
-                            if frontend_position_tpsl_matches_pos(&fe_prot, &coin_reconcile, exchange_pos.abs()) {
-                                last_protected_pos = exchange_pos;
-                                tracing::debug!("🛡️ FAILSAFE TP/SL kihagyva: már van megfelelő TP/SL");
-                                continue;
-                            }
-
-                            let stale_oids = collect_position_tpsl_oids(&fe_prot, &coin_reconcile);
-                            if !stale_oids.is_empty() {
-                                info!("🧹 FAILSAFE: Régi TP/SL törlése ({} db)...", stale_oids.len());
-                                let cancel_a = om_reconcile.build_cancel_payload(&stale_oids);
-                                let cn = std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
-                                if let Ok(csig) = signer_r.sign_l1_action(&cancel_a, cn, is_mainnet_reconcile).await {
-                                    let _ = rest_client_r.send_l1_action(&cancel_a, cn, csig).await;
-                                    tokio::time::sleep(tokio::time::Duration::from_millis(30)).await;
-                                }
-                            }
+                    // Mindig lekérjük a nyitott ordereket
+                    let fe_prot = match rest_client_r.get_frontend_open_orders(hl_user_r.as_str()).await {
+                        Ok(v) => v,
+                        Err(e) => {
+                            tracing::warn!("⚠️ frontendOpenOrders lekérés hiba: {}", e);
+                            continue;
                         }
+                    };
 
-                        let reference_px = entry_px.unwrap_or_else(|| {
-                            // blocking read nem lehetséges async-ben, futures::executor::block_on sem ajánlott
-                            // ezért a state_reconcile-t itt tokio block-on-nal olvassuk
-                            0.0 // fallback; a state read alább
-                        });
+                    // ── 1. VESZÉLYES LÉTRA ORDEREK TÖRLÉSE ──────────────────────────
+                    // Ha van pozíció és bent maradt egy létra order (Reduce Only: No),
+                    // az ellentétes irányban új pozíciót nyitna kitöltéskor!
+                    let dangerous_oids: Vec<u64> = if let Some(arr) = fe_prot.as_array() {
+                        arr.iter()
+                            .filter(|o| o["coin"].as_str() == Some(coin_reconcile.as_str()))
+                            .filter(|o| o["isPositionTpsl"].as_bool() != Some(true))
+                            .filter(|o| o["isTrigger"].as_bool() != Some(true))
+                            .filter(|o| o["reduceOnly"].as_bool() != Some(true))
+                            .filter_map(|o| {
+                                o["oid"].as_u64()
+                                    .or_else(|| o["oid"].as_str().and_then(|v| v.parse().ok()))
+                            })
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
 
-                        let reference_px = if reference_px > 0.0 {
-                            reference_px
-                        } else {
-                            state_reconcile.read().await.mid_price
-                        };
+                    if !dangerous_oids.is_empty() {
+                        tracing::warn!(
+                            "🧹 RECONCILE: {} db veszélyes létra order törlése (pozíció mellett maradt, Reduce Only: No)!",
+                            dangerous_oids.len()
+                        );
+                        let cancel_l = om_reconcile.build_cancel_payload(&dangerous_oids);
+                        let cl = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+                        if let Ok(csig) = signer_r.sign_l1_action(&cancel_l, cl, is_mainnet_reconcile).await {
+                            let _ = rest_client_r.send_l1_action(&cancel_l, cl, csig).await;
+                            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                        }
+                    }
 
-                        if reference_px > 0.0 {
-                            let vol = *vol_reconcile_t.lock().await;
-                            let tp_side = if exchange_pos > 0.0 { "Sell" } else { "Buy" };
-                            let mark_mid = state_reconcile.read().await.mid_price;
+                    // ── 2. TP/SL VÉDELEM ELLENŐRZÉSE ────────────────────────────────
+                    // Csak ha a pozíció mérete megváltozott lényegesen
+                    if (exchange_pos.abs() - last_protected_pos.abs()).abs() < 0.001 {
+                        continue;
+                    }
 
-                            let (tp_price, sl_price) = match OrderManager::tp_sl_prices_for_position(
-                                exchange_pos,
-                                reference_px,
-                                vol,
-                                min_tick_reconcile,
-                                tp_min_ticks_reconcile,
-                                sl_min_ticks_reconcile,
-                                mark_mid,
-                                maker_fee_rate_reconcile,
-                                taker_fee_rate_reconcile,
-                            ) {
-                                Some(p) => p,
-                                None => {
-                                    tracing::warn!(
-                                        "🛡️ FAILSAFE TP/SL clamp skip: mark={:.4} pos={:.4} ref={:.4}",
-                                        mark_mid, exchange_pos, reference_px
-                                    );
-                                    continue;
-                                }
-                            };
+                    // Van már megfelelő méretű TP/SL?
+                    if frontend_position_tpsl_matches_pos(&fe_prot, &coin_reconcile, exchange_pos.abs()) {
+                        last_protected_pos = exchange_pos;
+                        tracing::debug!("🛡️ FAILSAFE TP/SL kihagyva: már van megfelelő TP/SL");
+                        continue;
+                    }
 
-                            let protection = om_reconcile.build_protective_tpsl_payload(
-                                tp_side, tp_price, sl_price, exchange_pos.abs(),
+                    // Régi rossz méretű TP/SL törlése
+                    let stale_oids = collect_position_tpsl_oids(&fe_prot, &coin_reconcile);
+                    if !stale_oids.is_empty() {
+                        info!("🧹 FAILSAFE: Régi TP/SL törlése ({} db)...", stale_oids.len());
+                        let cancel_a = om_reconcile.build_cancel_payload(&stale_oids);
+                        let cn = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+                        if let Ok(csig) = signer_r.sign_l1_action(&cancel_a, cn, is_mainnet_reconcile).await {
+                            let _ = rest_client_r.send_l1_action(&cancel_a, cn, csig).await;
+                            tokio::time::sleep(tokio::time::Duration::from_millis(30)).await;
+                        }
+                    }
+
+                    // Új TP/SL kirakása
+                    let reference_px = entry_px.unwrap_or(0.0);
+                    let reference_px = if reference_px > 0.0 {
+                        reference_px
+                    } else {
+                        state_reconcile.read().await.mid_price
+                    };
+
+                    if reference_px <= 0.0 {
+                        continue;
+                    }
+
+                    let vol = *vol_reconcile_t.lock().await;
+                    let tp_side = if exchange_pos > 0.0 { "Sell" } else { "Buy" };
+                    let mark_mid = state_reconcile.read().await.mid_price;
+
+                    let (tp_price, sl_price) = match OrderManager::tp_sl_prices_for_position(
+                        exchange_pos,
+                        reference_px,
+                        vol,
+                        min_tick_reconcile,
+                        tp_min_ticks_reconcile,
+                        sl_min_ticks_reconcile,
+                        mark_mid,
+                        maker_fee_rate_reconcile,
+                        taker_fee_rate_reconcile,
+                    ) {
+                        Some(p) => p,
+                        None => {
+                            tracing::warn!(
+                                "🛡️ FAILSAFE TP/SL clamp skip: mark={:.4} pos={:.4} ref={:.4}",
+                                mark_mid, exchange_pos, reference_px
                             );
-                            let nonce = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+                            continue;
+                        }
+                    };
 
-                            if let Ok(sig) = signer_r.sign_l1_action(&protection, nonce, is_mainnet_reconcile).await {
-                                match rest_client_r.send_l1_action(&protection, nonce, sig).await {
-                                    Ok(body) => {
-                                        if exchange_order_submission_ok(&body) {
-                                            info!(
-                                                "🛡️ FAILSAFE TP/SL RECONCILE: pos={:.4}, TP={:.4}, SL={:.4}",
-                                                exchange_pos, tp_price, sl_price
-                                            );
-                                            last_protected_pos = exchange_pos;
-                                        } else {
-                                            tracing::warn!("🛡️ FAILSAFE TP/SL HTTP válasz: {:?}", body);
-                                        }
-                                    }
-                                    Err(e) => tracing::warn!("🛡️ FAILSAFE TP/SL küldés hiba: {}", e),
+                    let protection = om_reconcile.build_protective_tpsl_payload(
+                        tp_side, tp_price, sl_price, exchange_pos.abs(),
+                    );
+                    let nonce = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+
+                    if let Ok(sig) = signer_r.sign_l1_action(&protection, nonce, is_mainnet_reconcile).await {
+                        match rest_client_r.send_l1_action(&protection, nonce, sig).await {
+                            Ok(body) => {
+                                if exchange_order_submission_ok(&body) {
+                                    info!(
+                                        "🛡️ FAILSAFE TP/SL RECONCILE: pos={:.4}, TP={:.4}, SL={:.4}",
+                                        exchange_pos, tp_price, sl_price
+                                    );
+                                    last_protected_pos = exchange_pos;
+                                } else {
+                                    tracing::warn!("🛡️ FAILSAFE TP/SL HTTP válasz: {:?}", body);
                                 }
                             }
+                            Err(e) => tracing::warn!("🛡️ FAILSAFE TP/SL küldés hiba: {}", e),
                         }
                     }
                 }
