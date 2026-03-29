@@ -6,35 +6,18 @@ authors = ["SebessegBot Team"]
 description = "High-performance Hyperliquid maker bot"
 
 [dependencies]
-# Async runtime
 tokio = { version = "1.36", features = ["full"] }
-
-# Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
 rmp-serde = "1.1"
-
-# Networking
 reqwest = { version = "0.11", features = ["json", "native-tls"] }
 tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
 url = "2.5"
 futures-util = "0.3"
-
-# Cryptography & Ethereum/Hyperliquid specifics
 hex = "0.4"
 ethers = { version = "2.0.14", features = ["rustls"] }
 sha3 = "0.10"
-rand = "0.8"
-
-# Environment & Config
 dotenvy = "0.15"
-
-# Utilities
-chrono = "0.4"
-parking_lot = "0.12"
-crossbeam-channel = "0.5"
-
-# Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
