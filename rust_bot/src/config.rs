@@ -97,7 +97,7 @@ impl AppConfig {
                 ladder_levels.push(LadderLevel {
                     level: item["level"].as_u64().unwrap_or(1) as u32,
                     offset_from_mid_ticks: item["offset_from_mid_ticks"].as_i64().unwrap_or(0) as i32,
-                    size_pct: item["size_pct"].as_f64().unwrap_or(0.33),
+                    size_pct: item["size_pct"].as_f64().unwrap_or(1.0),
                 });
             }
         }
@@ -114,7 +114,7 @@ impl AppConfig {
                 .as_u64().unwrap_or(1) as u32,
             z_score_threshold: om["entry"]["signal_params"]["z_threshold"]
                 .as_f64().unwrap_or(3.5),
-            sigma_r: om["entry"]["sigma_multiplier"].as_f64().unwrap_or(1.5),
+            sigma_r: om["entry"]["sigma_multiplier"].as_f64().unwrap_or(3.2),
             min_tick_size: tp["tick_size"].as_f64().unwrap_or(0.01),
             min_shares: tp["min_shares"].as_f64().unwrap_or(0.001),
             ladder_levels,

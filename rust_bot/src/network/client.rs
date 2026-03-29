@@ -106,10 +106,7 @@ impl HyperliquidClient {
         ))
     }
 
-    pub async fn get_open_orders(&self, user: &str) -> Result<Value, reqwest::Error> {
-        let payload = json!({"type": "openOrders", "user": user});
-        self.rest_client.post(&self.info_url).json(&payload).send().await?.json().await
-    }
+    
 
     pub async fn get_frontend_open_orders(&self, user: &str) -> Result<Value, reqwest::Error> {
         let payload = json!({"type": "frontendOpenOrders", "user": user});
@@ -162,19 +159,7 @@ pub fn collect_resting_oids_from_exchange_response(body: &Value) -> Vec<u64> {
     out
 }
 
-pub fn exchange_response_has_post_only_reject(body: &Value) -> bool {
-    let Some(arr) = body.pointer("/response/data/statuses").and_then(|x| x.as_array()) else {
-        return false;
-    };
-    for st in arr {
-        if let Some(e) = st.get("error").and_then(|e| e.as_str()) {
-            if e.contains("Post only") {
-                return true;
-            }
-        }
-    }
-    false
-}
+
 
 pub fn exchange_order_submission_ok(body: &Value) -> bool {
     if body.get("status").and_then(|s| s.as_str()) != Some("ok") {
@@ -190,24 +175,7 @@ pub fn exchange_order_submission_ok(body: &Value) -> bool {
     true
 }
 
-pub fn cancel_response_only_benign_errors(body: &Value) -> bool {
-    if body.get("status").and_then(|s| s.as_str()) != Some("ok") {
-        return false;
-    }
-    let Some(arr) = body.pointer("/response/data/statuses").and_then(|x| x.as_array()) else {
-        return true;
-    };
-    for st in arr {
-        let Some(e) = st.get("error").and_then(|x| x.as_str()) else { continue; };
-        let benign = e.contains("never placed")
-            || e.contains("already canceled")
-            || e.contains("already cancelled")
-            || e.contains("filled")
-            || e.contains("Filled");
-        if !benign { return false; }
-    }
-    true
-}
+
 
 pub fn collect_position_tpsl_oids(frontend_orders: &Value, coin: &str) -> Vec<u64> {
     let Some(arr) = frontend_orders.as_array() else { return Vec::new(); };
@@ -275,20 +243,7 @@ pub fn collect_ladder_cancel_oids_from_frontend(frontend_orders: &Value, coin: &
     out
 }
 
-pub fn collect_ladder_cancel_oids_from_open_orders(orders: &Value, coin: &str) -> Vec<u64> {
-    let Some(arr) = orders.as_array() else { return Vec::new(); };
-    let mut out = Vec::new();
-    for ord in arr {
-        if ord["coin"].as_str() != Some(coin) { continue; }
-        if ord["reduceOnly"].as_bool() == Some(true) { continue; }
-        let has_trigger_px = ord.get("triggerPx")
-            .map(|v| !(v.is_null() || v.as_str() == Some("")))
-            .unwrap_or(false);
-        if has_trigger_px { continue; }
-        if let Some(oid) = parse_order_oid(ord) { out.push(oid); }
-    }
-    out
-}
+
 
 fn parse_json_number(v: &Value) -> Option<f64> {
     if let Some(s) = v.as_str() { s.parse().ok() } else { v.as_f64() }
