@@ -155,6 +155,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     continue;
                 }
 
+                // A reconcile ~1s-onként írja a szim pozíciót; addig current_pos lehet 0, miközben HL-n már van trade.
+                // Csak akkor hívunk API-t, ha egyébként létrát küldenénk (min_slice ok) — ne spammeljünk 5 ms-onként.
+                if let Ok(st) = rest_client_t.get_user_state(hl_user_t.as_str()).await {
+                    let mut ex_pos = 0.0f64;
+                    if let Some(arr) = st["assetPositions"].as_array() {
+                        for ap in arr {
+                            if ap["position"]["coin"].as_str() == Some(coin_signal.as_str()) {
+                                ex_pos = ap["position"]["szi"]
+                                    .as_str()
+                                    .unwrap_or("0")
+                                    .parse()
+                                    .unwrap_or(0.0);
+                                break;
+                            }
+                        }
+                    }
+                    if ex_pos.abs() > 0.0001 {
+                        tracing::info!(
+                            "Szignál-létra kihagyva: HL pozíció {:.4} (szim {:.4}, reconcile késik)",
+                            ex_pos,
+                            current_pos
+                        );
+                        *pos_sim_t.lock().await = ex_pos;
+                        continue;
+                    }
+                }
+
                 last_signal_time = std::time::Instant::now();
 
                 info!("🚨 SZIGNÁL: {} @ {:.4}", signal.side, signal.target_mid);
