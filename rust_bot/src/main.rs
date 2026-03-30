@@ -6,7 +6,6 @@ use dotenvy::dotenv;
 use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
 use crate::config::AppConfig;
 use crate::logic::signer::HyperliquidSigner;
 use crate::logic::signal::SignalEngine;
@@ -65,6 +64,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut signal_engine = SignalEngine::new(app_config.strategy.clone());
     let mut order_manager = OrderManager::new(app_config.strategy.clone(), asset_idx, sz_decimals);
     let (signer, rest_client) = (Arc::new(signer), Arc::new(rest_client));
+
+    // Háttérben: számlaérték frissítése 30mp-enként — drawdown limit + notional sizing
+    // Nélküle wallet_equity soha nem változik, a 10% drawdown limit sosem triggerel.
+    if use_hl_equity {
+        let rest_w = rest_client.clone();
+        let addr_w = hl_user.clone();
+        let wallet_w = wallet_equity.clone();
+        let target_w = target_notional_usd.clone();
+        let strat_w = app_config.strategy.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+                if let Ok(v) = rest_w.get_account_value_usd(&addr_w).await {
+                    if v.is_finite() && v > 0.0 {
+                        *wallet_w.lock().await = v;
+                        *target_w.lock().await = strat_w.notional_per_level_usd(v);
+                    }
+                }
+            }
+        });
+    }
+
+    // Leverage beállítás indításkor
+    if !app_config.is_dry_run {
+        let lev = order_manager.build_leverage_payload();
+        let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+        if let Ok(sig) = signer.sign_l1_action(&lev, nonce, is_mainnet).await {
+            match rest_client.send_l1_action(&lev, nonce, sig).await {
+                Ok(_) => info!("✅ Leverage {}x beállítva", app_config.strategy.leverage),
+                Err(e) => tracing::warn!("⚠️ Leverage beállítás hiba: {}", e),
+            }
+        }
+    }
 
     let (signer_t, feed_t, rest_client_t, pos_sim_t, vol_sim_t, state_t, hl_user_t, target_notional_t, wallet_equity_t) = 
         (signer.clone(), feed.clone(), rest_client.clone(), current_position.clone(), last_volatility.clone(), state_ref.clone(), hl_user.clone(), target_notional_usd.clone(), wallet_equity.clone());

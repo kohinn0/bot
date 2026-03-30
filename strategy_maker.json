@@ -1,95 +1,53 @@
 {
-    "strategy_name": "pm_ambush_ladder_maker_v3",
-    "strategy_type": "MAKER_ONLY_PRO",
-
-    "signal_engine": {
-        "debounce": {
-            "min_time_between_entries_ms": 15000,
-            "comment": "15s cooldown szignálok között – megelőzi a gyors létra-dömpinget sideways piacon"
-        }
-    },
-
-    "order_management": {
-        "mode": "ambush_ladder_maker",
-"entry": {
-            "type": "dynamic_vol_ladder",
-            "reference_price": "mid",
-            "sigma_multiplier": 1.5,
-            "min_level_gap_ticks": 10,
-
-            "ladder_config": [
-                {
-                    "level": 1,
-                    "offset_from_mid_ticks": 15,
-                    "size_pct": 0.3,
-                    "comment": "Elővéd: 15 tick (0.15$). Megfogja a kisebb, de hirtelen likviditás-hiányokat."
-                },
-                {
-                    "level": 2,
-                    "offset_from_mid_ticks": 35,
-                    "size_pct": 0.3,
-                    "comment": "Derékhad: 35 tick. Itt már a komolyabb stop-vadászatoknál szállunk be."
-                },
-                {
-                    "level": 3,
-                    "offset_from_mid_ticks": 70,
-                    "size_pct": 0.4,
-                    "comment": "A Mészárszék: 70 tick. Flash crash vagy durva spike esetén teljesül. A legnagyobb méret."
-                }
-            ],
-
-            "signal_params": {
-                "z_threshold": 3.2,
-                "comment": "Visszavéve 3.5-ről 3.2-re. A 3.5 túl ritka volt, a 3.2 elég magas a zaj szűréséhez, de ad tranzakciót egy átlagos napon is."
-            },
-
-            "execution": {
-                "post_only": true,
-                "time_in_force": "GTX"
-            }
+    "coin": "SOL",
+    "leverage": 10,
+    "is_isolated": true,
+    "min_tick_size": 0.01,
+    "min_shares": 0.001,
+    "maker_fee_rate": 0.00015,
+    "taker_fee_rate": 0.00045,
+    "skew_penalty": null,
+    "tp_min_ticks": 45.0,
+    "sl_min_ticks": 100.0,
+    "max_positions": 1,
+    "dust_limit_usd": 15.0,
+    "pos_clear_threshold": 0.001,
+    "min_signal_interval_ms": 15000,
+    "balance_pct_per_trade": 4.0,
+    "max_notional_usd_per_trade": 40.0,
+    "ladder_levels": [
+        {
+            "level": 1,
+            "offset_from_mid_pct": 0.115,
+            "size_pct": 0.30
         },
-
-        "exit": {
-            "take_profit": {
-                "enabled": true,
-                "min_profit_ticks": 45,
-                "min_sl_ticks": 100,
-                "max_profit_ticks": 500,
-                "comment": "Teret adunk a piacnak. SL 100 tick (1.00$), hogy ne rázzon ki a zaj. TP 45 tick: bőven fedezi a fee-t és hoz profitot a mean-reversionből."
-            }
-        }
-    },
-
-    "fees": {
-        "maker_fee_rate": 0.00015,
-        "taker_fee_rate": 0.00045,
-        "comment": "Tényleges Hyperliquid Perps díjak: maker 0.015% (post-only GTX entry), taker 0.045% (TP/SL trigger piac). Round-trip = 0.060%."
-    },
-
-    "risk_management": {
-        "position_limits": {
-            "max_open_positions": 1,
-            "max_notional_usd_per_trade": 40,
-            "balance_pct_per_trade": 4.0,
-            "comment": "$107 számla: 4% × 10x leverage = $42.8 notional (cap $40). Szintenkint: $20/$12/$8 – mind > HL $10 min."
+        {
+            "level": 2,
+            "offset_from_mid_pct": 0.269,
+            "size_pct": 0.30
         },
-        "leverage": {
-            "max_leverage": 10,
-            "cross_margin": false
-        },
-        "daily_limits": {
-            "max_daily_loss_usd": 20,
-            "max_daily_trades": 99999,
-            "comment": "Konzervatív limitek: $20 veszteség limit (tőke ~19%), 30 trade/nap (15s cooldown-nal max ~60 szignál lehetséges, de 30-nál megáll)"
+        {
+            "level": 3,
+            "offset_from_mid_pct": 0.538,
+            "size_pct": 0.40
         }
-    },
-
-    "technical_precision": {
-        "tick_size": 0.01,
-        "min_shares": 0.001,
-        "rounding": {
-            "price_formula": "round(price / tick_size) * tick_size",
-            "size_formula": "max(min_shares, floor(size * 1e4) / 1e4)"
+    ],
+    "signals": {
+        "z_score": {
+            "enabled": true,
+            "threshold": 3.2,
+            "window": 200
+        },
+        "rsi": {
+            "enabled": false,
+            "window": 14,
+            "buy_below": 30.0,
+            "sell_above": 70.0
+        },
+        "bollinger": {
+            "enabled": false,
+            "window": 20,
+            "std_dev": 2.0
         }
     }
 }

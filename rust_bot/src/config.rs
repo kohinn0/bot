@@ -94,11 +94,14 @@ impl AppConfig {
         let file_content = fs::read_to_string("strategy_maker.json").expect("❌ Nem találom a strategy_maker.json-t!");
         let strat_config: StrategyConfig = serde_json::from_str(&file_content).expect("❌ Hibás JSON formátum!");
 
+        // HL_PERP_DEX: üres = normál Hyperliquid perp; builder DEX esetén állítsd .env-ben
+        let hl_perp_dex = std::env::var("HL_PERP_DEX").unwrap_or_default();
+
         AppConfig {
             private_key: env_pk,
             hl_user_address: env_user,
             is_mainnet,
-            hl_perp_dex: "https://api.hyperliquid.xyz".to_string(),
+            hl_perp_dex,
             starting_equity_usd: 100.0,
             use_wallet_balance_for_sizing: true,
             is_dry_run: false,
