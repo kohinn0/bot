@@ -15,7 +15,18 @@ pub struct HyperliquidSigner {
 
 impl HyperliquidSigner {
     pub fn new(private_key_hex: &str) -> Self {
-        let clean_hex = private_key_hex.trim_start_matches("0x");
+        let normalized = private_key_hex
+            .trim()
+            .trim_matches('"')
+            .trim_matches('\'');
+        let clean_hex = normalized.trim_start_matches("0x");
+        let is_hex = clean_hex.chars().all(|c| c.is_ascii_hexdigit());
+        if clean_hex.len() != 64 || !is_hex {
+            panic!(
+                "Hibás privát kulcs formátum: 64 hex karakter kell (opcionális 0x előtag). Kapott hossz: {}",
+                clean_hex.len()
+            );
+        }
         let wallet = LocalWallet::from_str(clean_hex)
             .expect("Hibás privát kulcs formátum vagy érvénytelen ECDSA kulcs");
             

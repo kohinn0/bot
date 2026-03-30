@@ -103,7 +103,13 @@ impl StrategyConfig {
 
 impl AppConfig {
     pub fn load() -> Self {
-        let env_pk = std::env::var("HL_PRIVATE_KEY").unwrap_or_default();
+        let env_pk = std::env::var("HL_PRIVATE_KEY")
+            .or_else(|_| std::env::var("PRIVATE_KEY"))
+            .unwrap_or_default()
+            .trim()
+            .trim_matches('"')
+            .trim_matches('\'')
+            .to_string();
         let env_user = std::env::var("HL_USER_ADDRESS").ok();
         let is_mainnet = std::env::var("IS_MAINNET").unwrap_or_else(|_| "true".to_string()) == "true";
         
