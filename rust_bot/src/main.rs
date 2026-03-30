@@ -247,9 +247,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 *pos_reconcile_t.lock().await = exchange_pos;
-                if exchange_pos.abs() < 0.0001 { last_protected_pos = 0.0; continue; }
                 
+                // 1. ELŐSZÖR lekérjük a tőzsdei ordereket, hogy lássunk is a sötétben!
                 let fe_prot = match rest_client_r.get_frontend_open_orders(hl_user_r.as_str()).await { Ok(v) => v, Err(_) => continue };
+
+                // 2. 🚨 A SZELLEM-ORDER TAKARÍTÓ PROTOKOLL 🚨
+                if exchange_pos.abs() < 0.0001 { 
+                    // Ha nincs pozíció, de a tőzsde mégis mutat beragadt TP/SL ordereket
+                    let stale_oids = collect_position_tpsl_oids(&fe_prot, &coin_reconcile);
+                    if !stale_oids.is_empty() {
+                        tracing::info!("🧹 Szellem-orderek észlelve! {} db fantom order eltakarítása...", stale_oids.len());
+                        let cn = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+                        let cancel_a = om_reconcile.build_cancel_payload(&stale_oids);
+                        if let Ok(csig) = signer_r.sign_l1_action(&cancel_a, cn, is_mainnet).await { 
+                            let _ = rest_client_r.send_l1_action(&cancel_a, cn, csig).await; 
+                        }
+                    }
+                    last_protected_pos = 0.0; 
+                    continue; // Csak a takarítás UTÁN ugorhat a következő ciklusra
+                }
                 
                 let dangerous_oids: Vec<u64> = if let Some(arr) = fe_prot.as_array() {
                     arr.iter().filter(|o| o["coin"].as_str() == Some(coin_reconcile.as_str()))
