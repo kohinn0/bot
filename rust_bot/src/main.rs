@@ -157,27 +157,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 // A reconcile ~1s-onként írja a szim pozíciót; addig current_pos lehet 0, miközben HL-n már van trade.
                 // Csak akkor hívunk API-t, ha egyébként létrát küldenénk (min_slice ok) — ne spammeljünk 5 ms-onként.
-                if let Ok(st) = rest_client_t.get_user_state(hl_user_t.as_str()).await {
-                    let mut ex_pos = 0.0f64;
-                    if let Some(arr) = st["assetPositions"].as_array() {
-                        for ap in arr {
-                            if ap["position"]["coin"].as_str() == Some(coin_signal.as_str()) {
-                                ex_pos = ap["position"]["szi"]
-                                    .as_str()
-                                    .unwrap_or("0")
-                                    .parse()
-                                    .unwrap_or(0.0);
-                                break;
+                match rest_client_t.get_user_state(hl_user_t.as_str()).await {
+                    Ok(st) => {
+                        let mut ex_pos = 0.0f64;
+                        if let Some(arr) = st["assetPositions"].as_array() {
+                            for ap in arr {
+                                if ap["position"]["coin"].as_str() == Some(coin_signal.as_str()) {
+                                    ex_pos = ap["position"]["szi"]
+                                        .as_str()
+                                        .unwrap_or("0")
+                                        .parse()
+                                        .unwrap_or(0.0);
+                                    break;
+                                }
                             }
                         }
+                        if ex_pos.abs() > 0.0001 {
+                            tracing::info!(
+                                "Szignál-létra kihagyva: HL pozíció {:.4} (szim {:.4}, reconcile késik)",
+                                ex_pos,
+                                current_pos
+                            );
+                            *pos_sim_t.lock().await = ex_pos;
+                            continue;
+                        }
                     }
-                    if ex_pos.abs() > 0.0001 {
-                        tracing::info!(
-                            "Szignál-létra kihagyva: HL pozíció {:.4} (szim {:.4}, reconcile késik)",
-                            ex_pos,
-                            current_pos
+                    Err(e) => {
+                        tracing::warn!(
+                            "Szignál-létra kihagyva: get_user_state hiba (nem küldünk létrát biztonsági okból): {}",
+                            e
                         );
-                        *pos_sim_t.lock().await = ex_pos;
                         continue;
                     }
                 }
@@ -344,10 +353,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     last_protected_pos = 0.0; continue;
                 }
 
-                // 🛡️ 3. ANTI-STALE LADDER (Csak a védelem maradhat)
+                // 🛡️ 3. ANTI-STALE LADDER (Csak TP/SL trigger maradhat)
+                // Korábban !reduceOnly szűrő miatt a maker „szellem” limit (reduce-only, nem trigger) nem törlődött.
                 if ex_pos.abs() > 0.0001 {
                     let stale: Vec<u64> = fe.as_array().unwrap_or(&vec![]).iter()
-                        .filter(|o| o["coin"].as_str() == Some(&coin_rec) && !o["isPositionTpsl"].as_bool().unwrap_or(false) && !o["reduceOnly"].as_bool().unwrap_or(false))
+                        .filter(|o| {
+                            if o["coin"].as_str() != Some(&coin_rec) {
+                                return false;
+                            }
+                            let protect = o["isPositionTpsl"].as_bool() == Some(true)
+                                || o["isTrigger"].as_bool() == Some(true);
+                            !protect
+                        })
                         .filter_map(|o| o["oid"].as_u64().or_else(|| o["oid"].as_str().and_then(|v| v.parse().ok()))).collect();
                     if !stale.is_empty() {
                         let action = om_rec.build_cancel_payload(&stale);
