@@ -213,6 +213,48 @@ fn parse_order_oid(ord: &Value) -> Option<u64> {
         .or_else(|| ord["oid"].as_str().and_then(|v| v.parse().ok()))
 }
 
+fn json_truthy(v: &Value) -> bool {
+    match v {
+        Value::Bool(b) => *b,
+        Value::Number(n) => n.as_f64().map(|x| x != 0.0).unwrap_or(false),
+        Value::String(s) => s == "true" || s == "1",
+        _ => false,
+    }
+}
+
+/// TP/SL és egyéb trigger orderek — ezeket nem szabad „stale létra” / szignál cancellel eltenni.
+/// A HL néha nem boolt ad (vagy csak triggerPx / orderType alapján lehet felismerni).
+pub fn hl_order_is_protected(ord: &Value) -> bool {
+    if json_truthy(&ord["isPositionTpsl"]) || json_truthy(&ord["isTrigger"]) {
+        return true;
+    }
+    if let Some(tc) = ord.get("triggerCondition").and_then(|v| v.as_str()) {
+        if !tc.is_empty() {
+            return true;
+        }
+    }
+    if let Some(tp) = ord.get("triggerPx") {
+        if !tp.is_null() {
+            let ok = tp.as_str().map(|s| !s.is_empty() && s != "0").unwrap_or(false)
+                || tp.as_f64().map(|x| x.abs() > 1e-12).unwrap_or(false);
+            if ok {
+                return true;
+            }
+        }
+    }
+    if let Some(ot) = ord.get("orderType").and_then(|v| v.as_str()) {
+        let o = ot.to_ascii_lowercase();
+        if o.contains("take profit")
+            || o.contains("stop market")
+            || o.contains("stop limit")
+            || o.contains("stop loss")
+        {
+            return true;
+        }
+    }
+    false
+}
+
 pub fn filter_cancel_oids_excluding_position_tpsl_triggers(
     frontend_orders: &Value,
     coin: &str,
@@ -222,9 +264,7 @@ pub fn filter_cancel_oids_excluding_position_tpsl_triggers(
     let mut protected = HashSet::new();
     for ord in arr {
         if ord["coin"].as_str() != Some(coin) { continue; }
-        let protect = ord["isPositionTpsl"].as_bool() == Some(true)
-            || ord["isTrigger"].as_bool() == Some(true);
-        if protect {
+        if hl_order_is_protected(ord) {
             if let Some(oid) = parse_order_oid(ord) { protected.insert(oid); }
         }
     }
@@ -236,8 +276,7 @@ pub fn collect_ladder_cancel_oids_from_frontend(frontend_orders: &Value, coin: &
     let mut out = Vec::new();
     for ord in arr {
         if ord["coin"].as_str() != Some(coin) { continue; }
-        if ord["isPositionTpsl"].as_bool() == Some(true) { continue; }
-        if ord["isTrigger"].as_bool() == Some(true) { continue; }
+        if hl_order_is_protected(ord) { continue; }
         if let Some(oid) = parse_order_oid(ord) { out.push(oid); }
     }
     out
@@ -332,5 +371,17 @@ mod tests {
             ]
         });
         assert!((parse_spot_usdc_total_usd(&s) - 50.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn hl_order_is_protected_plain_limit_vs_triggers() {
+        let ghost = json!({"coin": "SOL", "orderType": "Limit", "reduceOnly": true, "limitPx": "82.35"});
+        assert!(!hl_order_is_protected(&ghost));
+        let tp = json!({"coin": "SOL", "orderType": "Take Profit Market"});
+        assert!(hl_order_is_protected(&tp));
+        let sl = json!({"coin": "SOL", "orderType": "Stop Market"});
+        assert!(hl_order_is_protected(&sl));
+        let trig_px = json!({"coin": "SOL", "orderType": "Limit", "triggerPx": "81.5"});
+        assert!(hl_order_is_protected(&trig_px));
     }
 }

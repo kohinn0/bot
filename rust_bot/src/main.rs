@@ -15,6 +15,7 @@ use crate::network::client::{
     collect_resting_oids_from_exchange_response,
     exchange_order_submission_ok,
     filter_cancel_oids_excluding_position_tpsl_triggers,
+    hl_order_is_protected,
     HyperliquidClient,
 };
 use crate::network::feed::HyperliquidFeed;
@@ -191,13 +192,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
 
+                let fe_orders = rest_client_t.get_frontend_open_orders(hl_user_t.as_str()).await.ok();
+                if let Some(ref fe) = fe_orders {
+                    let has_protected = fe.as_array().unwrap_or(&vec![]).iter().any(|o| {
+                        o["coin"].as_str() == Some(coin_signal.as_str()) && hl_order_is_protected(o)
+                    });
+                    if has_protected {
+                        tracing::info!(
+                            "Szignál-létra kihagyva: TP/SL vagy trigger order már a könyvön (ne tegyünk rá maker létrát)"
+                        );
+                        continue;
+                    }
+                }
+
                 last_signal_time = std::time::Instant::now();
 
                 info!("🚨 SZIGNÁL: {} @ {:.4}", signal.side, signal.target_mid);
                 *vol_sim_t.lock().await = signal.volatility;
                 order_manager.current_pos = current_pos;
 
-                let fe_orders = rest_client_t.get_frontend_open_orders(hl_user_t.as_str()).await.ok();
                 // Feed OID = utolsó batch válaszból; ha nem üres, régen kihagytuk a frontend uniót,
                 // és a feedben nem szereplő (szellem) limit soha nem került cancelre → dupla exit.
                 let mut cancel_oids = {
@@ -365,9 +378,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if o["coin"].as_str() != Some(&coin_rec) {
                                 return false;
                             }
-                            let protect = o["isPositionTpsl"].as_bool() == Some(true)
-                                || o["isTrigger"].as_bool() == Some(true);
-                            !protect
+                            !hl_order_is_protected(o)
                         })
                         .filter_map(|o| o["oid"].as_u64().or_else(|| o["oid"].as_str().and_then(|v| v.parse().ok()))).collect();
                     if !stale.is_empty() {
@@ -377,9 +388,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
 
                     let has_tpsl = fe.as_array().unwrap_or(&vec![]).iter().any(|o| {
-                        o["coin"].as_str() == Some(&coin_rec)
-                            && (o["isPositionTpsl"].as_bool() == Some(true)
-                                || o["isTrigger"].as_bool() == Some(true))
+                        o["coin"].as_str() == Some(&coin_rec) && hl_order_is_protected(o)
                     });
                     if has_tpsl && (ex_pos.abs() - last_protected_pos.abs()).abs() < 0.0001 { continue; }
                 }
