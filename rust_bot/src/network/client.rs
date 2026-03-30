@@ -175,6 +175,24 @@ pub fn exchange_order_submission_ok(body: &Value) -> bool {
     true
 }
 
+/// Naplóz + `true` ha HTTP ok és `exchange_order_submission_ok` (order/cancel/leverage válaszok).
+pub fn exchange_action_ok_or_warn(ctx: &str, res: &Result<Value, reqwest::Error>) -> bool {
+    match res {
+        Err(e) => {
+            tracing::warn!("{}: HTTP / válasz parse: {}", ctx, e);
+            false
+        }
+        Ok(body) => {
+            if exchange_order_submission_ok(body) {
+                true
+            } else {
+                tracing::warn!("{}: HL válasz nem ok: {:?}", ctx, body);
+                false
+            }
+        }
+    }
+}
+
 
 
 pub fn collect_position_tpsl_oids(frontend_orders: &Value, coin: &str) -> Vec<u64> {

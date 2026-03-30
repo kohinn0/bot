@@ -1,6 +1,7 @@
 //! SebessegBot: **szignál loop** (maker létra) és **reconcile** (pozíció, TP/SL, dust) párhuzamosan fut.
 //! Közös `current_position` + Hyperliquid REST. Új létra csak akkor mehet, ha a clearinghouse szerint
 //! nincs pozíció, létra-cancel után a könyv üres erre a coinra, és nincs blokkoló order (TP/SL / reduce-only).
+//! Minden **L1** (aláírás + POST) a `HyperliquidL1Gate`-en megy: soros végrehajtás + szigorúan növekvő nonce.
 
 mod config;
 mod network;
@@ -11,6 +12,7 @@ use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
 use std::sync::Arc;
 use crate::config::AppConfig;
+use crate::logic::l1_gate::HyperliquidL1Gate;
 use crate::logic::signer::HyperliquidSigner;
 use crate::logic::signal::SignalEngine;
 use crate::logic::order_manager::OrderManager;
@@ -20,7 +22,7 @@ use crate::network::client::{
     clearinghouse_position_for_coin,
     collect_ladder_cancel_oids_from_frontend,
     collect_resting_oids_from_exchange_response,
-    exchange_order_submission_ok,
+    exchange_action_ok_or_warn,
     filter_cancel_oids_excluding_position_tpsl_triggers,
     frontend_has_any_open_order_for_coin,
     frontend_has_blocking_orders_for_coin,
@@ -74,6 +76,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut signal_engine = SignalEngine::new(app_config.strategy.clone());
     let mut order_manager = OrderManager::new(app_config.strategy.clone(), asset_idx, sz_decimals);
     let (signer, rest_client) = (Arc::new(signer), Arc::new(rest_client));
+    let l1_gate = Arc::new(HyperliquidL1Gate::new());
 
     // Háttérben: számlaérték frissítése 30mp-enként — drawdown limit + notional sizing
     // Nélküle wallet_equity soha nem változik, a 10% drawdown limit sosem triggerel.
@@ -96,20 +99,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    // Leverage beállítás indításkor
+    // Leverage beállítás indításkor (L1 gate: soros nonce + válasz ellenőrzés)
     if !app_config.is_dry_run {
         let lev = order_manager.build_leverage_payload();
-        let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
-        if let Ok(sig) = signer.sign_l1_action(&lev, nonce, is_mainnet).await {
-            match rest_client.send_l1_action(&lev, nonce, sig).await {
-                Ok(_) => info!("✅ Leverage {}x beállítva", app_config.strategy.leverage),
-                Err(e) => tracing::warn!("⚠️ Leverage beállítás hiba: {}", e),
+        let res: Result<serde_json::Value, String> = l1_gate
+            .run(|nonce| {
+                let s = signer.clone();
+                let r = rest_client.clone();
+                async move {
+                    let sig = s
+                        .sign_l1_action(&lev, nonce, is_mainnet)
+                        .await
+                        .map_err(|e| format!("aláírás: {}", e))?;
+                    r.send_l1_action(&lev, nonce, sig)
+                        .await
+                        .map_err(|e| format!("HTTP: {}", e))
+                }
+            })
+            .await;
+        match res {
+            Ok(body) => {
+                if exchange_action_ok_or_warn("leverage", &Ok(body)) {
+                    info!("✅ Leverage {}x beállítva", app_config.strategy.leverage);
+                }
             }
+            Err(e) => tracing::warn!("⚠️ Leverage L1: {}", e),
         }
     }
 
-    let (signer_t, feed_t, rest_client_t, pos_sim_t, vol_sim_t, state_t, hl_user_t, target_notional_t, wallet_equity_t) = 
-        (signer.clone(), feed.clone(), rest_client.clone(), current_position.clone(), last_volatility.clone(), state_ref.clone(), hl_user.clone(), target_notional_usd.clone(), wallet_equity.clone());
+    let (signer_t, feed_t, rest_client_t, pos_sim_t, vol_sim_t, state_t, hl_user_t, target_notional_t, wallet_equity_t, l1_gate_t) = 
+        (signer.clone(), feed.clone(), rest_client.clone(), current_position.clone(), last_volatility.clone(), state_ref.clone(), hl_user.clone(), target_notional_usd.clone(), wallet_equity.clone(), l1_gate.clone());
     
     let mut last_signal_time = std::time::Instant::now() - std::time::Duration::from_secs(60);
     let min_signal_interval = std::time::Duration::from_millis(app_config.strategy.min_signal_interval_ms);
@@ -231,23 +250,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 if !cancel_oids.is_empty() {
                     let c_action = order_manager.build_cancel_payload(&cancel_oids);
-                    let c_nonce = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_millis() as u64;
-                    if let Ok(sig) = signer_t.sign_l1_action(&c_action, c_nonce, is_mainnet_for_signal).await {
-                        match rest_client_t.send_l1_action(&c_action, c_nonce, sig).await {
-                            Ok(body) => {
-                                if !exchange_order_submission_ok(&body) {
-                                    tracing::warn!(
-                                        "Létra-cancel válasz nem ok: {:?}",
-                                        body.get("response").or_else(|| body.get("status"))
-                                    );
+                    l1_gate_t
+                        .run(|nonce| {
+                            let signer = signer_t.clone();
+                            let rest = rest_client_t.clone();
+                            let net = is_mainnet_for_signal;
+                            async move {
+                                match signer.sign_l1_action(&c_action, nonce, net).await {
+                                    Ok(sig) => {
+                                        let res = rest.send_l1_action(&c_action, nonce, sig).await;
+                                        let _ = exchange_action_ok_or_warn("szignál létra-cancel", &res);
+                                    }
+                                    Err(e) => tracing::warn!("szignál létra-cancel aláírás: {}", e),
                                 }
                             }
-                            Err(e) => tracing::warn!("Létra-cancel HTTP/parse hiba: {}", e),
-                        }
-                    }
+                        })
+                        .await;
                     tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
                 }
 
@@ -338,27 +356,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     tracing::warn!("Létra üres (min notional / szűrők) — nem küldünk order actiont");
                     continue;
                 }
-                let nonce = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis() as u64;
-                if let Ok(sig) = signer_t.sign_l1_action(&action, nonce, is_mainnet_for_signal).await {
-                    if let Ok(body) = rest_client_t.send_l1_action(&action, nonce, sig).await {
-                        if exchange_order_submission_ok(&body) {
-                            let new_oids = collect_resting_oids_from_exchange_response(&body);
-                            if !new_oids.is_empty() {
-                                feed_t.open_order_oids.lock().await.extend(new_oids);
+                l1_gate_t
+                    .run(|nonce| {
+                        let signer = signer_t.clone();
+                        let rest = rest_client_t.clone();
+                        let feed = feed_t.clone();
+                        let act = action.clone();
+                        let net = is_mainnet_for_signal;
+                        async move {
+                            match signer.sign_l1_action(&act, nonce, net).await {
+                                Ok(sig) => {
+                                    let res = rest.send_l1_action(&act, nonce, sig).await;
+                                    if exchange_action_ok_or_warn("szignál létra", &res) {
+                                        if let Ok(ref body) = res {
+                                            let new_oids = collect_resting_oids_from_exchange_response(body);
+                                            if !new_oids.is_empty() {
+                                                feed.open_order_oids.lock().await.extend(new_oids);
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(e) => tracing::warn!("szignál létra aláírás: {}", e),
                             }
                         }
-                    }
-                }
+                    })
+                    .await;
             }
             tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
         }
     });
 
-    let (signer_r, rest_client_r, pos_rec_t, state_rec, vol_rec_t, hl_user_r, coin_rec) = 
-        (signer.clone(), rest_client.clone(), current_position.clone(), state_ref.clone(), last_volatility.clone(), hl_user.clone(), coin.clone());
+    let (signer_r, rest_client_r, pos_rec_t, state_rec, vol_rec_t, hl_user_r, coin_rec, l1_gate_r) = 
+        (signer.clone(), rest_client.clone(), current_position.clone(), state_ref.clone(), last_volatility.clone(), hl_user.clone(), coin.clone(), l1_gate.clone());
     let om_rec = Arc::new(OrderManager::new(app_config.strategy.clone(), asset_idx, sz_decimals));
 
     tokio::spawn(async move {
@@ -394,21 +423,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let ioc_px = if ex_pos > 0.0 { bid } else { ask };
                     info!("🗑️ Dust detektálva (${:.2}). IOC zárás bid={:.4} ask={:.4}", notional_val, bid, ask);
                     let close_action = om_rec.build_market_close_payload(ex_pos < 0.0, ioc_px, ex_pos.abs());
-                    let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
-                    if let Ok(sig) = signer_r.sign_l1_action(&close_action, nonce, app_config.is_mainnet).await {
-                        let _ = rest_client_r.send_l1_action(&close_action, nonce, sig).await;
-                    }
-                    
+                    l1_gate_r
+                        .run(|nonce| {
+                            let s = signer_r.clone();
+                            let r = rest_client_r.clone();
+                            let net = app_config.is_mainnet;
+                            async move {
+                                match s.sign_l1_action(&close_action, nonce, net).await {
+                                    Ok(sig) => {
+                                        let res = r.send_l1_action(&close_action, nonce, sig).await;
+                                        let _ = exchange_action_ok_or_warn("reconcile dust IOC zárás", &res);
+                                    }
+                                    Err(e) => tracing::warn!("dust zárás aláírás: {}", e),
+                                }
+                            }
+                        })
+                        .await;
+
                     let all_oids: Vec<u64> = fe.as_array().unwrap_or(&vec![]).iter()
                         .filter(|o| o["coin"].as_str() == Some(&coin_rec))
                         .filter_map(|o| o["oid"].as_u64().or_else(|| o["oid"].as_str().and_then(|v| v.parse().ok()))).collect();
-                    
+
                     if !all_oids.is_empty() {
-                        let c_nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
                         let cancel_a = om_rec.build_cancel_payload(&all_oids);
-                        if let Ok(csig) = signer_r.sign_l1_action(&cancel_a, c_nonce, app_config.is_mainnet).await {
-                            let _ = rest_client_r.send_l1_action(&cancel_a, c_nonce, csig).await;
-                        }
+                        l1_gate_r
+                            .run(|nonce| {
+                                let s = signer_r.clone();
+                                let r = rest_client_r.clone();
+                                let net = app_config.is_mainnet;
+                                async move {
+                                    match s.sign_l1_action(&cancel_a, nonce, net).await {
+                                        Ok(sig) => {
+                                            let res = r.send_l1_action(&cancel_a, nonce, sig).await;
+                                            let _ = exchange_action_ok_or_warn("reconcile dust utáni cancel", &res);
+                                        }
+                                        Err(e) => tracing::warn!("dust cancel aláírás: {}", e),
+                                    }
+                                }
+                            })
+                            .await;
                     }
                     last_protected_pos = 0.0;
                     continue;
@@ -422,8 +475,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .filter_map(|o| o["oid"].as_u64().or_else(|| o["oid"].as_str().and_then(|v| v.parse().ok()))).collect();
                         if !oids.is_empty() {
                             let action = om_rec.build_cancel_payload(&oids);
-                            let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
-                            if let Ok(sig) = signer_r.sign_l1_action(&action, nonce, app_config.is_mainnet).await { let _ = rest_client_r.send_l1_action(&action, nonce, sig).await; }
+                            l1_gate_r
+                                .run(|nonce| {
+                                    let s = signer_r.clone();
+                                    let r = rest_client_r.clone();
+                                    let net = app_config.is_mainnet;
+                                    async move {
+                                        match s.sign_l1_action(&action, nonce, net).await {
+                                            Ok(sig) => {
+                                                let res = r.send_l1_action(&action, nonce, sig).await;
+                                                let _ = exchange_action_ok_or_warn("reconcile flat takarítás cancel", &res);
+                                            }
+                                            Err(e) => tracing::warn!("flat cancel aláírás: {}", e),
+                                        }
+                                    }
+                                })
+                                .await;
                         }
                     }
                     last_protected_pos = 0.0; continue;
@@ -442,8 +509,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .filter_map(|o| o["oid"].as_u64().or_else(|| o["oid"].as_str().and_then(|v| v.parse().ok()))).collect();
                     if !stale.is_empty() {
                         let action = om_rec.build_cancel_payload(&stale);
-                        let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
-                        if let Ok(sig) = signer_r.sign_l1_action(&action, nonce, app_config.is_mainnet).await { let _ = rest_client_r.send_l1_action(&action, nonce, sig).await; }
+                        l1_gate_r
+                            .run(|nonce| {
+                                let s = signer_r.clone();
+                                let r = rest_client_r.clone();
+                                let net = app_config.is_mainnet;
+                                async move {
+                                    match s.sign_l1_action(&action, nonce, net).await {
+                                        Ok(sig) => {
+                                            let res = r.send_l1_action(&action, nonce, sig).await;
+                                            let _ = exchange_action_ok_or_warn("reconcile stale létra cancel", &res);
+                                        }
+                                        Err(e) => tracing::warn!("stale cancel aláírás: {}", e),
+                                    }
+                                }
+                            })
+                            .await;
                     }
 
                     let has_tpsl = fe.as_array().unwrap_or(&vec![]).iter().any(|o| {
@@ -457,9 +538,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if ref_px <= 0.0 { continue; }
                 if let Some((tp, sl)) = OrderManager::tp_sl_prices_for_position(ex_pos, ref_px, *vol_rec_t.lock().await, app_config.strategy.min_tick_size, app_config.strategy.tp_min_ticks, app_config.strategy.sl_min_ticks, state_rec.read().await.mid_price, app_config.strategy.maker_fee_rate, app_config.strategy.taker_fee_rate) {
                     let prot = om_rec.build_protective_tpsl_payload(if ex_pos > 0.0 { "Sell" } else { "Buy" }, tp, sl, ex_pos.abs());
-                    let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
-                    if let Ok(sig) = signer_r.sign_l1_action(&prot, nonce, app_config.is_mainnet).await {
-                        if let Ok(_) = rest_client_r.send_l1_action(&prot, nonce, sig).await { last_protected_pos = ex_pos; }
+                    let ok = l1_gate_r
+                        .run(|nonce| {
+                            let s = signer_r.clone();
+                            let r = rest_client_r.clone();
+                            let net = app_config.is_mainnet;
+                            async move {
+                                match s.sign_l1_action(&prot, nonce, net).await {
+                                    Ok(sig) => {
+                                        let res = r.send_l1_action(&prot, nonce, sig).await;
+                                        exchange_action_ok_or_warn("reconcile TP/SL", &res)
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("TP/SL aláírás: {}", e);
+                                        false
+                                    }
+                                }
+                            }
+                        })
+                        .await;
+                    if ok {
+                        last_protected_pos = ex_pos;
                     }
                 }
             }
