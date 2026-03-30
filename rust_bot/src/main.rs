@@ -31,6 +31,8 @@ use crate::network::client::{
     filter_cancel_oids_excluding_position_tpsl_triggers,
     frontend_has_any_open_order_for_coin,
     frontend_has_blocking_orders_for_coin,
+    get_frontend_open_orders_retry_ok,
+    get_frontend_open_orders_retry_ok_fast,
     get_user_state_retry_ok,
     get_user_state_retry_ok_fast,
     hl_order_is_protected,
@@ -213,7 +215,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     continue;
                 }
 
-                let fe_orders = match rest_client_t.get_frontend_open_orders(hl_user_t.as_str()).await {
+                let fe_orders = match get_frontend_open_orders_retry_ok(&rest_client_t, hl_user_t.as_str()).await {
                     Ok(f) => f,
                     Err(e) => {
                         tracing::warn!(
@@ -268,7 +270,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
 
                 // A reconcile párhuzamosan tehet ki TP/SL-t; a cancel közben lejárt → új pillanatkép kötelező.
-                let fe2 = match rest_client_t.get_frontend_open_orders(hl_user_t.as_str()).await {
+                let fe2 = match get_frontend_open_orders_retry_ok(&rest_client_t, hl_user_t.as_str()).await {
                     Ok(f) => f,
                     Err(e) => {
                         tracing::warn!(
@@ -414,7 +416,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
                 let (ex_pos, ent_px) = clearinghouse_position_for_coin(&st, &coin_rec);
                 *pos_rec_t.lock().await = ex_pos;
-                let fe = match rest_client_r.get_frontend_open_orders(hl_user_r.as_str()).await { Ok(v) => v, Err(_) => continue };
+                let fe = match get_frontend_open_orders_retry_ok(&rest_client_r, hl_user_r.as_str()).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!("reconcile: frontendOpenOrders {}", e);
+                        continue;
+                    }
+                };
                 let ref_px = ent_px.unwrap_or(state_rec.read().await.mid_price);
                 let notional_val = ex_pos.abs() * ref_px;
 
@@ -609,7 +617,7 @@ async fn ladder_gate_flat_ok(
                 return false;
             }
         }
-        match rest.get_frontend_open_orders(user).await {
+        match get_frontend_open_orders_retry_ok_fast(rest, user).await {
             Ok(fe) => {
                 if frontend_has_blocking_orders_for_coin(&fe, coin)
                     || frontend_has_any_open_order_for_coin(&fe, coin)
