@@ -4,6 +4,8 @@
 //! Minden **L1** (aláírás + POST) a `HyperliquidL1Gate`-en megy: soros végrehajtás + szigorúan növekvő nonce.
 //! A szignál-létra a gate alatt kétszer (120 ms különbséggel) lekéri a clearinghouse-t és a könyvet — a HL API
 //! néha később mutatja a TP/SL-t; egy olvasás alatt átcsúszhatna a maker létra.
+//! A szignál-intervallum lejárta után **azonnal** élő `get_user_state` fut (nem csak min_slice után), különben
+//! elavult `pos_sim` mellett a pozícióellenőrzés ki sem futna.
 
 mod config;
 mod network;
@@ -149,6 +151,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             };
             if let Some(signal) = signal_engine.tick(mid).await {
+                // Csak akkor hívunk HL-t, ha a szignál-intervallum lejárt — különben 5 ms-onként spammelnénk.
+                if last_signal_time.elapsed() < min_signal_interval {
+                    continue;
+                }
+
+                // Élő clearinghouse **előbb**, mint bármi `pos_sim`-re épülő ág: különben a min_slice elutasításnál
+                // soha nem futna le a pozícióellenőrzés (22:17-es „szellem létra” 60 mp után).
+                match rest_client_t.get_user_state(hl_user_t.as_str()).await {
+                    Ok(st) => {
+                        if clearinghouse_has_error(&st) {
+                            tracing::warn!(
+                                "Szignál-létra kihagyva: clearinghouseState error: {:?}",
+                                st.get("error")
+                            );
+                            continue;
+                        }
+                        let ex_pos = clearinghouse_coin_szi(&st, coin_signal.as_str());
+                        *pos_sim_t.lock().await = ex_pos;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Szignál-létra kihagyva: get_user_state hiba (nem küldünk létrát biztonsági okból): {}",
+                            e
+                        );
+                        continue;
+                    }
+                }
+
                 let current_pos = *pos_sim_t.lock().await;
                 let is_reducing = (current_pos.abs() > 0.001)
                     && ((current_pos > 0.0 && signal.side == "Sell")
@@ -160,9 +190,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 {
                     continue;
                 }
-                if last_signal_time.elapsed() < min_signal_interval {
-                    continue;
-                }
                 if strategy_for_signal.max_positions == 1
                     && current_pos.abs() > 0.001
                     && !is_reducing
@@ -172,6 +199,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 // Pozícióban: nincs új maker létra — a TP/SL + dust loop intézi a kilépést (különben dupla exit, felesleges fee)
                 if current_pos.abs() > 0.001 {
+                    tracing::debug!(
+                        "Szignál-létra kihagyva: pozíció {:.4} (élő HL)",
+                        current_pos
+                    );
                     continue;
                 }
 
@@ -184,37 +215,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         strategy_for_signal.min_ladder_order_notional_usd
                     );
                     continue;
-                }
-
-                // A reconcile ~1s-onként írja a szim pozíciót; addig current_pos lehet 0, miközben HL-n már van trade.
-                // Csak akkor hívunk API-t, ha egyébként létrát küldenénk (min_slice ok) — ne spammeljünk 5 ms-onként.
-                match rest_client_t.get_user_state(hl_user_t.as_str()).await {
-                    Ok(st) => {
-                        if clearinghouse_has_error(&st) {
-                            tracing::warn!(
-                                "Szignál-létra kihagyva: clearinghouseState error: {:?}",
-                                st.get("error")
-                            );
-                            continue;
-                        }
-                        let ex_pos = clearinghouse_coin_szi(&st, coin_signal.as_str());
-                        if ex_pos.abs() > 0.0001 {
-                            tracing::info!(
-                                "Szignál-létra kihagyva: HL pozíció {:.4} (szim {:.4}, reconcile késik)",
-                                ex_pos,
-                                current_pos
-                            );
-                            *pos_sim_t.lock().await = ex_pos;
-                            continue;
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "Szignál-létra kihagyva: get_user_state hiba (nem küldünk létrát biztonsági okból): {}",
-                            e
-                        );
-                        continue;
-                    }
                 }
 
                 let fe_orders = match rest_client_t.get_frontend_open_orders(hl_user_t.as_str()).await {
