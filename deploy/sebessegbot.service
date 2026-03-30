@@ -1,5 +1,7 @@
 # Hyperliquid SebessegBot – systemd (SSH bezárása után is fut, crash után újraindul)
 #
+# Kód frissítés + újrafordítás (repo gyökerében): ./setup.sh update
+#
 # Telepítés:
 #   sudo cp deploy/sebessegbot.service /etc/systemd/system/
 #   sudo nano /etc/systemd/system/sebessegbot.service   # User + útvonalak!

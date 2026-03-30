@@ -107,44 +107,110 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tokio::spawn(async move {
         loop {
-            let mid = { let s = state_t.read().await; if s.best_bid > 0.0 && s.best_ask > 0.0 { (s.best_bid + s.best_ask) / 2.0 } else { 0.0 } };
-                if let Some(signal) = signal_engine.tick(mid).await {
+            let mid = {
+                let s = state_t.read().await;
+                if s.best_bid > 0.0 && s.best_ask > 0.0 {
+                    (s.best_bid + s.best_ask) / 2.0
+                } else {
+                    0.0
+                }
+            };
+            if let Some(signal) = signal_engine.tick(mid).await {
                 let current_pos = *pos_sim_t.lock().await;
-                let is_reducing = (current_pos.abs() > 0.001) && ((current_pos > 0.0 && signal.side == "Sell") || (current_pos < 0.0 && signal.side == "Buy"));
+                let is_reducing = (current_pos.abs() > 0.001)
+                    && ((current_pos > 0.0 && signal.side == "Sell")
+                        || (current_pos < 0.0 && signal.side == "Buy"));
 
-                if !is_reducing && (session_start_equity - *wallet_equity_t.lock().await) >= (session_start_equity * 0.10) { continue; }
-                if last_signal_time.elapsed() < min_signal_interval { continue; }
-                if app_config.strategy.max_positions == 1 && current_pos.abs() > 0.001 && !is_reducing { continue; }
+                if !is_reducing
+                    && (session_start_equity - *wallet_equity_t.lock().await)
+                        >= (session_start_equity * 0.10)
+                {
+                    continue;
+                }
+                if last_signal_time.elapsed() < min_signal_interval {
+                    continue;
+                }
+                if app_config.strategy.max_positions == 1
+                    && current_pos.abs() > 0.001
+                    && !is_reducing
+                {
+                    continue;
+                }
+
+                last_signal_time = std::time::Instant::now();
 
                 info!("🚨 SZIGNÁL: {} @ {:.4}", signal.side, signal.target_mid);
                 *vol_sim_t.lock().await = signal.volatility;
                 order_manager.current_pos = current_pos;
 
                 let fe_orders = rest_client_t.get_frontend_open_orders(hl_user_t.as_str()).await.ok();
-                let mut cancel_oids = { let mut t = feed_t.open_order_oids.lock().await; let o = t.clone(); t.clear(); o };
-                if cancel_oids.is_empty() { if let Some(ref fe) = fe_orders { cancel_oids = collect_ladder_cancel_oids_from_frontend(fe, &coin_signal); } }
-                if let Some(ref fe) = fe_orders { cancel_oids = filter_cancel_oids_excluding_position_tpsl_triggers(fe, &coin_signal, cancel_oids); }
+                let mut cancel_oids = {
+                    let mut t = feed_t.open_order_oids.lock().await;
+                    let o = t.clone();
+                    t.clear();
+                    o
+                };
+                if cancel_oids.is_empty() {
+                    if let Some(ref fe) = fe_orders {
+                        cancel_oids = collect_ladder_cancel_oids_from_frontend(fe, &coin_signal);
+                    }
+                }
+                if let Some(ref fe) = fe_orders {
+                    cancel_oids =
+                        filter_cancel_oids_excluding_position_tpsl_triggers(fe, &coin_signal, cancel_oids);
+                }
 
                 if !cancel_oids.is_empty() {
                     let c_action = order_manager.build_cancel_payload(&cancel_oids);
-                    let c_nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
-                    if let Ok(sig) = signer_t.sign_l1_action(&c_action, c_nonce, app_config.is_mainnet).await { let _ = rest_client_t.send_l1_action(&c_action, c_nonce, sig).await; }
+                    let c_nonce = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis() as u64;
+                    if let Ok(sig) = signer_t.sign_l1_action(&c_action, c_nonce, app_config.is_mainnet).await {
+                        let _ = rest_client_t.send_l1_action(&c_action, c_nonce, sig).await;
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
                 }
 
                 let s = state_t.read().await;
-                let (bid, ask, mid) = (s.best_bid, s.best_ask, if s.best_bid > 0.0 { (s.best_bid + s.best_ask) / 2.0 } else { signal.target_mid });
-                if bid <= 0.0 { continue; }
+                let (bid, ask, mid) = (
+                    s.best_bid,
+                    s.best_ask,
+                    if s.best_bid > 0.0 {
+                        (s.best_bid + s.best_ask) / 2.0
+                    } else {
+                        signal.target_mid
+                    },
+                );
+                if bid <= 0.0 {
+                    continue;
+                }
 
-                let action = order_manager.build_ladder_payload(&signal.side, mid, bid, ask, *target_notional_t.lock().await, if is_reducing { Some(order_manager.quantize_position_sz(current_pos.abs())) } else { None });
-                let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+                let action = order_manager.build_ladder_payload(
+                    &signal.side,
+                    mid,
+                    bid,
+                    ask,
+                    *target_notional_t.lock().await,
+                    if is_reducing {
+                        Some(order_manager.quantize_position_sz(current_pos.abs()))
+                    } else {
+                        None
+                    },
+                );
+                let nonce = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as u64;
                 if let Ok(sig) = signer_t.sign_l1_action(&action, nonce, app_config.is_mainnet).await {
                     if let Ok(body) = rest_client_t.send_l1_action(&action, nonce, sig).await {
                         if exchange_order_submission_ok(&body) {
                             let new_oids = collect_resting_oids_from_exchange_response(&body);
-                            if !new_oids.is_empty() { feed_t.open_order_oids.lock().await.extend(new_oids); }
+                            if !new_oids.is_empty() {
+                                feed_t.open_order_oids.lock().await.extend(new_oids);
+                            }
                         }
                     }
-                    last_signal_time = std::time::Instant::now();
                 }
             }
             tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;

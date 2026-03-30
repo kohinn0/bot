@@ -1,63 +1,191 @@
-#!/bin/bash
-# =============================================================
-# SebessegBot RUST – VPS Telepítő és Fordító
-# Használat: bash setup.sh
-# =============================================================
+#!/usr/bin/env bash
+# SebessegBot – egy szkript: telepítés, frissítés, fordítás, indítás / állapot.
+# Használat: ./setup.sh help
 
-set -e
+set -euo pipefail
 
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-RED='\033[0;31m'
-NC='\033[0m'
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RUST_BOT="$ROOT/rust_bot"
+BIN="$RUST_BOT/target/release/sebessegbot_rs"
+LOG="${BOT_LOG:-$RUST_BOT/bot.log}"
+PID_FILE="$RUST_BOT/bot.pid"
 
-BOT_DIR="$HOME/sebessegbot"
+die() { echo "Hiba: $*" >&2; exit 1; }
 
-echo -e "${YELLOW}[1/5] Rendszer frissítése és Linux C/C++ fordítók telepítése...${NC}"
-sudo apt-get update -qq
-sudo apt-get install -y -qq git curl build-essential libssl-dev pkg-config
+have_cmd() { command -v "$1" >/dev/null 2>&1; }
 
-echo -e "${YELLOW}[2/5] Rust Compiler telepítése...${NC}"
-if ! command -v cargo &> /dev/null; then
+ensure_cargo_env() {
+  if [[ -f "${HOME}/.cargo/env" ]]; then
+    # shellcheck source=/dev/null
+    source "${HOME}/.cargo/env"
+  fi
+}
+
+install_os_packages() {
+  if have_cmd apt-get; then
+    sudo apt-get update -qq
+    sudo apt-get install -y -qq git curl build-essential libssl-dev pkg-config
+  elif have_cmd dnf; then
+    sudo dnf install -y git curl gcc openssl-devel pkgconf-pkg-config
+  else
+    echo "Figyelem: nincs apt-get / dnf – telepíts kézzel: git, curl, C fordító, OpenSSL dev, pkg-config."
+  fi
+}
+
+ensure_rust() {
+  ensure_cargo_env
+  if have_cmd cargo; then
+    echo "Rust (cargo) rendben."
+    return
+  fi
+  if [[ ! -f "${HOME}/.cargo/env" ]] && have_cmd curl; then
+    echo "Rust telepítése (rustup)..."
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-    source "$HOME/.cargo/env"
-    echo -e "${GREEN}✅ Rust telepítve!${NC}"
-else
-    echo -e "${GREEN}✅ Rust már telepítve van.${NC}"
-    source "$HOME/.cargo/env"
-fi
+    ensure_cargo_env
+  fi
+  have_cmd cargo || die "cargo nem található. Telepítsd: https://rustup.rs"
+}
 
-echo -e "${YELLOW}[3/5] Rust Bot letöltése / frissítése a GitHubról...${NC}"
-if [ ! -d "$BOT_DIR/.git" ]; then
-    git clone https://github.com/kohinn0/bot "$BOT_DIR"
-else
-    cd "$BOT_DIR" && git pull --quiet
-fi
+git_sync() {
+  if [[ -d "$ROOT/.git" ]]; then
+    echo "Git pull: $ROOT"
+    git -C "$ROOT" pull --ff-only --quiet || git -C "$ROOT" pull
+  else
+    echo "Nincs .git – kihagyva (fejlesztői másolat vagy archívum)."
+  fi
+}
 
-# Környezeti változók másolása a Rust bothoz, ha léteznek a réginél
-if [ -f "$BOT_DIR/.env" ] && [ ! -f "$BOT_DIR/rust_bot/.env" ]; then
-    cp "$BOT_DIR/.env" "$BOT_DIR/rust_bot/.env"
-    echo -e "${GREEN}✅ .env konfiguráció áthozva az előző Python botból.${NC}"
-fi
+sync_dotenv() {
+  if [[ -f "$ROOT/.env" && ! -f "$RUST_BOT/.env" ]]; then
+    cp "$ROOT/.env" "$RUST_BOT/.env"
+    echo ".env átmásolva: $ROOT -> $RUST_BOT"
+  fi
+}
 
-cd "$BOT_DIR/rust_bot"
+do_build() {
+  [[ -d "$RUST_BOT" ]] || die "Nincs rust_bot könyvtár: $RUST_BOT"
+  ensure_cargo_env
+  echo "Release build: $RUST_BOT"
+  (cd "$RUST_BOT" && cargo build --release)
+  echo "Kész: $BIN"
+}
 
-echo -e "${YELLOW}[4/5] Bot fordítása (Release mode - Brutális sebesség)...${NC}"
-echo -e "Ez eltarthat 1-2 percig, ne zárd be az ablakot!"
-cargo build --release
+cmd_install() {
+  install_os_packages
+  ensure_rust
+  git_sync
+  sync_dotenv
+  do_build
+  echo ""
+  echo "Telepítés kész."
+  cmd_help_tail
+}
 
-echo -e "${GREEN}[5/5] ✅ KÉSZ! A Rust bot lefordult. ${NC}"
-echo -e "=========================================================="
-echo -e "${RED}⚠️  NE így indítsd SSH-ból (bezáráskor leáll):${NC} ./target/release/sebessegbot_rs"
-echo -e ""
-echo -e "${GREEN}A) Háttér (nohup) – gyors:${NC}"
-echo -e "   ${YELLOW}cd $BOT_DIR && bash scripts/nohup_bot.sh${NC}"
-echo -e "   Log: ${YELLOW}tail -f $BOT_DIR/rust_bot/bot.log${NC}"
-echo -e ""
-echo -e "${GREEN}B) systemd (ajánlott, SSH után is fut, crash után újraindul):${NC}"
-echo -e "   ${YELLOW}sudo cp $BOT_DIR/deploy/sebessegbot.service /etc/systemd/system/${NC}"
-echo -e "   Ellenőrizd: User, útvonalak. .env legyen: ${YELLOW}$BOT_DIR/rust_bot/.env${NC}"
-echo -e "   ${YELLOW}sudo systemctl daemon-reload && sudo systemctl enable --now sebessegbot${NC}"
-echo -e "   Állapot: ${YELLOW}bash $BOT_DIR/scripts/bot_status.sh${NC}"
-echo -e "   Miért állt meg: ${YELLOW}journalctl -u sebessegbot -n 80 --no-pager${NC}"
-echo -e "=========================================================="
+cmd_update() {
+  ensure_rust
+  git_sync
+  sync_dotenv
+  do_build
+  echo ""
+  echo "Frissítés kész."
+  cmd_help_tail
+}
+
+cmd_status() {
+  echo "=== systemd: sebessegbot ==="
+  if systemctl list-unit-files 2>/dev/null | grep -q '^sebessegbot\.service'; then
+    if systemctl is-active --quiet sebessegbot 2>/dev/null; then
+      echo "Állapot: aktív"
+    else
+      echo "Állapot: nem fut"
+    fi
+    systemctl is-enabled sebessegbot 2>/dev/null || true
+  else
+    echo "(nincs sebessegbot.service a systemd-ben)"
+  fi
+  echo ""
+  echo "=== folyamat: sebessegbot_rs ==="
+  pgrep -af sebessegbot_rs 2>/dev/null || echo "(nincs ilyen folyamat)"
+  echo ""
+  echo "=== utolsó log sorok: $LOG ==="
+  if [[ -f "$LOG" ]]; then
+    tail -n 15 "$LOG"
+  else
+    echo "(nincs log fájl)"
+  fi
+}
+
+cmd_start() {
+  if systemctl is-active --quiet sebessegbot 2>/dev/null; then
+    die "A bot systemd alatt fut. Használd: sudo systemctl stop sebessegbot – ne indítsd kétszer."
+  fi
+  [[ -x "$BIN" ]] || die "Nincs release bináris. Futtasd: $0 build"
+  if pgrep -f 'sebessegbot_rs' >/dev/null 2>&1; then
+    echo "Meglévő sebessegbot_rs leállítása..."
+    pkill -f 'target/release/sebessegbot_rs' || true
+    sleep 2
+  fi
+  mkdir -p "$(dirname "$LOG")"
+  echo "$(date -Iseconds) — nohup start" >>"$LOG"
+  pushd "$RUST_BOT" >/dev/null
+  nohup "$BIN" >>"$LOG" 2>&1 &
+  echo $! >"$PID_FILE"
+  popd >/dev/null
+  echo "Indítva. PID: $(cat "$PID_FILE")  |  log: tail -f $LOG"
+}
+
+cmd_stop() {
+  if systemctl is-active --quiet sebessegbot 2>/dev/null; then
+    echo "A bot systemd alatt fut. Állítsd le: sudo systemctl stop sebessegbot"
+    exit 1
+  fi
+  if pkill -f 'target/release/sebessegbot_rs' 2>/dev/null; then
+    echo "sebessegbot_rs leállítva."
+  else
+    echo "Nem futott sebessegbot_rs (vagy systemd kezeli)."
+  fi
+}
+
+cmd_help_tail() {
+  echo "Parancsok:"
+  echo "  $0 update   – git pull + újrafordítás"
+  echo "  $0 build    – csak fordítás"
+  echo "  $0 status   – systemd / folyamat / log"
+  echo "  $0 start    – háttér (nohup), ne systemd mellett"
+  echo "  $0 stop     – nohup leállítás"
+  echo ".env helye:   $RUST_BOT/.env"
+  echo "Stratégia:   $RUST_BOT/strategy_maker.json"
+  echo "systemd:     sudo cp $ROOT/deploy/sebessegbot.service /etc/systemd/system/  (User + útvonalak!)"
+}
+
+cmd_help() {
+  echo "SebessegBot – telepítés és üzemeltetés egy szkriptből."
+  echo ""
+  echo "Használat: $0 <parancs>"
+  echo ""
+  echo "  install   Első telepítés: OS csomagok (apt/dnf), Rust, git pull, .env másolás, release build"
+  echo "  update    Frissítés: git pull + release build"
+  echo "  build     Csak cargo build --release"
+  echo "  status    systemd / folyamat / log utolsó sorai"
+  echo "  start     Bot indítása nohup-pal (rust_bot mappából)"
+  echo "  stop      nohup folyamat leállítása"
+  echo "  help      Ez a súgó"
+  echo ""
+  cmd_help_tail
+}
+
+main() {
+  local sub="${1:-help}"
+  case "$sub" in
+    install) cmd_install ;;
+    update)  cmd_update ;;
+    build)   ensure_rust; do_build ;;
+    status)  cmd_status ;;
+    start)   cmd_start ;;
+    stop)    cmd_stop ;;
+    help|-h|--help) cmd_help ;;
+    *) die "Ismeretlen parancs: $sub  (futtasd: $0 help)" ;;
+  esac
+}
+
+main "$@"
