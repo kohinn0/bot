@@ -11,10 +11,12 @@ use crate::logic::signer::HyperliquidSigner;
 use crate::logic::signal::SignalEngine;
 use crate::logic::order_manager::OrderManager;
 use crate::network::client::{
+    clearinghouse_coin_szi,
     collect_ladder_cancel_oids_from_frontend,
     collect_resting_oids_from_exchange_response,
     exchange_order_submission_ok,
     filter_cancel_oids_excluding_position_tpsl_triggers,
+    frontend_has_blocking_orders_for_coin,
     hl_order_is_protected,
     HyperliquidClient,
 };
@@ -160,19 +162,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Csak akkor hívunk API-t, ha egyébként létrát küldenénk (min_slice ok) — ne spammeljünk 5 ms-onként.
                 match rest_client_t.get_user_state(hl_user_t.as_str()).await {
                     Ok(st) => {
-                        let mut ex_pos = 0.0f64;
-                        if let Some(arr) = st["assetPositions"].as_array() {
-                            for ap in arr {
-                                if ap["position"]["coin"].as_str() == Some(coin_signal.as_str()) {
-                                    ex_pos = ap["position"]["szi"]
-                                        .as_str()
-                                        .unwrap_or("0")
-                                        .parse()
-                                        .unwrap_or(0.0);
-                                    break;
-                                }
-                            }
-                        }
+                        let ex_pos = clearinghouse_coin_szi(&st, coin_signal.as_str());
                         if ex_pos.abs() > 0.0001 {
                             tracing::info!(
                                 "Szignál-létra kihagyva: HL pozíció {:.4} (szim {:.4}, reconcile késik)",
@@ -192,24 +182,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
 
-                let fe_orders = rest_client_t.get_frontend_open_orders(hl_user_t.as_str()).await.ok();
-                if let Some(ref fe) = fe_orders {
-                    let has_protected = fe.as_array().unwrap_or(&vec![]).iter().any(|o| {
-                        o["coin"].as_str() == Some(coin_signal.as_str()) && hl_order_is_protected(o)
-                    });
-                    if has_protected {
-                        tracing::info!(
-                            "Szignál-létra kihagyva: TP/SL vagy trigger order már a könyvön (ne tegyünk rá maker létrát)"
+                let fe_orders = match rest_client_t.get_frontend_open_orders(hl_user_t.as_str()).await {
+                    Ok(f) => f,
+                    Err(e) => {
+                        tracing::warn!(
+                            "Szignál-létra kihagyva: frontendOpenOrders hiba (nem küldünk létra-vakban): {}",
+                            e
                         );
                         continue;
                     }
+                };
+                if frontend_has_blocking_orders_for_coin(&fe_orders, coin_signal.as_str()) {
+                    tracing::info!(
+                        "Szignál-létra kihagyva: TP/SL, trigger vagy reduce-only order a könyvön"
+                    );
+                    continue;
                 }
-
-                last_signal_time = std::time::Instant::now();
-
-                info!("🚨 SZIGNÁL: {} @ {:.4}", signal.side, signal.target_mid);
-                *vol_sim_t.lock().await = signal.volatility;
-                order_manager.current_pos = current_pos;
 
                 // Feed OID = utolsó batch válaszból; ha nem üres, régen kihagytuk a frontend uniót,
                 // és a feedben nem szereplő (szellem) limit soha nem került cancelre → dupla exit.
@@ -219,17 +207,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     t.clear();
                     o
                 };
-                if let Some(ref fe) = fe_orders {
-                    for oid in collect_ladder_cancel_oids_from_frontend(fe, &coin_signal) {
-                        if !cancel_oids.contains(&oid) {
-                            cancel_oids.push(oid);
-                        }
+                for oid in collect_ladder_cancel_oids_from_frontend(&fe_orders, &coin_signal) {
+                    if !cancel_oids.contains(&oid) {
+                        cancel_oids.push(oid);
                     }
                 }
-                if let Some(ref fe) = fe_orders {
-                    cancel_oids =
-                        filter_cancel_oids_excluding_position_tpsl_triggers(fe, &coin_signal, cancel_oids);
-                }
+                cancel_oids =
+                    filter_cancel_oids_excluding_position_tpsl_triggers(&fe_orders, &coin_signal, cancel_oids);
 
                 if !cancel_oids.is_empty() {
                     let c_action = order_manager.build_cancel_payload(&cancel_oids);
@@ -242,6 +226,49 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
                 }
+
+                // A reconcile párhuzamosan tehet ki TP/SL-t; a cancel közben lejárt → új pillanatkép kötelező.
+                let fe2 = match rest_client_t.get_frontend_open_orders(hl_user_t.as_str()).await {
+                    Ok(f) => f,
+                    Err(e) => {
+                        tracing::warn!(
+                            "Létra megállítva: frontendOpenOrders (2. körben) hiba — nem küldünk batch-et: {}",
+                            e
+                        );
+                        continue;
+                    }
+                };
+                if frontend_has_blocking_orders_for_coin(&fe2, coin_signal.as_str()) {
+                    tracing::warn!(
+                        "Létra megállítva: könyv változott (TP/SL vagy reduce-only) a cancel után — nem küldünk új batch-et"
+                    );
+                    continue;
+                }
+                let st2 = match rest_client_t.get_user_state(hl_user_t.as_str()).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::warn!(
+                            "Létra megállítva: get_user_state (2. körben) hiba — nem küldünk batch-et: {}",
+                            e
+                        );
+                        continue;
+                    }
+                };
+                let p2 = clearinghouse_coin_szi(&st2, coin_signal.as_str());
+                if p2.abs() > 0.0001 {
+                    tracing::warn!(
+                        "Létra megállítva: HL pozíció {:.4} jelent meg a cancel után (race a reconcile-dal)",
+                        p2
+                    );
+                    *pos_sim_t.lock().await = p2;
+                    continue;
+                }
+
+                last_signal_time = std::time::Instant::now();
+
+                info!("🚨 SZIGNÁL: {} @ {:.4}", signal.side, signal.target_mid);
+                *vol_sim_t.lock().await = signal.volatility;
+                order_manager.current_pos = current_pos;
 
                 let s = state_t.read().await;
                 let (bid, ask, mid) = (

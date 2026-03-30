@@ -255,6 +255,37 @@ pub fn hl_order_is_protected(ord: &Value) -> bool {
     false
 }
 
+/// Új maker belépő létra: ne tegyünk rá, ha már van TP/SL/trigger, vagy bármilyen reduce-only order (pl. szellem limit).
+pub fn hl_order_blocks_entry_ladder(ord: &Value) -> bool {
+    hl_order_is_protected(ord) || json_truthy(&ord["reduceOnly"])
+}
+
+pub fn frontend_has_blocking_orders_for_coin(frontend_orders: &Value, coin: &str) -> bool {
+    let Some(arr) = frontend_orders.as_array() else {
+        return false;
+    };
+    arr.iter()
+        .any(|o| o["coin"].as_str() == Some(coin) && hl_order_blocks_entry_ladder(o))
+}
+
+/// clearinghouseState → adott coin perp `szi` (nincs pozíció → 0).
+pub fn clearinghouse_coin_szi(state: &Value, coin: &str) -> f64 {
+    let mut ex = 0.0_f64;
+    if let Some(arr) = state["assetPositions"].as_array() {
+        for ap in arr {
+            if ap["position"]["coin"].as_str() == Some(coin) {
+                ex = ap["position"]["szi"]
+                    .as_str()
+                    .unwrap_or("0")
+                    .parse()
+                    .unwrap_or(0.0);
+                break;
+            }
+        }
+    }
+    ex
+}
+
 pub fn filter_cancel_oids_excluding_position_tpsl_triggers(
     frontend_orders: &Value,
     coin: &str,
@@ -377,11 +408,14 @@ mod tests {
     fn hl_order_is_protected_plain_limit_vs_triggers() {
         let ghost = json!({"coin": "SOL", "orderType": "Limit", "reduceOnly": true, "limitPx": "82.35"});
         assert!(!hl_order_is_protected(&ghost));
+        assert!(hl_order_blocks_entry_ladder(&ghost));
         let tp = json!({"coin": "SOL", "orderType": "Take Profit Market"});
         assert!(hl_order_is_protected(&tp));
         let sl = json!({"coin": "SOL", "orderType": "Stop Market"});
         assert!(hl_order_is_protected(&sl));
         let trig_px = json!({"coin": "SOL", "orderType": "Limit", "triggerPx": "81.5"});
         assert!(hl_order_is_protected(&trig_px));
+        let entry = json!({"coin": "SOL", "orderType": "Limit", "reduceOnly": false});
+        assert!(!hl_order_blocks_entry_ladder(&entry));
     }
 }
