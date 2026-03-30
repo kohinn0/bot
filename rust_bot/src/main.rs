@@ -1,3 +1,7 @@
+//! SebessegBot: **szignál loop** (maker létra) és **reconcile** (pozíció, TP/SL, dust) párhuzamosan fut.
+//! Közös `current_position` + Hyperliquid REST. Új létra csak akkor mehet, ha a clearinghouse szerint
+//! nincs pozíció, létra-cancel után a könyv üres erre a coinra, és nincs blokkoló order (TP/SL / reduce-only).
+
 mod config;
 mod network;
 mod logic;
@@ -12,10 +16,13 @@ use crate::logic::signal::SignalEngine;
 use crate::logic::order_manager::OrderManager;
 use crate::network::client::{
     clearinghouse_coin_szi,
+    clearinghouse_has_error,
+    clearinghouse_position_for_coin,
     collect_ladder_cancel_oids_from_frontend,
     collect_resting_oids_from_exchange_response,
     exchange_order_submission_ok,
     filter_cancel_oids_excluding_position_tpsl_triggers,
+    frontend_has_any_open_order_for_coin,
     frontend_has_blocking_orders_for_coin,
     hl_order_is_protected,
     HyperliquidClient,
@@ -162,6 +169,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Csak akkor hívunk API-t, ha egyébként létrát küldenénk (min_slice ok) — ne spammeljünk 5 ms-onként.
                 match rest_client_t.get_user_state(hl_user_t.as_str()).await {
                     Ok(st) => {
+                        if clearinghouse_has_error(&st) {
+                            tracing::warn!(
+                                "Szignál-létra kihagyva: clearinghouseState error: {:?}",
+                                st.get("error")
+                            );
+                            continue;
+                        }
                         let ex_pos = clearinghouse_coin_szi(&st, coin_signal.as_str());
                         if ex_pos.abs() > 0.0001 {
                             tracing::info!(
@@ -222,7 +236,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .unwrap()
                         .as_millis() as u64;
                     if let Ok(sig) = signer_t.sign_l1_action(&c_action, c_nonce, is_mainnet_for_signal).await {
-                        let _ = rest_client_t.send_l1_action(&c_action, c_nonce, sig).await;
+                        match rest_client_t.send_l1_action(&c_action, c_nonce, sig).await {
+                            Ok(body) => {
+                                if !exchange_order_submission_ok(&body) {
+                                    tracing::warn!(
+                                        "Létra-cancel válasz nem ok: {:?}",
+                                        body.get("response").or_else(|| body.get("status"))
+                                    );
+                                }
+                            }
+                            Err(e) => tracing::warn!("Létra-cancel HTTP/parse hiba: {}", e),
+                        }
                     }
                     tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
                 }
@@ -244,6 +268,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     );
                     continue;
                 }
+                if frontend_has_any_open_order_for_coin(&fe2, coin_signal.as_str()) {
+                    tracing::warn!(
+                        "Létra megállítva: {} könyvén maradt nyitott order a létra-cancel után (pl. TP/SL rossz API flaggel) — nem küldünk új batch-et",
+                        coin_signal
+                    );
+                    continue;
+                }
                 let st2 = match rest_client_t.get_user_state(hl_user_t.as_str()).await {
                     Ok(s) => s,
                     Err(e) => {
@@ -254,6 +285,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         continue;
                     }
                 };
+                if clearinghouse_has_error(&st2) {
+                    tracing::warn!(
+                        "Létra megállítva: clearinghouseState (2. kör) error: {:?}",
+                        st2.get("error")
+                    );
+                    continue;
+                }
                 let p2 = clearinghouse_coin_szi(&st2, coin_signal.as_str());
                 if p2.abs() > 0.0001 {
                     tracing::warn!(
@@ -330,17 +368,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         loop {
             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
             if let Ok(st) = rest_client_r.get_user_state(hl_user_r.as_str()).await {
-                let mut ex_pos = 0.0;
-                let mut ent_px = None;
-                if let Some(arr) = st["assetPositions"].as_array() {
-                    for ap in arr {
-                        if ap["position"]["coin"].as_str() == Some(&coin_rec) {
-                            ex_pos = ap["position"]["szi"].as_str().unwrap_or("0").parse().unwrap_or(0.0);
-                            ent_px = ap["position"]["entryPx"].as_str().and_then(|v| v.parse().ok());
-                            break;
-                        }
-                    }
+                if clearinghouse_has_error(&st) {
+                    tracing::warn!("reconcile: clearinghouseState error: {:?}", st.get("error"));
+                    continue;
                 }
+                let (ex_pos, ent_px) = clearinghouse_position_for_coin(&st, &coin_rec);
                 *pos_rec_t.lock().await = ex_pos;
                 let fe = match rest_client_r.get_frontend_open_orders(hl_user_r.as_str()).await { Ok(v) => v, Err(_) => continue };
                 let ref_px = ent_px.unwrap_or(state_rec.read().await.mid_price);

@@ -268,22 +268,50 @@ pub fn frontend_has_blocking_orders_for_coin(frontend_orders: &Value, coin: &str
         .any(|o| o["coin"].as_str() == Some(coin) && hl_order_blocks_entry_ladder(o))
 }
 
+/// Bármilyen nyitott order a coinon (létra-cancel után: ha nem üres, nem küldünk új batch-et — TP/SL API mezők nélkül is).
+pub fn frontend_has_any_open_order_for_coin(frontend_orders: &Value, coin: &str) -> bool {
+    frontend_orders
+        .as_array()
+        .unwrap_or(&vec![])
+        .iter()
+        .any(|o| o["coin"].as_str() == Some(coin))
+}
+
+fn parse_json_number(v: &Value) -> Option<f64> {
+    if let Some(s) = v.as_str() {
+        s.parse().ok()
+    } else {
+        v.as_f64()
+    }
+}
+
+/// HTTP 200 mellett is lehet `{ "error": "..." }` — ilyenkor ne tekintsünk „üres” állapotnak.
+pub fn clearinghouse_has_error(state: &Value) -> bool {
+    state.get("error").is_some()
+}
+
+/// Egy coin perp pozíciója: (`szi`, `entryPx`). A HL `szi`-t néha stringgel, néha számmal adja.
+pub fn clearinghouse_position_for_coin(state: &Value, coin: &str) -> (f64, Option<f64>) {
+    let Some(arr) = state.get("assetPositions").and_then(|x| x.as_array()) else {
+        return (0.0, None);
+    };
+    for ap in arr {
+        if ap["position"]["coin"].as_str() != Some(coin) {
+            continue;
+        }
+        if let Some(p) = ap.get("position") {
+            let szi = parse_json_number(&p["szi"]).unwrap_or(0.0);
+            let ep = p.get("entryPx").and_then(parse_json_number);
+            return (szi, ep);
+        }
+        break;
+    }
+    (0.0, None)
+}
+
 /// clearinghouseState → adott coin perp `szi` (nincs pozíció → 0).
 pub fn clearinghouse_coin_szi(state: &Value, coin: &str) -> f64 {
-    let mut ex = 0.0_f64;
-    if let Some(arr) = state["assetPositions"].as_array() {
-        for ap in arr {
-            if ap["position"]["coin"].as_str() == Some(coin) {
-                ex = ap["position"]["szi"]
-                    .as_str()
-                    .unwrap_or("0")
-                    .parse()
-                    .unwrap_or(0.0);
-                break;
-            }
-        }
-    }
-    ex
+    clearinghouse_position_for_coin(state, coin).0
 }
 
 pub fn filter_cancel_oids_excluding_position_tpsl_triggers(
@@ -314,10 +342,6 @@ pub fn collect_ladder_cancel_oids_from_frontend(frontend_orders: &Value, coin: &
 }
 
 
-
-fn parse_json_number(v: &Value) -> Option<f64> {
-    if let Some(s) = v.as_str() { s.parse().ok() } else { v.as_f64() }
-}
 
 pub fn parse_spot_usdc_total_usd(spot: &Value) -> f64 {
     let Some(balances) = spot.get("balances").and_then(|b| b.as_array()) else { return 0.0; };
@@ -402,6 +426,24 @@ mod tests {
             ]
         });
         assert!((parse_spot_usdc_total_usd(&s) - 50.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn clearinghouse_szi_parses_string_or_number() {
+        let st = json!({
+            "assetPositions": [{
+                "position": {"coin": "SOL", "szi": "-0.32", "entryPx": "80.1"}
+            }]
+        });
+        assert!((clearinghouse_coin_szi(&st, "SOL") + 0.32).abs() < 1e-9);
+        let st2 = json!({
+            "assetPositions": [{
+                "position": {"coin": "SOL", "szi": 0.15, "entryPx": 79.5}
+            }]
+        });
+        assert!((clearinghouse_coin_szi(&st2, "SOL") - 0.15).abs() < 1e-9);
+        assert!(clearinghouse_has_error(&json!({"error": "foo"})));
+        assert!(!clearinghouse_has_error(&st));
     }
 
     #[test]
