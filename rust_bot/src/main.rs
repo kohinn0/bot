@@ -474,9 +474,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let om_rec = Arc::new(OrderManager::new(app_config.strategy.clone(), asset_idx, sz_decimals));
 
     tokio::spawn(async move {
+        let dust_limit_usd = app_config.strategy.dust_limit_usd;
         let mut last_protected_pos: f64 = 0.0;
         let mut next_dust_ioc_after =
             std::time::Instant::now() - std::time::Duration::from_secs(3600);
+        let mut dust_fail_streak: u32 = 0;
+        let mut dust_episode_info_logged: bool = false;
         loop {
             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
             let st = match get_user_state_retry_ok(&rest_client_r, hl_user_r.as_str()).await {
@@ -498,8 +501,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let ref_px = ent_px.unwrap_or(state_rec.read().await.mid_price);
                 let notional_val = ex_pos.abs() * ref_px;
 
-                // 🚨 1. DUST CLOSER: Ha a pozíció túl kicsi ($15 alatt), bezárja és töröl minden ordert
-                if ex_pos.abs() > 0.0001 && notional_val < 15.0 {
+                if ex_pos.abs() <= 0.0001 || notional_val >= dust_limit_usd {
+                    dust_episode_info_logged = false;
+                    dust_fail_streak = 0;
+                }
+
+                // 🚨 1. DUST CLOSER: Ha a pozíció túl kicsi (dust_limit_usd alatt), bezárja és töröl minden ordert
+                if ex_pos.abs() > 0.0001 && notional_val < dust_limit_usd {
                     let book = state_rec.read().await;
                     let (bid, ask) = (book.best_bid, book.best_ask);
                     if bid <= 0.0 || ask <= 0.0 || ask <= bid {
@@ -509,12 +517,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if now < next_dust_ioc_after {
                         continue;
                     }
-                    next_dust_ioc_after = now + std::time::Duration::from_secs(3);
                     // IOC: limit a könyv szélén (bid eladásnál, ask vételnél); entry/mid gyakran reject
                     let ioc_px = if ex_pos > 0.0 { bid } else { ask };
-                    info!("🗑️ Dust detektálva (${:.2}). IOC zárás bid={:.4} ask={:.4}", notional_val, bid, ask);
+                    if !dust_episode_info_logged {
+                        info!(
+                            "🗑️ Dust detektálva (${:.2} < {:.2} USD limit). IOC zárás ex_pos={:.6} bid={:.4} ask={:.4}",
+                            notional_val, dust_limit_usd, ex_pos, bid, ask
+                        );
+                        dust_episode_info_logged = true;
+                    } else {
+                        tracing::debug!(
+                            "Dust ismétlődő IOC próba: notional=${:.2} ex_pos={:.6} fail_streak={}",
+                            notional_val,
+                            ex_pos,
+                            dust_fail_streak
+                        );
+                    }
                     let close_action = om_rec.build_market_close_payload(ex_pos < 0.0, ioc_px, ex_pos.abs());
-                    l1_gate_r
+                    let close_ok = l1_gate_r
                         .run(|nonce| {
                             let s = signer_r.clone();
                             let r = rest_client_r.clone();
@@ -523,13 +543,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 match s.sign_l1_action(&close_action, nonce, net).await {
                                     Ok(sig) => {
                                         let res = r.send_l1_action(&close_action, nonce, sig).await;
-                                        let _ = exchange_action_ok_or_warn("reconcile dust IOC zárás", &res);
+                                        exchange_action_ok_or_warn("reconcile dust IOC zárás", &res)
                                     }
-                                    Err(e) => tracing::warn!("dust zárás aláírás: {}", e),
+                                    Err(e) => {
+                                        tracing::warn!("dust zárás aláírás: {}", e);
+                                        false
+                                    }
                                 }
                             }
                         })
                         .await;
+
+                    if close_ok {
+                        dust_fail_streak = 0;
+                        next_dust_ioc_after = now + std::time::Duration::from_secs(3);
+                    } else {
+                        dust_fail_streak = dust_fail_streak.saturating_add(1);
+                        let backoff_secs =
+                            (3u64.saturating_mul(1u64 << dust_fail_streak.min(5))).min(120);
+                        next_dust_ioc_after = now + std::time::Duration::from_secs(backoff_secs);
+                        // A HL hiba részleteit az `exchange_action_ok_or_warn` már warnolja.
+                        tracing::debug!(
+                            "Dust IOC sikertelen: streak={} következő próba ~{}s múlva",
+                            dust_fail_streak,
+                            backoff_secs
+                        );
+                    }
 
                     let all_oids: Vec<u64> = fe.as_array().unwrap_or(&vec![]).iter()
                         .filter(|o| o["coin"].as_str() == Some(&coin_rec))
