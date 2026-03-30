@@ -215,6 +215,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     continue;
                 }
 
+                tracing::debug!(
+                    "Szignál-létra indítás: coin={} side={} current_pos={:.4} target_n={:.2} min_slice={:.2} min_order={:.2}",
+                    coin_signal,
+                    signal.side,
+                    current_pos,
+                    target_n,
+                    min_slice,
+                    strategy_for_signal.min_ladder_order_notional_usd
+                );
+
                 let fe_orders = match get_frontend_open_orders_retry_ok(&rest_client_t, hl_user_t.as_str()).await {
                     Ok(f) => f,
                     Err(e) => {
@@ -225,6 +235,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         continue;
                     }
                 };
+
+                let (coin_open_cnt, coin_protected_cnt) = {
+                    let mut open_cnt = 0u32;
+                    let mut protected_cnt = 0u32;
+                    if let Some(arr) = fe_orders.as_array() {
+                        for o in arr {
+                            if o["coin"].as_str() == Some(coin_signal.as_str()) {
+                                open_cnt += 1;
+                                if hl_order_is_protected(o) {
+                                    protected_cnt += 1;
+                                }
+                            }
+                        }
+                    }
+                    (open_cnt, protected_cnt)
+                };
+
+                tracing::debug!(
+                    "Szignál-létra: könyv snapshot coin={} open={} protected={}",
+                    coin_signal,
+                    coin_open_cnt,
+                    coin_protected_cnt
+                );
                 if frontend_has_blocking_orders_for_coin(&fe_orders, coin_signal.as_str()) {
                     tracing::info!(
                         "Szignál-létra kihagyva: TP/SL, trigger vagy reduce-only order a könyvön"
@@ -248,6 +281,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 cancel_oids =
                     filter_cancel_oids_excluding_position_tpsl_triggers(&fe_orders, &coin_signal, cancel_oids);
 
+                tracing::debug!(
+                    "Szignál-létra-cancel: coin={} cancel_oids={}",
+                    coin_signal,
+                    cancel_oids.len()
+                );
                 if !cancel_oids.is_empty() {
                     let c_action = order_manager.build_cancel_payload(&cancel_oids);
                     l1_gate_t
@@ -280,6 +318,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         continue;
                     }
                 };
+
+                let (fe2_open_cnt, fe2_protected_cnt) = {
+                    let mut open_cnt = 0u32;
+                    let mut protected_cnt = 0u32;
+                    if let Some(arr) = fe2.as_array() {
+                        for o in arr {
+                            if o["coin"].as_str() == Some(coin_signal.as_str()) {
+                                open_cnt += 1;
+                                if hl_order_is_protected(o) {
+                                    protected_cnt += 1;
+                                }
+                            }
+                        }
+                    }
+                    (open_cnt, protected_cnt)
+                };
+
+                tracing::debug!(
+                    "Szignál-létra: cancel után könyv snapshot coin={} open={} protected={}",
+                    coin_signal,
+                    fe2_open_cnt,
+                    fe2_protected_cnt
+                );
                 if frontend_has_blocking_orders_for_coin(&fe2, coin_signal.as_str()) {
                     tracing::warn!(
                         "Létra megállítva: könyv változott (TP/SL vagy reduce-only) a cancel után — nem küldünk új batch-et"
@@ -312,6 +373,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     *pos_sim_t.lock().await = p2;
                     continue;
                 }
+
+                tracing::debug!(
+                    "Szignál-létra: cancel után stabil HL pozíció p2={:.4}",
+                    p2
+                );
 
                 let s = state_t.read().await;
                 let (bid, ask, mid) = (
@@ -358,9 +424,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let user = hl_user_t.clone();
                         let coin = coin_signal.clone();
                         async move {
-                            if !ladder_gate_flat_ok(&rest, user.as_str(), coin.as_str(), &pos_sim)
-                                .await
-                            {
+                            let gate_ok =
+                                ladder_gate_flat_ok(&rest, user.as_str(), coin.as_str(), &pos_sim).await;
+                            if !gate_ok {
+                                let ps = *pos_sim.lock().await;
+                                tracing::debug!("ladder_gate_flat_ok=false; pos_sim now={:.4}", ps);
                                 return false;
                             }
                             match signer.sign_l1_action(&act, nonce, net).await {
@@ -526,7 +594,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             !hl_order_is_protected(o)
                         })
                         .filter_map(|o| o["oid"].as_u64().or_else(|| o["oid"].as_str().and_then(|v| v.parse().ok()))).collect();
+
+                    tracing::debug!(
+                        "reconcile anti-stale: coin={} ex_pos={:.4} last_protected_pos={:.4} stale_oids={}",
+                        coin_rec,
+                        ex_pos,
+                        last_protected_pos,
+                        stale.len()
+                    );
                     if !stale.is_empty() {
+                        tracing::debug!("reconcile anti-stale: cancelling stale_oids={}", stale.len());
                         let action = om_rec.build_cancel_payload(&stale);
                         l1_gate_r
                             .run(|nonce| {
@@ -549,13 +626,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let has_tpsl = fe.as_array().unwrap_or(&vec![]).iter().any(|o| {
                         o["coin"].as_str() == Some(&coin_rec) && hl_order_is_protected(o)
                     });
-                    if has_tpsl && (ex_pos.abs() - last_protected_pos.abs()).abs() < 0.0001 { continue; }
+                    let delta = (ex_pos.abs() - last_protected_pos.abs()).abs();
+                    tracing::debug!(
+                        "reconcile anti-stale: has_tpsl={} delta_from_last_protected={:.6}",
+                        has_tpsl,
+                        delta
+                    );
+                    if has_tpsl && delta < 0.0001 {
+                        continue;
+                    }
                 }
 
                 if (ex_pos.abs() - last_protected_pos.abs()).abs() < 0.001 { continue; }
 
                 if ref_px <= 0.0 { continue; }
                 if let Some((tp, sl)) = OrderManager::tp_sl_prices_for_position(ex_pos, ref_px, *vol_rec_t.lock().await, app_config.strategy.min_tick_size, app_config.strategy.tp_min_ticks, app_config.strategy.sl_min_ticks, state_rec.read().await.mid_price, app_config.strategy.maker_fee_rate, app_config.strategy.taker_fee_rate) {
+                    tracing::debug!(
+                        "reconcile TP/SL: coin={} ex_pos={:.4} ref_px={:.4} tp={:.4} sl={:.4}",
+                        coin_rec,
+                        ex_pos,
+                        ref_px,
+                        tp,
+                        sl
+                    );
                     let prot = om_rec.build_protective_tpsl_payload(if ex_pos > 0.0 { "Sell" } else { "Buy" }, tp, sl, ex_pos.abs());
                     let ok = l1_gate_r
                         .run(|nonce| {
@@ -596,6 +689,7 @@ async fn ladder_gate_flat_ok(
     pos_sim: &Arc<tokio::sync::Mutex<f64>>,
 ) -> bool {
     for pass in 0..2 {
+        tracing::debug!("ladder_gate_flat_ok pass {}: user={} coin={}", pass + 1, user, coin);
         if pass == 1 {
             tokio::time::sleep(tokio::time::Duration::from_millis(120)).await;
         }
@@ -619,13 +713,32 @@ async fn ladder_gate_flat_ok(
         }
         match get_frontend_open_orders_retry_ok_fast(rest, user).await {
             Ok(fe) => {
-                if frontend_has_blocking_orders_for_coin(&fe, coin)
-                    || frontend_has_any_open_order_for_coin(&fe, coin)
-                {
+                let (open_cnt, protected_cnt) = {
+                    let mut open_cnt = 0u32;
+                    let mut protected_cnt = 0u32;
+                    if let Some(arr) = fe.as_array() {
+                        for o in arr {
+                            if o["coin"].as_str() == Some(coin) {
+                                open_cnt += 1;
+                                if hl_order_is_protected(o) {
+                                    protected_cnt += 1;
+                                }
+                            }
+                        }
+                    }
+                    (open_cnt, protected_cnt)
+                };
+                let blocking = frontend_has_blocking_orders_for_coin(&fe, coin);
+                let any_open = frontend_has_any_open_order_for_coin(&fe, coin);
+                if blocking || any_open {
                     tracing::warn!(
-                        "létra (L1 gate pass {}): {} könyvén maradt order — nem küldünk batch-et",
+                        "létra (L1 gate pass {}): könyv nem flat (coin={}) — open={} protected={} blocking={} any_open={} — nem küldünk batch-et",
                         pass + 1,
-                        coin
+                        coin,
+                        open_cnt,
+                        protected_cnt,
+                        blocking,
+                        any_open
                     );
                     return false;
                 }
