@@ -14,7 +14,8 @@ mod network;
 mod logic;
 
 use dotenvy::dotenv;
-use tracing::{info, Level};
+use tracing::info;
+use tracing_subscriber::EnvFilter;
 use tracing_subscriber::FmtSubscriber;
 use std::sync::Arc;
 use crate::config::AppConfig;
@@ -43,7 +44,9 @@ use crate::network::feed::HyperliquidFeed;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let subscriber = FmtSubscriber::builder().with_max_level(Level::INFO).finish();
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let subscriber = FmtSubscriber::builder().with_env_filter(filter).finish();
     tracing::subscriber::set_global_default(subscriber).expect("Failed to set tracing subscriber");
     dotenv().ok();
     info!("🚀 INICIALIZÁLÁS: SebessegBot V4.4 (Dust & Stale Limit Killer) 🚀");
