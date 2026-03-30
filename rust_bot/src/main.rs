@@ -198,15 +198,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 order_manager.current_pos = current_pos;
 
                 let fe_orders = rest_client_t.get_frontend_open_orders(hl_user_t.as_str()).await.ok();
+                // Feed OID = utolsó batch válaszból; ha nem üres, régen kihagytuk a frontend uniót,
+                // és a feedben nem szereplő (szellem) limit soha nem került cancelre → dupla exit.
                 let mut cancel_oids = {
                     let mut t = feed_t.open_order_oids.lock().await;
                     let o = t.clone();
                     t.clear();
                     o
                 };
-                if cancel_oids.is_empty() {
-                    if let Some(ref fe) = fe_orders {
-                        cancel_oids = collect_ladder_cancel_oids_from_frontend(fe, &coin_signal);
+                if let Some(ref fe) = fe_orders {
+                    for oid in collect_ladder_cancel_oids_from_frontend(fe, &coin_signal) {
+                        if !cancel_oids.contains(&oid) {
+                            cancel_oids.push(oid);
+                        }
                     }
                 }
                 if let Some(ref fe) = fe_orders {
@@ -372,7 +376,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if let Ok(sig) = signer_r.sign_l1_action(&action, nonce, app_config.is_mainnet).await { let _ = rest_client_r.send_l1_action(&action, nonce, sig).await; }
                     }
 
-                    let has_tpsl = fe.as_array().unwrap_or(&vec![]).iter().any(|o| o["coin"].as_str() == Some(&coin_rec) && o["isPositionTpsl"].as_bool().unwrap_or(false));
+                    let has_tpsl = fe.as_array().unwrap_or(&vec![]).iter().any(|o| {
+                        o["coin"].as_str() == Some(&coin_rec)
+                            && (o["isPositionTpsl"].as_bool() == Some(true)
+                                || o["isTrigger"].as_bool() == Some(true))
+                    });
                     if has_tpsl && (ex_pos.abs() - last_protected_pos.abs()).abs() < 0.0001 { continue; }
                 }
 
