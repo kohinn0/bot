@@ -104,6 +104,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut last_signal_time = std::time::Instant::now() - std::time::Duration::from_secs(60);
     let min_signal_interval = std::time::Duration::from_millis(app_config.strategy.min_signal_interval_ms);
     let coin_signal = coin.clone();
+    let strategy_for_signal = app_config.strategy.clone();
+    let is_mainnet_for_signal = app_config.is_mainnet;
 
     tokio::spawn(async move {
         loop {
@@ -130,10 +132,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if last_signal_time.elapsed() < min_signal_interval {
                     continue;
                 }
-                if app_config.strategy.max_positions == 1
+                if strategy_for_signal.max_positions == 1
                     && current_pos.abs() > 0.001
                     && !is_reducing
                 {
+                    continue;
+                }
+
+                let target_n = *target_notional_t.lock().await;
+                let min_slice = strategy_for_signal.min_ladder_slice_usd(target_n);
+                if min_slice + 1e-6 < strategy_for_signal.min_ladder_order_notional_usd {
+                    tracing::info!(
+                        "Szignál kihagyva: legkisebb létraszelet {:.2} USD < min_order {:.2} USD (tőke / balance_pct vs díj)",
+                        min_slice,
+                        strategy_for_signal.min_ladder_order_notional_usd
+                    );
                     continue;
                 }
 
@@ -166,7 +179,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap()
                         .as_millis() as u64;
-                    if let Ok(sig) = signer_t.sign_l1_action(&c_action, c_nonce, app_config.is_mainnet).await {
+                    if let Ok(sig) = signer_t.sign_l1_action(&c_action, c_nonce, is_mainnet_for_signal).await {
                         let _ = rest_client_t.send_l1_action(&c_action, c_nonce, sig).await;
                     }
                     tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
@@ -191,18 +204,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     mid,
                     bid,
                     ask,
-                    *target_notional_t.lock().await,
+                    target_n,
                     if is_reducing {
                         Some(order_manager.quantize_position_sz(current_pos.abs()))
                     } else {
                         None
                     },
                 );
+                if action.orders.is_empty() {
+                    tracing::warn!("Létra üres (min notional / szűrők) — nem küldünk order actiont");
+                    continue;
+                }
                 let nonce = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap()
                     .as_millis() as u64;
-                if let Ok(sig) = signer_t.sign_l1_action(&action, nonce, app_config.is_mainnet).await {
+                if let Ok(sig) = signer_t.sign_l1_action(&action, nonce, is_mainnet_for_signal).await {
                     if let Ok(body) = rest_client_t.send_l1_action(&action, nonce, sig).await {
                         if exchange_order_submission_ok(&body) {
                             let new_oids = collect_resting_oids_from_exchange_response(&body);

@@ -17,6 +17,7 @@
     "min_signal_interval_ms": 60000,
     "balance_pct_per_trade": 80.0,
     "max_notional_usd_per_trade": 50000.0,
+    "min_ladder_order_notional_usd": 18.0,
     "ladder_levels": [
         { "level": 1, "offset_from_mid_pct": 0.15, "size_pct": 0.3 },
         { "level": 2, "offset_from_mid_pct": 0.35, "size_pct": 0.3 },

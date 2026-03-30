@@ -38,8 +38,15 @@ pub struct StrategyConfig {
     pub min_signal_interval_ms: u64,
     pub balance_pct_per_trade: f64,
     pub max_notional_usd_per_trade: f64,
+    /// Egy létraszint legkisebb USD értéke; alatta nem teszünk ki megbízást (díj vs edge).
+    #[serde(default = "default_min_ladder_order_notional_usd")]
+    pub min_ladder_order_notional_usd: f64,
     pub ladder_levels: Vec<LadderLevel>,
     pub signals: SignalConfig,
+}
+
+fn default_min_ladder_order_notional_usd() -> f64 {
+    18.0
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -82,6 +89,15 @@ impl StrategyConfig {
     pub fn notional_per_level_usd(&self, equity: f64) -> f64 {
         let size = equity * (self.balance_pct_per_trade / 100.0);
         size.min(self.max_notional_usd_per_trade)
+    }
+
+    /// A legkisebb létraszelet USD-ben (target notional × legkisebb size_pct).
+    pub fn min_ladder_slice_usd(&self, target_notional_usd: f64) -> f64 {
+        self.ladder_levels
+            .iter()
+            .map(|l| target_notional_usd * l.size_pct)
+            .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .unwrap_or(0.0)
     }
 }
 

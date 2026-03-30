@@ -273,7 +273,8 @@ impl OrderManager {
                 }
 
                 let sz = ((close_sz / sz_step).floor() * sz_step).max(self.config.min_shares);
-                if sz >= self.config.min_shares && (rounded_price * sz) >= 10.05 {
+                let min_n = self.config.min_ladder_order_notional_usd;
+                if sz >= self.config.min_shares && (rounded_price * sz) >= min_n {
                     return OrderAction {
                         type_: "order".to_string(),
                         orders: vec![OrderWire {
@@ -337,7 +338,8 @@ impl OrderManager {
                 sz = (sz / sz_step).floor() * sz_step;
             }
 
-            if sz < self.config.min_shares || (rounded_price * sz) < 10.05 {
+            let min_n = self.config.min_ladder_order_notional_usd;
+            if sz < self.config.min_shares || (rounded_price * sz) < min_n {
                 continue;
             }
 
@@ -369,7 +371,7 @@ impl OrderManager {
             } else {
                 (tick_price / tick).ceil() * tick
             };
-            let min_notional = 15.0_f64;
+            let min_notional = self.config.min_ladder_order_notional_usd;
             let fallback_notional = sz_usd.max(min_notional);
             let mut sz = ((fallback_notional / rounded_price) / sz_step).floor() * sz_step;
             if let Some(rem) = remaining_close {
