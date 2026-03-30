@@ -6,6 +6,8 @@
 //! néha később mutatja a TP/SL-t; egy olvasás alatt átcsúszhatna a maker létra.
 //! A szignál-intervallum lejárta után **azonnal** élő `get_user_state` fut (nem csak min_slice után), különben
 //! elavult `pos_sim` mellett a pozícióellenőrzés ki sem futna.
+//! A `clearinghouseState` **több újrapróbálással** jön (`get_user_state_retry_ok`): átmeneti `{ "error": ... }` / HTTP
+//! hiba ne hagyja ki a `pos_sim` frissítését egy egész ticken (reconcile + szignál + L1 gate).
 
 mod config;
 mod network;
@@ -22,7 +24,6 @@ use crate::logic::signal::SignalEngine;
 use crate::logic::order_manager::OrderManager;
 use crate::network::client::{
     clearinghouse_coin_szi,
-    clearinghouse_has_error,
     clearinghouse_position_for_coin,
     collect_ladder_cancel_oids_from_frontend,
     collect_resting_oids_from_exchange_response,
@@ -30,6 +31,8 @@ use crate::network::client::{
     filter_cancel_oids_excluding_position_tpsl_triggers,
     frontend_has_any_open_order_for_coin,
     frontend_has_blocking_orders_for_coin,
+    get_user_state_retry_ok,
+    get_user_state_retry_ok_fast,
     hl_order_is_protected,
     HyperliquidClient,
 };
@@ -158,21 +161,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 // Élő clearinghouse **előbb**, mint bármi `pos_sim`-re épülő ág: különben a min_slice elutasításnál
                 // soha nem futna le a pozícióellenőrzés (22:17-es „szellem létra” 60 mp után).
-                match rest_client_t.get_user_state(hl_user_t.as_str()).await {
+                match get_user_state_retry_ok(&rest_client_t, hl_user_t.as_str()).await {
                     Ok(st) => {
-                        if clearinghouse_has_error(&st) {
-                            tracing::warn!(
-                                "Szignál-létra kihagyva: clearinghouseState error: {:?}",
-                                st.get("error")
-                            );
-                            continue;
-                        }
                         let ex_pos = clearinghouse_coin_szi(&st, coin_signal.as_str());
                         *pos_sim_t.lock().await = ex_pos;
                     }
                     Err(e) => {
                         tracing::warn!(
-                            "Szignál-létra kihagyva: get_user_state hiba (nem küldünk létrát biztonsági okból): {}",
+                            "Szignál-létra kihagyva: {} (nem küldünk létrát biztonsági okból)",
                             e
                         );
                         continue;
@@ -295,23 +291,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     );
                     continue;
                 }
-                let st2 = match rest_client_t.get_user_state(hl_user_t.as_str()).await {
+                let st2 = match get_user_state_retry_ok(&rest_client_t, hl_user_t.as_str()).await {
                     Ok(s) => s,
                     Err(e) => {
                         tracing::warn!(
-                            "Létra megállítva: get_user_state (2. körben) hiba — nem küldünk batch-et: {}",
+                            "Létra megállítva: get_user_state (2. kör) — {} — nem küldünk batch-et",
                             e
                         );
                         continue;
                     }
                 };
-                if clearinghouse_has_error(&st2) {
-                    tracing::warn!(
-                        "Létra megállítva: clearinghouseState (2. kör) error: {:?}",
-                        st2.get("error")
-                    );
-                    continue;
-                }
                 let p2 = clearinghouse_coin_szi(&st2, coin_signal.as_str());
                 if p2.abs() > 0.0001 {
                     tracing::warn!(
@@ -416,11 +405,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::time::Instant::now() - std::time::Duration::from_secs(3600);
         loop {
             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-            if let Ok(st) = rest_client_r.get_user_state(hl_user_r.as_str()).await {
-                if clearinghouse_has_error(&st) {
-                    tracing::warn!("reconcile: clearinghouseState error: {:?}", st.get("error"));
+            let st = match get_user_state_retry_ok(&rest_client_r, hl_user_r.as_str()).await {
+                Ok(st) => st,
+                Err(e) => {
+                    tracing::warn!("reconcile: get_user_state {}", e);
                     continue;
                 }
+            };
                 let (ex_pos, ent_px) = clearinghouse_position_for_coin(&st, &coin_rec);
                 *pos_rec_t.lock().await = ex_pos;
                 let fe = match rest_client_r.get_frontend_open_orders(hl_user_r.as_str()).await { Ok(v) => v, Err(_) => continue };
@@ -581,7 +572,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         last_protected_pos = ex_pos;
                     }
                 }
-            }
         }
     });
 
@@ -601,16 +591,8 @@ async fn ladder_gate_flat_ok(
         if pass == 1 {
             tokio::time::sleep(tokio::time::Duration::from_millis(120)).await;
         }
-        match rest.get_user_state(user).await {
+        match get_user_state_retry_ok_fast(rest, user).await {
             Ok(st) => {
-                if clearinghouse_has_error(&st) {
-                    tracing::warn!(
-                        "létra (L1 gate pass {}): clearinghouse error {:?}",
-                        pass + 1,
-                        st.get("error")
-                    );
-                    return false;
-                }
                 let p = clearinghouse_coin_szi(&st, coin);
                 if p.abs() > 0.0001 {
                     tracing::warn!(

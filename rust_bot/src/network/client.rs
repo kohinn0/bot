@@ -304,8 +304,70 @@ fn parse_json_number(v: &Value) -> Option<f64> {
 }
 
 /// HTTP 200 mellett is lehet `{ "error": "..." }` — ilyenkor ne tekintsünk „üres” állapotnak.
+/// A `"error": null` nem hiba (néha a kulcs létezik, érték nélkül).
 pub fn clearinghouse_has_error(state: &Value) -> bool {
-    state.get("error").is_some()
+    match state.get("error") {
+        None => false,
+        Some(v) if v.is_null() => false,
+        Some(_) => true,
+    }
+}
+
+/// Transziens HL API-hibák ellen: több újrapróbálás (`{ "error": ... }` vagy HTTP hiba).
+/// Így a reconcile és a szignál loop nem marad `pos_sim`-mel egy átmeneti error válasz miatt.
+pub async fn get_user_state_retry_ok(
+    client: &HyperliquidClient,
+    user: &str,
+) -> Result<Value, String> {
+    get_user_state_retry_ok_with(client, user, 4, 100).await
+}
+
+/// L1 gate / gyors útvonal: kevesebb próba, rövidebb várakozás.
+pub async fn get_user_state_retry_ok_fast(
+    client: &HyperliquidClient,
+    user: &str,
+) -> Result<Value, String> {
+    get_user_state_retry_ok_with(client, user, 2, 80).await
+}
+
+async fn get_user_state_retry_ok_with(
+    client: &HyperliquidClient,
+    user: &str,
+    attempts: u32,
+    delay_ms: u64,
+) -> Result<Value, String> {
+    let attempts = attempts.min(32);
+    for i in 0..attempts {
+        if i > 0 {
+            tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+        }
+        match client.get_user_state(user).await {
+            Ok(st) => {
+                if clearinghouse_has_error(&st) {
+                    tracing::warn!(
+                        "clearinghouseState error (próbálkozás {}/{}): {:?}",
+                        i + 1,
+                        attempts,
+                        st.get("error")
+                    );
+                    continue;
+                }
+                return Ok(st);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "get_user_state HTTP (próbálkozás {}/{}): {}",
+                    i + 1,
+                    attempts,
+                    e
+                );
+            }
+        }
+    }
+    Err(format!(
+        "clearinghouseState: sikertelen {} próbálkozás után",
+        attempts
+    ))
 }
 
 /// Egy coin perp pozíciója: (`szi`, `entryPx`). A HL `szi`-t néha stringgel, néha számmal adja.
@@ -461,6 +523,7 @@ mod tests {
         });
         assert!((clearinghouse_coin_szi(&st2, "SOL") - 0.15).abs() < 1e-9);
         assert!(clearinghouse_has_error(&json!({"error": "foo"})));
+        assert!(!clearinghouse_has_error(&json!({"error": null})));
         assert!(!clearinghouse_has_error(&st));
     }
 
