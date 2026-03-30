@@ -235,25 +235,22 @@ impl OrderManager {
         let tick = self.config.min_tick_size;
         let sz_step = 10_f64.powi(-(self.sz_decimals as i32));
 
-        // 🛡️ A KULCS: Ha van max_close_total_sz, akkor TUDJUK, hogy ez egy záró order.
         let is_reduce_only = max_close_total_sz.is_some();
 
-        // Zárás: egyetlen passive maker a teljes mérettel
         if let Some(close_sz) = max_close_total_sz {
             if close_sz >= self.config.min_shares {
-                let (off_ticks, clamp_like_l1) = self
+                let (off_pct, clamp_like_l1) = self
                     .config.ladder_levels.first()
-                    .map(|l| (l.offset_from_mid_ticks as f64, l.level == 1))
+                    .map(|l| (l.offset_from_mid_pct, l.level == 1))
                     .unwrap_or((0.0, true));
 
-                let skew_adj = self.current_pos * self.config.skew_penalty.unwrap_or(0.0);
-                let offset_ticks = off_ticks + if is_buy { skew_adj } else { -skew_adj };
-                let abs_offset = offset_ticks.abs();
+                let skew_adj_px = (self.current_pos * self.config.skew_penalty.unwrap_or(0.0)) * tick;
+                let base_offset_px = mid_price * (off_pct / 100.0);
 
-                let mut raw_price = if is_buy {
-                    mid_price - (abs_offset * tick)
+                let mut raw_price: f64 = if is_buy {
+                    mid_price - base_offset_px - skew_adj_px
                 } else {
-                    mid_price + (abs_offset * tick)
+                    mid_price + base_offset_px + skew_adj_px
                 };
 
                 if clamp_like_l1 {
@@ -284,7 +281,7 @@ impl OrderManager {
                             b: is_buy,
                             p: Self::float_to_wire(rounded_price),
                             s: Self::float_to_wire(sz),
-                            r: is_reduce_only, // 🛡️ JAVÍTVA
+                            r: is_reduce_only,
                             t: OrderTypeWire {
                                 limit: Some(LimitOrderType { tif: "Alo".to_string() }),
                                 trigger: None,
@@ -300,15 +297,13 @@ impl OrderManager {
         let mut remaining_close = max_close_total_sz;
 
         for level_cfg in &self.config.ladder_levels {
-            let skew_adj = self.current_pos * self.config.skew_penalty.unwrap_or(0.0);
-            let offset_ticks = (level_cfg.offset_from_mid_ticks as f64)
-                + if is_buy { skew_adj } else { -skew_adj };
-            let abs_offset = offset_ticks.abs();
+            let skew_adj_px = (self.current_pos * self.config.skew_penalty.unwrap_or(0.0)) * tick;
+            let base_offset_px = mid_price * (level_cfg.offset_from_mid_pct / 100.0);
 
-            let mut raw_price = if is_buy {
-                mid_price - (abs_offset * tick)
+            let mut raw_price: f64 = if is_buy {
+                mid_price - base_offset_px - skew_adj_px
             } else {
-                mid_price + (abs_offset * tick)
+                mid_price + base_offset_px + skew_adj_px
             };
 
             if level_cfg.level == 1 {
@@ -351,7 +346,7 @@ impl OrderManager {
                 b: is_buy,
                 p: Self::float_to_wire(rounded_price),
                 s: Self::float_to_wire(sz),
-                r: is_reduce_only, // 🛡️ JAVÍTVA
+                r: is_reduce_only,
                 t: OrderTypeWire {
                     limit: Some(LimitOrderType { tif: "Alo".to_string() }),
                     trigger: None,
@@ -363,7 +358,6 @@ impl OrderManager {
             }
         }
 
-        // Fallback: ha minden szint kiesett, egy order a teljes notional-lal
         if orders.is_empty() {
             let tick_price = if is_buy {
                 best_bid.max(mid_price - passive_buffer_ticks * tick)
@@ -392,7 +386,7 @@ impl OrderManager {
                     b: is_buy,
                     p: Self::float_to_wire(rounded_price),
                     s: Self::float_to_wire(sz),
-                    r: is_reduce_only, // 🛡️ JAVÍTVA
+                    r: is_reduce_only,
                     t: OrderTypeWire {
                         limit: Some(LimitOrderType { tif: "Alo".to_string() }),
                         trigger: None,
@@ -404,13 +398,10 @@ impl OrderManager {
         OrderAction { type_: "order".to_string(), orders, grouping: "na".to_string() }
     }
 
-    /// Tick méret lekérése (dust záráshoz a main.rs-ből)
     pub fn config_tick(&self) -> f64 {
         self.config.min_tick_size
     }
 
-    /// Piaci (IOC) zárás dust pozícióhoz – limit order aggresiv árral,
-    /// reduce-only flag-gel. A HL a keresztező limit ordert taker-ként tölt.
     pub fn build_market_close_payload(
         &self,
         is_buy: bool,
@@ -432,10 +423,10 @@ impl OrderManager {
                 b: is_buy,
                 p: Self::float_to_wire(rounded_px),
                 s: Self::float_to_wire(quantized_sz),
-                r: true, // reduce-only
+                r: true,
                 t: OrderTypeWire {
                     limit: Some(LimitOrderType {
-                        tif: "Ioc".to_string(), // Immediate-or-Cancel = piaci viselkedés
+                        tif: "Ioc".to_string(),
                     }),
                     trigger: None,
                 },
@@ -443,5 +434,5 @@ impl OrderManager {
             grouping: "na".to_string(),
         }
     }
-
 }
+

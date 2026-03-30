@@ -1,192 +1,162 @@
 use crate::config::StrategyConfig;
-use crate::network::feed::L2BookState;
 use std::collections::VecDeque;
-use std::sync::Arc;
-use tokio::sync::RwLock;
-
-// ── Időalapú bar (100ms aggregált return) ────────────────────────────────────
-// A probléma az eredeti kódban: WS L2 tick ~1ms-enként jön, 200 tick = ~200ms.
-// Ennyi tick-en a log_ret-ek szinte mind 0.0 → std_dev → 0 → z_score robban
-// bármilyen apró elmozdulásra → folyamatos false signal.
-//
-// Megoldás: 100ms-es aggregált OHLC bar-ok. Minden bar = 100ms legjobb mid-je.
-// 300 bar = 30 másodperc statisztikai ablak → stabil std_dev, megbízható z-score.
-const BAR_DURATION_MS: u64 = 100;
-const BAR_HISTORY: usize = 300; // 300 × 100ms = 30 másodperc
-const WARMUP_BARS: usize = 30;  // legalább 3mp adat kell a z-score-hoz
-
-pub struct SignalEngine {
-    config: StrategyConfig,
-    state_ref: Arc<RwLock<L2BookState>>,
-
-    // Időalapú bar-ok (log_return-ök)
-    bar_returns: VecDeque<f64>,
-
-    // O(1) futó összesítők (numerikusan stabil)
-    sum_x: f64,
-    sum_x2: f64,
-    recalc_counter: u64,
-
-    // Aktuális bar állapota
-    bar_open_mid: f64,
-    bar_start_ms: u64,
-
-    // Imbalance momentum
-    prev_imbalance: f64,
-}
-
-impl SignalEngine {
-    pub fn new(config: StrategyConfig, state_ref: Arc<RwLock<L2BookState>>) -> Self {
-        Self {
-            config,
-            state_ref,
-            bar_returns: VecDeque::with_capacity(BAR_HISTORY + 1),
-            sum_x: 0.0,
-            sum_x2: 0.0,
-            recalc_counter: 0,
-            bar_open_mid: 0.0,
-            bar_start_ms: 0,
-            prev_imbalance: 0.5,
-        }
-    }
-
-    pub async fn tick(&mut self) -> Option<SignalResult> {
-        // 1. Adat lekérés – nem allokál
-        let (mid_price, imbalance, ws_ts) = {
-            let lock = self.state_ref.read().await;
-            (lock.mid_price, lock.imbalance, lock.last_update_ts)
-        };
-
-        if mid_price <= 0.0 {
-            return None;
-        }
-
-        // 2. Staleness check: ha a WS adat >500ms régi, hagyjuk ki
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
-
-        if ws_ts > 0 && now_ms.saturating_sub(ws_ts) > 500 {
-            return None;
-        }
-
-        // 3. Bar inicializálás első tick-nél
-        if self.bar_start_ms == 0 {
-            self.bar_open_mid = mid_price;
-            self.bar_start_ms = now_ms;
-            return None;
-        }
-
-        // 4. Bar zárás időzítés: ha eltelt BAR_DURATION_MS
-        let bar_age_ms = now_ms.saturating_sub(self.bar_start_ms);
-        if bar_age_ms < BAR_DURATION_MS {
-            // Még nem telt el a bar ideje – nem generálunk szignált
-            return None;
-        }
-
-        // 5. Bar lezárása: log_return számítása (open → close = mid_price)
-        let open = self.bar_open_mid;
-        if open <= 0.0 || mid_price <= 0.0 {
-            // Reset bar
-            self.bar_open_mid = mid_price;
-            self.bar_start_ms = now_ms;
-            return None;
-        }
-
-        let log_ret = (mid_price / open).ln();
-
-        // 6. Futó összesítők frissítése
-        if self.bar_returns.len() >= BAR_HISTORY {
-            if let Some(old) = self.bar_returns.pop_front() {
-                self.sum_x -= old;
-                self.sum_x2 -= old * old;
-            }
-        }
-        self.bar_returns.push_back(log_ret);
-        self.sum_x += log_ret;
-        self.sum_x2 += log_ret * log_ret;
-
-        // Lebegőpontos drift-újraszámítás 200 bar-onként
-        self.recalc_counter += 1;
-        if self.recalc_counter % 200 == 0 {
-            self.sum_x = self.bar_returns.iter().sum();
-            self.sum_x2 = self.bar_returns.iter().map(|&x| x * x).sum();
-        }
-
-        // Új bar nyitása
-        self.bar_open_mid = mid_price;
-        self.bar_start_ms = now_ms;
-
-        // 7. Warmup: minimum WARMUP_BARS bar kell
-        let n = self.bar_returns.len() as f64;
-        if (n as usize) < WARMUP_BARS {
-            return None;
-        }
-
-        // 8. Z-score számítás (numerikusan stabil)
-        let mean = self.sum_x / n;
-        let variance = ((self.sum_x2 / n) - (mean * mean)).max(0.0);
-        let std_dev = variance.sqrt();
-
-        // Minimális std_dev guard: ha a piac teljesen mozdulatlan,
-        // ne generáljunk szignált (pl. éjjeli alacsony volumen).
-        // SOL-on 0.001% alatti napi volatilitás nem reális kereskedési ablak.
-        let min_std_dev = 0.00005; // ~0.005% per 100ms bar → évi ~25% vol
-        if std_dev < min_std_dev {
-            return None;
-        }
-
-        let z_score = (log_ret - mean) / std_dev;
-        let volatility_px = (std_dev * mid_price).abs();
-
-        // 9. Imbalance momentum
-        let imb_momentum = imbalance - self.prev_imbalance;
-        self.prev_imbalance = imbalance;
-
-        // 10. Szignál logika
-        // Küszöbök:
-        //   z_threshold: config-ból (strategy_maker.json: 3.5 ajánlott)
-        //   imbalance: 0.65/0.35 (közepes vételi/eladói nyomás)
-        //   VAGY momentum: ±0.08 (gyors imbalance elmozdulás)
-        //
-        // Mean-reversion logika:
-        //   z < -threshold → ár erősen esett → Buy (visszapattanás várható)
-        //   z > +threshold → ár erősen nőtt → Sell (visszapattanás várható)
-        //
-        // Megerősítés: imbalance irány megegyezik a várható elmozdulással
-        let threshold = self.config.z_score_threshold;
-
-        if z_score < -threshold && (imbalance > 0.65 || imb_momentum > 0.08) {
-            return Some(SignalResult {
-                side: "Buy".to_string(),
-                target_mid: mid_price,
-                volatility: volatility_px,
-                z_score,
-                bar_count: self.bar_returns.len(),
-            });
-        }
-
-        if z_score > threshold && (imbalance < 0.35 || imb_momentum < -0.08) {
-            return Some(SignalResult {
-                side: "Sell".to_string(),
-                target_mid: mid_price,
-                volatility: volatility_px,
-                z_score,
-                bar_count: self.bar_returns.len(),
-            });
-        }
-
-        None
-    }
-}
+use std::time::Instant;
 
 pub struct SignalResult {
     pub side: String,
     pub target_mid: f64,
     pub volatility: f64,
-    /// Debug: z-score értéke a szignálnál (logoláshoz)
-    pub z_score: f64,
-    /// Debug: hány bar van a history-ban (warmup követés)
-    pub bar_count: usize,
+}
+
+pub trait Indicator {
+    fn update(&mut self, price: f64);
+    fn evaluate(&self) -> Option<String>;
+}
+
+// ==========================================
+// 1. Z-SCORE INDIKÁTOR (A Villámgyors Ravasz)
+// ==========================================
+struct ZScoreIndicator {
+    config: crate::config::ZScoreConfig,
+    history: VecDeque<f64>,
+}
+impl ZScoreIndicator {
+    fn new(config: crate::config::ZScoreConfig) -> Self { Self { config, history: VecDeque::new() } }
+}
+impl Indicator for ZScoreIndicator {
+    fn update(&mut self, price: f64) {
+        self.history.push_back(price);
+        if self.history.len() > self.config.window { self.history.pop_front(); }
+    }
+    fn evaluate(&self) -> Option<String> {
+        if !self.config.enabled || self.history.len() < self.config.window { return None; }
+        let mean: f64 = self.history.iter().sum::<f64>() / self.history.len() as f64;
+        let variance: f64 = self.history.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / self.history.len() as f64;
+        let std_dev = variance.sqrt();
+        if std_dev == 0.0 { return None; }
+        let z_score = (*self.history.back().unwrap() - mean) / std_dev;
+        
+        if z_score <= -self.config.threshold { Some("Buy".to_string()) }
+        else if z_score >= self.config.threshold { Some("Sell".to_string()) }
+        else { None }
+    }
+}
+
+// ==========================================
+// 2. RSI INDIKÁTOR (A Trend Környezet)
+// ==========================================
+struct RsiIndicator {
+    config: crate::config::RsiConfig,
+    prev_price: Option<f64>,
+    avg_gain: f64,
+    avg_loss: f64,
+    tick_count: usize,
+    last_update: Instant,
+}
+impl RsiIndicator {
+    fn new(config: crate::config::RsiConfig) -> Self { 
+        Self { 
+            config, 
+            prev_price: None, 
+            avg_gain: 0.0, 
+            avg_loss: 0.0, 
+            tick_count: 0,
+            last_update: Instant::now() - std::time::Duration::from_secs(100), // Azonnali első frissítés
+        } 
+    }
+}
+impl Indicator for RsiIndicator {
+    fn update(&mut self, price: f64) {
+        // Okos mintavételezés: csak 5 másodpercenként rögzítünk árat, hogy elkerüljük a mikroszekundumos zajt
+        if self.last_update.elapsed().as_secs() < 5 { return; }
+        self.last_update = Instant::now();
+
+        if let Some(prev) = self.prev_price {
+            let change = price - prev;
+            let gain = if change > 0.0 { change } else { 0.0 };
+            let loss = if change < 0.0 { change.abs() } else { 0.0 };
+
+            if self.tick_count < self.config.window {
+                self.avg_gain += gain;
+                self.avg_loss += loss;
+                self.tick_count += 1;
+                if self.tick_count == self.config.window {
+                    self.avg_gain /= self.config.window as f64;
+                    self.avg_loss /= self.config.window as f64;
+                }
+            } else {
+                // Wilder's Smoothing
+                self.avg_gain = ((self.avg_gain * (self.config.window as f64 - 1.0)) + gain) / self.config.window as f64;
+                self.avg_loss = ((self.avg_loss * (self.config.window as f64 - 1.0)) + loss) / self.config.window as f64;
+            }
+        }
+        self.prev_price = Some(price);
+    }
+
+    fn evaluate(&self) -> Option<String> {
+        if !self.config.enabled || self.tick_count < self.config.window { return None; }
+        if self.avg_loss == 0.0 {
+            return if self.avg_gain > 0.0 { Some("Sell".to_string()) } else { None };
+        }
+        let rs = self.avg_gain / self.avg_loss;
+        let rsi = 100.0 - (100.0 / (1.0 + rs));
+
+        if rsi <= self.config.buy_below { Some("Buy".to_string()) }
+        else if rsi >= self.config.sell_above { Some("Sell".to_string()) }
+        else { None }
+    }
+}
+
+// ==========================================
+// A MOTOR (Konfluencia Logika)
+// ==========================================
+pub struct SignalEngine {
+    config: StrategyConfig,
+    z_score: ZScoreIndicator,
+    rsi: RsiIndicator,
+}
+
+impl SignalEngine {
+    pub fn new(config: StrategyConfig) -> Self {
+        Self {
+            z_score: ZScoreIndicator::new(config.signals.z_score.clone()),
+            rsi: RsiIndicator::new(config.signals.rsi.clone()),
+            config,
+        }
+    }
+
+    pub async fn tick(&mut self, mid: f64) -> Option<SignalResult> {
+        if mid <= 0.0 { return None; }
+
+        self.z_score.update(mid);
+        self.rsi.update(mid);
+
+        let z_sig = self.z_score.evaluate();
+        let rsi_sig = self.rsi.evaluate();
+
+        let z_enabled = self.config.signals.z_score.enabled;
+        let rsi_enabled = self.config.signals.rsi.enabled;
+
+        let mut final_sig = None;
+
+        // KŐKEMÉNY LOGIKA:
+        // Ha mindkettő be van kapcsolva, mindkettőnek EGYEZNIE KELL.
+        if z_enabled && rsi_enabled {
+            if let (Some(z), Some(r)) = (&z_sig, &rsi_sig) {
+                if z == r { final_sig = Some(z.clone()); }
+            }
+        } 
+        // Ha csak az egyik van bekapcsolva, az diktál.
+        else if z_enabled { final_sig = z_sig; } 
+        else if rsi_enabled { final_sig = rsi_sig; }
+
+        if let Some(side) = final_sig {
+            return Some(SignalResult {
+                side,
+                target_mid: mid,
+                volatility: mid * 0.005, 
+            });
+        }
+        None
+    }
 }
