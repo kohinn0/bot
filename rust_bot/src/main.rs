@@ -139,6 +139,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     continue;
                 }
 
+                // Pozícióban: nincs új maker létra — a TP/SL + dust loop intézi a kilépést (különben dupla exit, felesleges fee)
+                if current_pos.abs() > 0.001 {
+                    continue;
+                }
+
                 let target_n = *target_notional_t.lock().await;
                 let min_slice = strategy_for_signal.min_ladder_slice_usd(target_n);
                 if min_slice + 1e-6 < strategy_for_signal.min_ladder_order_notional_usd {
