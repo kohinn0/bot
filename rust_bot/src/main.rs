@@ -2,7 +2,8 @@
 //! Közös `current_position` + Hyperliquid REST. Új létra csak akkor mehet, ha a clearinghouse szerint
 //! nincs pozíció, létra-cancel után a könyv üres erre a coinra, és nincs blokkoló order (TP/SL / reduce-only).
 //! Minden **L1** (aláírás + POST) a `HyperliquidL1Gate`-en megy: soros végrehajtás + szigorúan növekvő nonce.
-//! A szignál-létra a gate alatt még egyszer lekéri a clearinghouse-t és a könyvet (TOCTOU vs reconcile).
+//! A szignál-létra a gate alatt kétszer (120 ms különbséggel) lekéri a clearinghouse-t és a könyvet — a HL API
+//! néha később mutatja a TP/SL-t; egy olvasás alatt átcsúszhatna a maker létra.
 
 mod config;
 mod network;
@@ -366,46 +367,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let user = hl_user_t.clone();
                         let coin = coin_signal.clone();
                         async move {
-                            match rest.get_user_state(user.as_str()).await {
-                                Ok(st) => {
-                                    if clearinghouse_has_error(&st) {
-                                        tracing::warn!(
-                                            "létra (L1 gate): clearinghouse error {:?}",
-                                            st.get("error")
-                                        );
-                                        return false;
-                                    }
-                                    let p = clearinghouse_coin_szi(&st, coin.as_str());
-                                    if p.abs() > 0.0001 {
-                                        tracing::warn!(
-                                            "létra (L1 gate): pozíció {:.4} — nem küldünk batch-et",
-                                            p
-                                        );
-                                        *pos_sim.lock().await = p;
-                                        return false;
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::warn!("létra (L1 gate): get_user_state {}", e);
-                                    return false;
-                                }
-                            }
-                            match rest.get_frontend_open_orders(user.as_str()).await {
-                                Ok(fe) => {
-                                    if frontend_has_blocking_orders_for_coin(&fe, coin.as_str())
-                                        || frontend_has_any_open_order_for_coin(&fe, coin.as_str())
-                                    {
-                                        tracing::warn!(
-                                            "létra (L1 gate): {} könyvén maradt order — nem küldünk batch-et",
-                                            coin
-                                        );
-                                        return false;
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::warn!("létra (L1 gate): frontendOpenOrders {}", e);
-                                    return false;
-                                }
+                            if !ladder_gate_flat_ok(&rest, user.as_str(), coin.as_str(), &pos_sim)
+                                .await
+                            {
+                                return false;
                             }
                             match signer.sign_l1_action(&act, nonce, net).await {
                                 Ok(sig) => {
@@ -622,4 +587,68 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tokio::signal::ctrl_c().await?;
     Ok(())
+}
+
+/// Két körben (120 ms között): clearinghouse lapos + nincs nyitott order a coinon.
+/// A HL `frontendOpenOrders` néha egy pillanatig nem mutatja a friss TP/SL-t — egy olvasás alatt átcsúszhat a maker létra.
+async fn ladder_gate_flat_ok(
+    rest: &HyperliquidClient,
+    user: &str,
+    coin: &str,
+    pos_sim: &Arc<tokio::sync::Mutex<f64>>,
+) -> bool {
+    for pass in 0..2 {
+        if pass == 1 {
+            tokio::time::sleep(tokio::time::Duration::from_millis(120)).await;
+        }
+        match rest.get_user_state(user).await {
+            Ok(st) => {
+                if clearinghouse_has_error(&st) {
+                    tracing::warn!(
+                        "létra (L1 gate pass {}): clearinghouse error {:?}",
+                        pass + 1,
+                        st.get("error")
+                    );
+                    return false;
+                }
+                let p = clearinghouse_coin_szi(&st, coin);
+                if p.abs() > 0.0001 {
+                    tracing::warn!(
+                        "létra (L1 gate pass {}): pozíció {:.4} — nem küldünk batch-et",
+                        pass + 1,
+                        p
+                    );
+                    *pos_sim.lock().await = p;
+                    return false;
+                }
+            }
+            Err(e) => {
+                tracing::warn!("létra (L1 gate pass {}): get_user_state {}", pass + 1, e);
+                return false;
+            }
+        }
+        match rest.get_frontend_open_orders(user).await {
+            Ok(fe) => {
+                if frontend_has_blocking_orders_for_coin(&fe, coin)
+                    || frontend_has_any_open_order_for_coin(&fe, coin)
+                {
+                    tracing::warn!(
+                        "létra (L1 gate pass {}): {} könyvén maradt order — nem küldünk batch-et",
+                        pass + 1,
+                        coin
+                    );
+                    return false;
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "létra (L1 gate pass {}): frontendOpenOrders {}",
+                    pass + 1,
+                    e
+                );
+                return false;
+            }
+        }
+    }
+    true
 }
