@@ -2,6 +2,7 @@
 //! Közös `current_position` + Hyperliquid REST. Új létra csak akkor mehet, ha a clearinghouse szerint
 //! nincs pozíció, létra-cancel után a könyv üres erre a coinra, és nincs blokkoló order (TP/SL / reduce-only).
 //! Minden **L1** (aláírás + POST) a `HyperliquidL1Gate`-en megy: soros végrehajtás + szigorúan növekvő nonce.
+//! A szignál-létra a gate alatt még egyszer lekéri a clearinghouse-t és a könyvet (TOCTOU vs reconcile).
 
 mod config;
 mod network;
@@ -320,12 +321,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     continue;
                 }
 
-                last_signal_time = std::time::Instant::now();
-
-                info!("🚨 SZIGNÁL: {} @ {:.4}", signal.side, signal.target_mid);
-                *vol_sim_t.lock().await = signal.volatility;
-                order_manager.current_pos = current_pos;
-
                 let s = state_t.read().await;
                 let (bid, ask, mid) = (
                     s.best_bid,
@@ -339,6 +334,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if bid <= 0.0 {
                     continue;
                 }
+
+                order_manager.current_pos = current_pos;
 
                 let action = order_manager.build_ladder_payload(
                     &signal.side,
@@ -356,31 +353,89 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     tracing::warn!("Létra üres (min notional / szűrők) — nem küldünk order actiont");
                     continue;
                 }
-                l1_gate_t
+
+                // Végső pillanat: L1 gate alatt (más L1 nem futhat) clearinghouse + könyv — különben TOCTOU a reconcile ellen.
+                let ladder_ok = l1_gate_t
                     .run(|nonce| {
                         let signer = signer_t.clone();
                         let rest = rest_client_t.clone();
                         let feed = feed_t.clone();
+                        let pos_sim = pos_sim_t.clone();
                         let act = action.clone();
                         let net = is_mainnet_for_signal;
+                        let user = hl_user_t.clone();
+                        let coin = coin_signal.clone();
                         async move {
+                            match rest.get_user_state(user.as_str()).await {
+                                Ok(st) => {
+                                    if clearinghouse_has_error(&st) {
+                                        tracing::warn!(
+                                            "létra (L1 gate): clearinghouse error {:?}",
+                                            st.get("error")
+                                        );
+                                        return false;
+                                    }
+                                    let p = clearinghouse_coin_szi(&st, coin.as_str());
+                                    if p.abs() > 0.0001 {
+                                        tracing::warn!(
+                                            "létra (L1 gate): pozíció {:.4} — nem küldünk batch-et",
+                                            p
+                                        );
+                                        *pos_sim.lock().await = p;
+                                        return false;
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!("létra (L1 gate): get_user_state {}", e);
+                                    return false;
+                                }
+                            }
+                            match rest.get_frontend_open_orders(user.as_str()).await {
+                                Ok(fe) => {
+                                    if frontend_has_blocking_orders_for_coin(&fe, coin.as_str())
+                                        || frontend_has_any_open_order_for_coin(&fe, coin.as_str())
+                                    {
+                                        tracing::warn!(
+                                            "létra (L1 gate): {} könyvén maradt order — nem küldünk batch-et",
+                                            coin
+                                        );
+                                        return false;
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!("létra (L1 gate): frontendOpenOrders {}", e);
+                                    return false;
+                                }
+                            }
                             match signer.sign_l1_action(&act, nonce, net).await {
                                 Ok(sig) => {
                                     let res = rest.send_l1_action(&act, nonce, sig).await;
-                                    if exchange_action_ok_or_warn("szignál létra", &res) {
+                                    let ok = exchange_action_ok_or_warn("szignál létra", &res);
+                                    if ok {
                                         if let Ok(ref body) = res {
-                                            let new_oids = collect_resting_oids_from_exchange_response(body);
+                                            let new_oids =
+                                                collect_resting_oids_from_exchange_response(body);
                                             if !new_oids.is_empty() {
                                                 feed.open_order_oids.lock().await.extend(new_oids);
                                             }
                                         }
                                     }
+                                    ok
                                 }
-                                Err(e) => tracing::warn!("szignál létra aláírás: {}", e),
+                                Err(e) => {
+                                    tracing::warn!("szignál létra aláírás: {}", e);
+                                    false
+                                }
                             }
                         }
                     })
                     .await;
+
+                if ladder_ok {
+                    last_signal_time = std::time::Instant::now();
+                    info!("🚨 SZIGNÁL: {} @ {:.4}", signal.side, signal.target_mid);
+                    *vol_sim_t.lock().await = signal.volatility;
+                }
             }
             tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
         }
