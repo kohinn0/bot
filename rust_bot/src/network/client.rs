@@ -469,7 +469,9 @@ pub fn filter_cancel_oids_excluding_position_tpsl_triggers(
     let mut protected = HashSet::new();
     for ord in arr {
         if ord["coin"].as_str() != Some(coin) { continue; }
-        if hl_order_is_protected(ord) {
+        // A `reduceOnly` close limit a kilépési struktúra része; azt ne canceljük
+        // (különben könnyen megjelenik “plusz” close limit a TP/SL mellett).
+        if hl_order_is_protected(ord) || json_truthy(&ord["reduceOnly"]) {
             if let Some(oid) = parse_order_oid(ord) { protected.insert(oid); }
         }
     }
@@ -481,7 +483,9 @@ pub fn collect_ladder_cancel_oids_from_frontend(frontend_orders: &Value, coin: &
     let mut out = Vec::new();
     for ord in arr {
         if ord["coin"].as_str() != Some(coin) { continue; }
-        if hl_order_is_protected(ord) { continue; }
+        // Ne canceljük a kilépési (protected) vagy `reduceOnly` close limitet,
+        // különben a következő létra-körben újra legenerálódhat.
+        if hl_order_is_protected(ord) || json_truthy(&ord["reduceOnly"]) { continue; }
         if let Some(oid) = parse_order_oid(ord) { out.push(oid); }
     }
     out
@@ -606,5 +610,33 @@ mod tests {
         assert!(hl_order_is_protected(&trig_px));
         let entry = json!({"coin": "SOL", "orderType": "Limit", "reduceOnly": false});
         assert!(!hl_order_blocks_entry_ladder(&entry));
+    }
+
+    #[test]
+    fn collect_ladder_cancel_oids_skips_reduce_only_close() {
+        let fe = json!([
+            // reduceOnly close limit (nem védett "protected"-ként, de mi se canceljük)
+            {"coin": "SOL", "oid": 1, "orderType": "Limit", "reduceOnly": true, "limitPx": "82.35"},
+            // TP/SL trigger (protected) - szintén nem cancel
+            {"coin": "SOL", "oid": 2, "orderType": "Take Profit Market"},
+            // Maker létra (nem protected, nem reduceOnly)
+            {"coin": "SOL", "oid": 3, "orderType": "Limit", "reduceOnly": false, "limitPx": "81.50"}
+        ]);
+
+        let oids = collect_ladder_cancel_oids_from_frontend(&fe, "SOL");
+        assert_eq!(oids, vec![3]);
+    }
+
+    #[test]
+    fn filter_cancel_oids_excluding_position_tpsl_triggers_keeps_reduce_only() {
+        let fe = json!([
+            {"coin": "SOL", "oid": 1, "orderType": "Limit", "reduceOnly": true, "limitPx": "82.35"},
+            {"coin": "SOL", "oid": 2, "orderType": "Take Profit Market"},
+            {"coin": "SOL", "oid": 3, "orderType": "Limit", "reduceOnly": false, "limitPx": "81.50"}
+        ]);
+
+        // A bemenetben mindhárom oid benne van: csak a 3-as maradhat.
+        let kept = filter_cancel_oids_excluding_position_tpsl_triggers(&fe, "SOL", vec![1, 2, 3]);
+        assert_eq!(kept, vec![3]);
     }
 }

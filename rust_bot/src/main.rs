@@ -31,6 +31,7 @@ use crate::network::client::{
     filter_cancel_oids_excluding_position_tpsl_triggers,
     frontend_has_any_open_order_for_coin,
     frontend_has_blocking_orders_for_coin,
+    hl_order_blocks_entry_ladder,
     get_frontend_open_orders_retry_ok,
     get_frontend_open_orders_retry_ok_fast,
     get_user_state_retry_ok,
@@ -591,7 +592,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if o["coin"].as_str() != Some(&coin_rec) {
                                 return false;
                             }
-                            !hl_order_is_protected(o)
+                            // A kilépési reduceOnly close limitet is védjük:
+                            // ha leszedjük, könnyen “plusz” close limit jelenik meg TP/SL mellett.
+                            !hl_order_blocks_entry_ladder(o)
                         })
                         .filter_map(|o| o["oid"].as_u64().or_else(|| o["oid"].as_str().and_then(|v| v.parse().ok()))).collect();
 
