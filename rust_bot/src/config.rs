@@ -97,12 +97,19 @@ impl AppConfig {
         // HL_PERP_DEX: üres = normál Hyperliquid perp; builder DEX esetén állítsd .env-ben
         let hl_perp_dex = std::env::var("HL_PERP_DEX").unwrap_or_default();
 
+        // Fallback / DRY_RUN méret; élesben a HL accountValue felülírja, ha USE_WALLET_BALANCE_FOR_SIZING=true
+        let starting_equity_usd = std::env::var("STARTING_EQUITY_USD")
+            .ok()
+            .and_then(|s| s.parse::<f64>().ok())
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .unwrap_or(50.0);
+
         AppConfig {
             private_key: env_pk,
             hl_user_address: env_user,
             is_mainnet,
             hl_perp_dex,
-            starting_equity_usd: 100.0,
+            starting_equity_usd,
             use_wallet_balance_for_sizing: true,
             is_dry_run: false,
             strategy: strat_config,

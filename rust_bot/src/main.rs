@@ -223,6 +223,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tokio::spawn(async move {
         let mut last_protected_pos: f64 = 0.0;
+        let mut next_dust_ioc_after =
+            std::time::Instant::now() - std::time::Duration::from_secs(3600);
         loop {
             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
             if let Ok(st) = rest_client_r.get_user_state(hl_user_r.as_str()).await {
@@ -244,8 +246,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 // 🚨 1. DUST CLOSER: Ha a pozíció túl kicsi ($15 alatt), bezárja és töröl minden ordert
                 if ex_pos.abs() > 0.0001 && notional_val < 15.0 {
-                    info!("🗑️ Dust detektálva (${:.2}). Market Close indítása...", notional_val);
-                    let close_action = om_rec.build_market_close_payload(ex_pos < 0.0, ref_px, ex_pos.abs());
+                    let book = state_rec.read().await;
+                    let (bid, ask) = (book.best_bid, book.best_ask);
+                    if bid <= 0.0 || ask <= 0.0 || ask <= bid {
+                        continue;
+                    }
+                    let now = std::time::Instant::now();
+                    if now < next_dust_ioc_after {
+                        continue;
+                    }
+                    next_dust_ioc_after = now + std::time::Duration::from_secs(3);
+                    // IOC: limit a könyv szélén (bid eladásnál, ask vételnél); entry/mid gyakran reject
+                    let ioc_px = if ex_pos > 0.0 { bid } else { ask };
+                    info!("🗑️ Dust detektálva (${:.2}). IOC zárás bid={:.4} ask={:.4}", notional_val, bid, ask);
+                    let close_action = om_rec.build_market_close_payload(ex_pos < 0.0, ioc_px, ex_pos.abs());
                     let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
                     if let Ok(sig) = signer_r.sign_l1_action(&close_action, nonce, app_config.is_mainnet).await {
                         let _ = rest_client_r.send_l1_action(&close_action, nonce, sig).await;

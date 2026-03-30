@@ -15,8 +15,8 @@
     "dust_limit_usd": 15.0,
     "pos_clear_threshold": 0.0001,
     "min_signal_interval_ms": 60000,
-    "balance_pct_per_trade": 100.0,
-    "max_notional_usd_per_trade": 1000.0,
+    "balance_pct_per_trade": 80.0,
+    "max_notional_usd_per_trade": 50000.0,
     "ladder_levels": [
         { "level": 1, "offset_from_mid_pct": 0.15, "size_pct": 0.3 },
         { "level": 2, "offset_from_mid_pct": 0.35, "size_pct": 0.3 },

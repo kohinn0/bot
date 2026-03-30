@@ -402,6 +402,8 @@ impl OrderManager {
         self.config.min_tick_size
     }
 
+    /// IOC limit: azonnali kitöltéshez a limitnek a könyv **szélén** kell lennie.
+    /// Sell (long zárás): `price` ≈ **best bid**; Buy (short zárás): `price` ≈ **best ask** (ne entry / mid).
     pub fn build_market_close_payload(
         &self,
         is_buy: bool,
@@ -409,7 +411,11 @@ impl OrderManager {
         sz: f64,
     ) -> OrderAction {
         let sz_step = 10_f64.powi(-(self.sz_decimals as i32));
-        let quantized_sz = ((sz / sz_step).floor() * sz_step).max(self.config.min_shares);
+        let floored = (sz / sz_step).floor() * sz_step;
+        let mut quantized_sz = floored.min(sz);
+        if quantized_sz < self.config.min_shares && sz + 1e-12 >= self.config.min_shares {
+            quantized_sz = self.config.min_shares.min(sz);
+        }
         let rounded_px = if is_buy {
             (price / self.config.min_tick_size).ceil() * self.config.min_tick_size
         } else {
