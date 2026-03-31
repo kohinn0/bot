@@ -150,6 +150,7 @@ cmd_help_tail() {
   echo "Parancsok:"
   echo "  $0 update   – git pull + újrafordítás"
   echo "  $0 build    – csak fordítás"
+  echo "  $0 repo-map – repo térkép generálás (docs/repo-map.md)"
   echo "  $0 status   – systemd / folyamat / log"
   echo "  $0 start    – háttér (nohup), ne systemd mellett"
   echo "  $0 stop     – nohup leállítás"
@@ -166,6 +167,7 @@ cmd_help() {
   echo "  install   Első telepítés: OS csomagok (apt/dnf), Rust, git pull, .env másolás, release build"
   echo "  update    Frissítés: git pull + release build"
   echo "  build     Csak cargo build --release"
+  echo "  repo-map  AI-hoz repo térkép generálás (docs/repo-map.md)"
   echo "  status    systemd / folyamat / log utolsó sorai"
   echo "  start     Bot indítása nohup-pal (rust_bot mappából)"
   echo "  stop      nohup folyamat leállítása"
@@ -180,6 +182,7 @@ main() {
     install) cmd_install ;;
     update)  cmd_update ;;
     build)   ensure_rust; do_build ;;
+    repo-map) python3 "$ROOT/scripts/repo_map.py" --root "$ROOT" --output "docs/repo-map.md" ;;
     status)  cmd_status ;;
     start)   cmd_start ;;
     stop)    cmd_stop ;;

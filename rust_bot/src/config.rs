@@ -34,7 +34,6 @@ pub struct StrategyConfig {
     pub sl_min_ticks: f64,
     pub max_positions: u32,
     pub dust_limit_usd: f64,
-    pub pos_clear_threshold: f64,
     pub min_signal_interval_ms: u64,
     pub balance_pct_per_trade: f64,
     pub max_notional_usd_per_trade: f64,

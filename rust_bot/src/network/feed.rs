@@ -91,16 +91,6 @@ impl HyperliquidFeed {
         }
     }
 
-    pub async fn clear_post_only_reject_flag(&self) {
-        *self.post_only_reject_flag.lock().await = false;
-    }
-
-    
-
-    
-
-    
-
     pub async fn start(self: Arc<Self>) {
         let this = self.clone();
         tokio::spawn(async move {

@@ -400,10 +400,6 @@ impl OrderManager {
         OrderAction { type_: "order".to_string(), orders, grouping: "na".to_string() }
     }
 
-    pub fn config_tick(&self) -> f64 {
-        self.config.min_tick_size
-    }
-
     /// IOC limit: azonnali kitöltéshez a limitnek a könyv **szélén** kell lennie.
     /// Sell (long zárás): `price` ≈ **best bid**; Buy (short zárás): `price` ≈ **best ask** (ne entry / mid).
     pub fn build_market_close_payload(

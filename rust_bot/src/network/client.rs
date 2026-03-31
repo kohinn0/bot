@@ -195,37 +195,6 @@ pub fn exchange_action_ok_or_warn(ctx: &str, res: &Result<Value, reqwest::Error>
 
 
 
-pub fn collect_position_tpsl_oids(frontend_orders: &Value, coin: &str) -> Vec<u64> {
-    let Some(arr) = frontend_orders.as_array() else { return Vec::new(); };
-    let mut out = Vec::new();
-    for ord in arr {
-        if ord["coin"].as_str() != Some(coin) { continue; }
-        if ord["isPositionTpsl"].as_bool() != Some(true) { continue; }
-        if let Some(oid) = parse_order_oid(ord) { out.push(oid); }
-    }
-    out
-}
-
-pub fn frontend_position_tpsl_matches_pos(
-    frontend_orders: &Value,
-    coin: &str,
-    pos_abs: f64,
-) -> bool {
-    if !pos_abs.is_finite() || pos_abs < 1e-9 { return false; }
-    let eps = (pos_abs * 0.02).max(1e-6).min(0.5);
-    let Some(arr) = frontend_orders.as_array() else { return false; };
-    for ord in arr {
-        if ord["coin"].as_str() != Some(coin) { continue; }
-        if ord["isPositionTpsl"].as_bool() != Some(true) { continue; }
-        let sz = ord["sz"].as_str()
-            .and_then(|s| s.parse::<f64>().ok())
-            .or_else(|| ord["sz"].as_f64())
-            .unwrap_or(0.0);
-        if (sz - pos_abs).abs() <= eps { return true; }
-    }
-    false
-}
-
 fn parse_order_oid(ord: &Value) -> Option<u64> {
     ord["oid"].as_u64()
         .or_else(|| ord["oid"].as_str().and_then(|v| v.parse().ok()))
