@@ -508,6 +508,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 // 🚨 1. DUST CLOSER: Ha a pozíció túl kicsi (dust_limit_usd alatt), bezárja és töröl minden ordert
                 if ex_pos.abs() > 0.0001 && notional_val < dust_limit_usd {
+                    // Ha már van TP/SL vagy reduce-only kilépő order, ne kavarjunk bele:
+                    // a dust ág különben leszedheti a védelmet és új "futyi" limit ciklust okozhat.
+                    if frontend_has_blocking_orders_for_coin(&fe, &coin_rec) {
+                        tracing::debug!(
+                            "Dust closer kihagyva: van blocking order (TP/SL vagy reduce-only) coin={}",
+                            coin_rec
+                        );
+                        continue;
+                    }
+
                     let book = state_rec.read().await;
                     let (bid, ask) = (book.best_bid, book.best_ask);
                     if bid <= 0.0 || ask <= 0.0 || ask <= bid {
@@ -570,12 +580,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         );
                     }
 
-                    let all_oids: Vec<u64> = fe.as_array().unwrap_or(&vec![]).iter()
-                        .filter(|o| o["coin"].as_str() == Some(&coin_rec))
-                        .filter_map(|o| o["oid"].as_u64().or_else(|| o["oid"].as_str().and_then(|v| v.parse().ok()))).collect();
-
-                    if !all_oids.is_empty() {
-                        let cancel_a = om_rec.build_cancel_payload(&all_oids);
+                    // Dust után csak "létra" maradékot cancelünk; protected/reduce-only maradjon békén.
+                    let cancel_oids = collect_ladder_cancel_oids_from_frontend(&fe, &coin_rec);
+                    if !cancel_oids.is_empty() {
+                        let cancel_a = om_rec.build_cancel_payload(&cancel_oids);
                         l1_gate_r
                             .run(|nonce| {
                                 let s = signer_r.clone();
