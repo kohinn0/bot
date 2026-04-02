@@ -14,7 +14,7 @@
     "pos_clear_threshold": 0.001,
     "min_signal_interval_ms": 300000,
     "balance_pct_per_trade": 200.0,
-    "max_notional_usd_per_trade": 110.0,
+    "max_notional_usd_per_trade": 200.0,
     "min_ladder_order_notional_usd": 11.0,
     "ladder_levels": [
         {
