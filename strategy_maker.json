@@ -1,0 +1,54 @@
+{
+    "coin": "SOL",
+    "leverage": 10,
+    "is_isolated": true,
+    "min_tick_size": 0.01,
+    "min_shares": 0.001,
+    "maker_fee_rate": 0.00015,
+    "taker_fee_rate": 0.00045,
+    "skew_penalty": null,
+    "tp_min_ticks": 80.0,
+    "sl_min_ticks": 250.0,
+    "max_positions": 1,
+    "dust_limit_usd": 15.0,
+    "pos_clear_threshold": 0.001,
+    "min_signal_interval_ms": 300000,
+    "balance_pct_per_trade": 50.0,
+    "max_notional_usd_per_trade": 150.0,
+    "min_ladder_order_notional_usd": 11.0,
+    "ladder_levels": [
+        {
+            "level": 1,
+            "offset_from_mid_pct": 0.115,
+            "size_pct": 0.30
+        },
+        {
+            "level": 2,
+            "offset_from_mid_pct": 0.269,
+            "size_pct": 0.30
+        },
+        {
+            "level": 3,
+            "offset_from_mid_pct": 0.538,
+            "size_pct": 0.40
+        }
+    ],
+    "signals": {
+        "z_score": {
+            "enabled": true,
+            "threshold": 3.8,
+            "window": 300
+        },
+        "rsi": {
+            "enabled": false,
+            "window": 14,
+            "buy_below": 30.0,
+            "sell_above": 70.0
+        },
+        "bollinger": {
+            "enabled": false,
+            "window": 20,
+            "std_dev": 2.0
+        }
+    }
+}
