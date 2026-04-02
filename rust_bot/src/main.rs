@@ -8,6 +8,8 @@
 //! elavult `pos_sim` mellett a pozícióellenőrzés ki sem futna.
 //! A `clearinghouseState` **több újrapróbálással** jön (`get_user_state_retry_ok`): átmeneti `{ "error": ... }` / HTTP
 //! hiba ne hagyja ki a `pos_sim` frissítését egy egész ticken (reconcile + szignál + L1 gate).
+//! Részleges fill után: sikeres TP/SL batch után **azonnal** friss `frontendOpenOrders` + létra-maradék cancel (sweep),
+//! különben a könyvön maradhatnak belépő limitek a védelem mellett.
 
 mod config;
 mod network;
@@ -32,7 +34,6 @@ use crate::network::client::{
     filter_cancel_oids_excluding_position_tpsl_triggers,
     frontend_has_any_open_order_for_coin,
     frontend_has_blocking_orders_for_coin,
-    hl_order_blocks_entry_ladder,
     get_frontend_open_orders_retry_ok,
     get_frontend_open_orders_retry_ok_fast,
     get_user_state_retry_ok,
@@ -632,16 +633,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // 🛡️ 3. ANTI-STALE LADDER (Csak TP/SL trigger maradhat)
                 // Korábban !reduceOnly szűrő miatt a maker „szellem” limit (reduce-only, nem trigger) nem törlődött.
                 if ex_pos.abs() > 0.0001 {
-                    let stale: Vec<u64> = fe.as_array().unwrap_or(&vec![]).iter()
-                        .filter(|o| {
-                            if o["coin"].as_str() != Some(&coin_rec) {
-                                return false;
-                            }
-                            // A kilépési reduceOnly close limitet is védjük:
-                            // ha leszedjük, könnyen “plusz” close limit jelenik meg TP/SL mellett.
-                            !hl_order_blocks_entry_ladder(o)
-                        })
-                        .filter_map(|o| o["oid"].as_u64().or_else(|| o["oid"].as_str().and_then(|v| v.parse().ok()))).collect();
+                    let stale = collect_ladder_cancel_oids_from_frontend(&fe, &coin_rec);
 
                     tracing::debug!(
                         "reconcile anti-stale: coin={} ex_pos={:.4} last_protected_pos={:.4} stale_oids={}",
@@ -719,6 +711,48 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .await;
                     if ok {
                         last_protected_pos = ex_pos;
+                        // Részleges fill után a régi maker létra maradék gyakran csak TP/SL feltevése után
+                        // látszik a könyvben; egy friss olvasás + sweep megszünteti a dupla kitettséget.
+                        match get_frontend_open_orders_retry_ok(&rest_client_r, hl_user_r.as_str()).await {
+                            Ok(fe_sweep) => {
+                                let sweep =
+                                    collect_ladder_cancel_oids_from_frontend(&fe_sweep, &coin_rec);
+                                if !sweep.is_empty() {
+                                    tracing::info!(
+                                        "reconcile: TP/SL utáni létra-sweep — {} maradék maker oid",
+                                        sweep.len()
+                                    );
+                                    let cancel_a = om_rec.build_cancel_payload(&sweep);
+                                    l1_gate_r
+                                        .run(|nonce| {
+                                            let s = signer_r.clone();
+                                            let r = rest_client_r.clone();
+                                            let net = app_config.is_mainnet;
+                                            async move {
+                                                match s.sign_l1_action(&cancel_a, nonce, net).await {
+                                                    Ok(sig) => {
+                                                        let res =
+                                                            r.send_l1_action(&cancel_a, nonce, sig).await;
+                                                        let _ = exchange_action_ok_or_warn(
+                                                            "reconcile TP/SL utáni létra-sweep cancel",
+                                                            &res,
+                                                        );
+                                                    }
+                                                    Err(e) => tracing::warn!(
+                                                        "TP/SL utáni sweep cancel aláírás: {}",
+                                                        e
+                                                    ),
+                                                }
+                                            }
+                                        })
+                                        .await;
+                                }
+                            }
+                            Err(e) => tracing::warn!(
+                                "reconcile: TP/SL utáni sweep — frontendOpenOrders {}",
+                                e
+                            ),
+                        }
                     }
                 }
         }
