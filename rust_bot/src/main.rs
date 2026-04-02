@@ -405,11 +405,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     bid,
                     ask,
                     target_n,
-                    if is_reducing {
-                        Some(order_manager.quantize_position_sz(current_pos.abs()))
-                    } else {
-                        None
-                    },
                 );
                 if action.orders.is_empty() {
                     tracing::warn!("Létra üres (min notional / szűrők) — nem küldünk order actiont");

@@ -134,12 +134,6 @@ impl OrderManager {
         Self::clamp_tpsl_prices_for_mark(exchange_pos, raw_tp, raw_sl, mark_mid, min_tick)
     }
 
-    pub fn quantize_position_sz(&self, sz: f64) -> f64 {
-        let step = 10_f64.powi(-(self.sz_decimals as i32));
-        let q = (sz.abs() / step).floor() * step;
-        q.max(self.config.min_shares)
-    }
-
     fn float_to_wire(x: f64) -> String {
         let s = format!("{:.8}", x);
         let trimmed = s.trim_end_matches('0');
@@ -207,6 +201,8 @@ impl OrderManager {
         OrderAction { type_: "order".to_string(), orders, grouping: "positionTpsl".to_string() }
     }
 
+    /// Csak **belépő** maker létra (`reduceOnly=false`). Pozíciózárást ne itt — TP/SL + dust IOC,
+    /// különben „fantom” reduce-only Alo limit jelenhet meg a TP/SL mellé.
     pub fn build_ladder_payload(
         &self,
         side: &str,
@@ -214,10 +210,9 @@ impl OrderManager {
         best_bid: f64,
         best_ask: f64,
         sz_usd: f64,
-        max_close_total_sz: Option<f64>,
     ) -> OrderAction {
         self.build_ladder_payload_with_passive_buffer(
-            side, mid_price, best_bid, best_ask, sz_usd, 1.0, max_close_total_sz,
+            side, mid_price, best_bid, best_ask, sz_usd, 1.0,
         )
     }
 
@@ -229,73 +224,12 @@ impl OrderManager {
         best_ask: f64,
         sz_usd: f64,
         passive_buffer_ticks: f64,
-        max_close_total_sz: Option<f64>,
     ) -> OrderAction {
         let is_buy = side.to_lowercase() == "buy";
         let tick = self.config.min_tick_size;
         let sz_step = 10_f64.powi(-(self.sz_decimals as i32));
 
-        let is_reduce_only = max_close_total_sz.is_some();
-
-        if let Some(close_sz) = max_close_total_sz {
-            if close_sz >= self.config.min_shares {
-                let (off_pct, clamp_like_l1) = self
-                    .config.ladder_levels.first()
-                    .map(|l| (l.offset_from_mid_pct, l.level == 1))
-                    .unwrap_or((0.0, true));
-
-                let skew_adj_px = (self.current_pos * self.config.skew_penalty.unwrap_or(0.0)) * tick;
-                let base_offset_px = mid_price * (off_pct / 100.0);
-
-                let mut raw_price: f64 = if is_buy {
-                    mid_price - base_offset_px - skew_adj_px
-                } else {
-                    mid_price + base_offset_px + skew_adj_px
-                };
-
-                if clamp_like_l1 {
-                    if is_buy {
-                        raw_price = raw_price.max(best_bid).min(best_ask - 0.5 * tick);
-                    } else {
-                        raw_price = raw_price.min(best_ask).max(best_bid + 0.5 * tick);
-                    }
-                }
-
-                let mut rounded_price = if is_buy {
-                    (raw_price / tick).floor() * tick
-                } else {
-                    (raw_price / tick).ceil() * tick
-                };
-                if is_buy {
-                    rounded_price = rounded_price.min(best_bid - passive_buffer_ticks * tick);
-                } else {
-                    rounded_price = rounded_price.max(best_ask + passive_buffer_ticks * tick);
-                }
-
-                let sz = ((close_sz / sz_step).floor() * sz_step).max(self.config.min_shares);
-                let min_n = self.config.min_ladder_order_notional_usd;
-                if sz >= self.config.min_shares && (rounded_price * sz) >= min_n {
-                    return OrderAction {
-                        type_: "order".to_string(),
-                        orders: vec![OrderWire {
-                            a: self.asset_idx,
-                            b: is_buy,
-                            p: Self::float_to_wire(rounded_price),
-                            s: Self::float_to_wire(sz),
-                            r: is_reduce_only,
-                            t: OrderTypeWire {
-                                limit: Some(LimitOrderType { tif: "Alo".to_string() }),
-                                trigger: None,
-                            },
-                        }],
-                        grouping: "na".to_string(),
-                    };
-                }
-            }
-        }
-
         let mut orders = Vec::new();
-        let mut remaining_close = max_close_total_sz;
 
         for level_cfg in &self.config.ladder_levels {
             let skew_adj_px = (self.current_pos * self.config.skew_penalty.unwrap_or(0.0)) * tick;
@@ -326,17 +260,8 @@ impl OrderManager {
                 rounded_price = rounded_price.max(best_ask + passive_buffer_ticks * tick);
             }
 
-            if let Some(rem) = remaining_close.as_ref() {
-                if *rem <= 0.0 { continue; }
-            }
-
             let size_usd = sz_usd * level_cfg.size_pct;
-            let mut sz = ((size_usd / rounded_price) / sz_step).floor() * sz_step;
-
-            if let Some(rem) = remaining_close.as_ref() {
-                sz = sz.min(*rem);
-                sz = (sz / sz_step).floor() * sz_step;
-            }
+            let sz = ((size_usd / rounded_price) / sz_step).floor() * sz_step;
 
             let min_n = self.config.min_ladder_order_notional_usd;
             if sz < self.config.min_shares || (rounded_price * sz) < min_n {
@@ -348,16 +273,12 @@ impl OrderManager {
                 b: is_buy,
                 p: Self::float_to_wire(rounded_price),
                 s: Self::float_to_wire(sz),
-                r: is_reduce_only,
+                r: false,
                 t: OrderTypeWire {
                     limit: Some(LimitOrderType { tif: "Alo".to_string() }),
                     trigger: None,
                 },
             });
-
-            if let Some(rem) = remaining_close.as_mut() {
-                *rem -= sz;
-            }
         }
 
         if orders.is_empty() {
@@ -373,22 +294,14 @@ impl OrderManager {
             };
             let min_notional = self.config.min_ladder_order_notional_usd;
             let fallback_notional = sz_usd.max(min_notional);
-            let mut sz = ((fallback_notional / rounded_price) / sz_step).floor() * sz_step;
-            if let Some(rem) = remaining_close {
-                if rem <= 0.0 {
-                    sz = 0.0;
-                } else {
-                    sz = sz.min(rem);
-                    sz = (sz / sz_step).floor() * sz_step;
-                }
-            }
+            let sz = ((fallback_notional / rounded_price) / sz_step).floor() * sz_step;
             if sz >= self.config.min_shares && (rounded_price * sz) >= min_notional {
                 orders.push(OrderWire {
                     a: self.asset_idx,
                     b: is_buy,
                     p: Self::float_to_wire(rounded_price),
                     s: Self::float_to_wire(sz),
-                    r: is_reduce_only,
+                    r: false,
                     t: OrderTypeWire {
                         limit: Some(LimitOrderType { tif: "Alo".to_string() }),
                         trigger: None,
