@@ -85,9 +85,13 @@ pub struct BollingerConfig {
 }
 
 impl StrategyConfig {
+    /// Cél-notional (USD): `equity × (balance_pct/100) × leverage`, majd `max_notional` plafon.
+    /// A HL perpnél a kitettség tipikusan a tőkeáttétellel skálázik; korábban csak a margin-összeg
+    /// ment USD célba, ezért 1 SOL / többszintes létra irreálisan kicsi maradt.
     pub fn notional_per_level_usd(&self, equity: f64) -> f64 {
-        let size = equity * (self.balance_pct_per_trade / 100.0);
-        size.min(self.max_notional_usd_per_trade)
+        let margin_usd = equity * (self.balance_pct_per_trade / 100.0);
+        let notional = margin_usd * f64::from(self.leverage);
+        notional.min(self.max_notional_usd_per_trade)
     }
 
     /// A legkisebb létraszelet USD-ben (target notional × legkisebb size_pct).
@@ -135,5 +139,60 @@ impl AppConfig {
             is_dry_run: false,
             strategy: strat_config,
         }
+    }
+}
+
+#[cfg(test)]
+mod strategy_config_tests {
+    use super::*;
+
+    fn strat(leverage: u32, balance_pct: f64, max_n: f64) -> StrategyConfig {
+        StrategyConfig {
+            coin: "SOL".to_string(),
+            leverage,
+            is_isolated: true,
+            min_tick_size: 0.001,
+            min_shares: 1.0,
+            maker_fee_rate: 0.0,
+            taker_fee_rate: 0.0,
+            skew_penalty: None,
+            tp_min_ticks: 1.0,
+            sl_min_ticks: 1.0,
+            max_positions: 1,
+            dust_limit_usd: 15.0,
+            min_signal_interval_ms: 0,
+            balance_pct_per_trade: balance_pct,
+            max_notional_usd_per_trade: max_n,
+            min_ladder_order_notional_usd: 18.0,
+            ladder_levels: vec![],
+            signals: SignalConfig {
+                z_score: ZScoreConfig {
+                    enabled: false,
+                    threshold: 0.0,
+                    window: 1,
+                },
+                rsi: RsiConfig {
+                    enabled: false,
+                    window: 1,
+                    buy_below: 0.0,
+                    sell_above: 0.0,
+                },
+                bollinger: BollingerConfig {
+                    enabled: false,
+                    window: 1,
+                    std_dev: 0.0,
+                },
+            },
+        }
+    }
+
+    #[test]
+    fn notional_per_level_usd_scales_with_leverage_and_caps() {
+        let s = strat(10, 100.0, 800.0);
+        assert!((s.notional_per_level_usd(80.0) - 800.0).abs() < 1e-6);
+        let s2 = strat(10, 100.0, 500.0);
+        assert!((s2.notional_per_level_usd(80.0) - 500.0).abs() < 1e-6);
+        let s3 = strat(10, 50.0, 800.0);
+        assert!((s3.notional_per_level_usd(80.0) - 400.0).abs() < 1e-6);
     }
 }
