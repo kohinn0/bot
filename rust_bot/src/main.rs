@@ -680,7 +680,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if (ex_pos.abs() - last_protected_pos.abs()).abs() < 0.001 { continue; }
 
                 if ref_px <= 0.0 { continue; }
-                if let Some((tp, sl)) = OrderManager::tp_sl_prices_for_position(ex_pos, ref_px, *vol_rec_t.lock().await, app_config.strategy.min_tick_size, app_config.strategy.tp_min_ticks, app_config.strategy.sl_min_ticks, state_rec.read().await.mid_price, app_config.strategy.maker_fee_rate, app_config.strategy.taker_fee_rate) {
+                if let Some((tp, sl)) = OrderManager::tp_sl_prices_for_position(ex_pos, ref_px, *vol_rec_t.lock().await, app_config.strategy.min_tick_size, app_config.strategy.tp_min_pct, app_config.strategy.sl_min_pct, state_rec.read().await.mid_price, app_config.strategy.maker_fee_rate, app_config.strategy.taker_fee_rate) {
                     tracing::debug!(
                         "reconcile TP/SL: coin={} ex_pos={:.4} ref_px={:.4} tp={:.4} sl={:.4}",
                         coin_rec,

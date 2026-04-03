@@ -30,8 +30,10 @@ pub struct StrategyConfig {
     pub maker_fee_rate: f64,
     pub taker_fee_rate: f64,
     pub skew_penalty: Option<f64>,
-    pub tp_min_ticks: f64,
-    pub sl_min_ticks: f64,
+    /// TP minimum távolság a **belépési / ref ár** százalékában (pl. `1.0` = 1%).
+    pub tp_min_pct: f64,
+    /// SL minimum távolság a ref ár százalékában (pl. `1.25` = 1,25%).
+    pub sl_min_pct: f64,
     pub max_positions: u32,
     pub dust_limit_usd: f64,
     pub min_signal_interval_ms: u64,
@@ -156,8 +158,8 @@ mod strategy_config_tests {
             maker_fee_rate: 0.0,
             taker_fee_rate: 0.0,
             skew_penalty: None,
-            tp_min_ticks: 1.0,
-            sl_min_ticks: 1.0,
+            tp_min_pct: 1.0,
+            sl_min_pct: 1.0,
             max_positions: 1,
             dust_limit_usd: 15.0,
             min_signal_interval_ms: 0,

@@ -116,17 +116,18 @@ impl OrderManager {
         ref_px: f64,
         vol_px: f64,
         min_tick: f64,
-        tp_min_ticks: f64,
-        sl_min_ticks: f64,
+        tp_min_pct: f64,
+        sl_min_pct: f64,
         mark_mid: f64,
         maker_fee_rate: f64,
         taker_fee_rate: f64,
     ) -> Option<(f64, f64)> {
         let round_trip_fee_px = ref_px * (maker_fee_rate + taker_fee_rate);
         let fee_min_dist = round_trip_fee_px * 2.0;
-        let config_min_dist = tp_min_ticks * min_tick;
+        let config_min_dist = ref_px * (tp_min_pct / 100.0);
         let tp_dist = f64::max(vol_px * 2.5, f64::max(config_min_dist, fee_min_dist));
-        let sl_dist = f64::max(vol_px * 1.5, sl_min_ticks * min_tick);
+        let sl_min_dist = ref_px * (sl_min_pct / 100.0);
+        let sl_dist = f64::max(vol_px * 1.5, sl_min_dist);
 
         let raw_tp = if exchange_pos > 0.0 { ref_px + tp_dist } else { ref_px - tp_dist };
         let raw_sl = if exchange_pos > 0.0 { ref_px - sl_dist } else { ref_px + sl_dist };
@@ -350,6 +351,34 @@ impl OrderManager {
             }],
             grouping: "na".to_string(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tpsl_pct_tests {
+    use super::OrderManager;
+
+    #[test]
+    fn tp_sl_minimum_distance_follows_pct_of_ref() {
+        let ref_px = 200.0;
+        let mark = ref_px;
+        let vol = 1e-9;
+        let (tp, sl) = OrderManager::tp_sl_prices_for_position(
+            1.0,
+            ref_px,
+            vol,
+            0.001,
+            1.0,
+            1.25,
+            mark,
+            0.00015,
+            0.00045,
+        )
+        .expect("tpsl");
+        let tp_dist = tp - ref_px;
+        let sl_dist = ref_px - sl;
+        assert!((tp_dist - 2.0).abs() < 0.05, "tp_dist={}", tp_dist);
+        assert!((sl_dist - 2.5).abs() < 0.05, "sl_dist={}", sl_dist);
     }
 }
 
