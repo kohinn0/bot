@@ -1,5 +1,5 @@
 {
-    "strategy_name": "pm_ambush_ladder_maker_v6_tuned",
+    "strategy_name": "pm_ambush_ladder_maker_v7_high_edge",
     "strategy_type": "MAKER_ONLY_PRO",
     "coin": "SOL",
     "leverage": 10,
@@ -13,9 +13,9 @@
     "sl_min_ticks": 250.0,
     "max_positions": 1,
     "dust_limit_usd": 15.0,
-    "min_signal_interval_ms": 300000,
-    "balance_pct_per_trade": 50.0,
-    "max_notional_usd_per_trade": 150.0,
+    "min_signal_interval_ms": 1800000,
+    "balance_pct_per_trade": 75.0,
+    "max_notional_usd_per_trade": 500.0,
     "min_ladder_order_notional_usd": 18.0,
     "ladder_levels": [
         { "level": 1, "offset_from_mid_pct": 0.115, "size_pct": 0.30 },
@@ -25,8 +25,8 @@
     "signals": {
         "z_score": {
             "enabled": true,
-            "threshold": 3.8,
-            "window": 300
+            "threshold": 4.5,
+            "window": 400
         },
         "rsi": {
             "enabled": false,
