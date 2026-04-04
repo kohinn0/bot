@@ -152,15 +152,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tokio::spawn(async move {
         loop {
-            let mid = {
+            let (mid, imbalance) = {
                 let s = state_t.read().await;
-                if s.best_bid > 0.0 && s.best_ask > 0.0 {
+                let m = if s.best_bid > 0.0 && s.best_ask > 0.0 {
                     (s.best_bid + s.best_ask) / 2.0
                 } else {
                     0.0
-                }
+                };
+                (m, s.imbalance)
             };
-            if let Some(signal) = signal_engine.tick(mid).await {
+            if let Some(signal) = signal_engine.tick(mid, imbalance).await {
                 // Csak akkor hívunk HL-t, ha a szignál-intervallum lejárt — különben 5 ms-onként spammelnénk.
                 if last_signal_time.elapsed() < min_signal_interval {
                     continue;

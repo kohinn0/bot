@@ -1,5 +1,5 @@
 {
-    "strategy_name": "pm_ambush_ladder_maker_v11_fee_aware_tp",
+    "strategy_name": "pm_ambush_ladder_maker_v12_filtered",
     "strategy_type": "MAKER_ONLY_PRO",
     "coin": "SOL",
     "leverage": 10,
@@ -38,6 +38,20 @@
             "enabled": false,
             "window": 20,
             "std_dev": 2.0
+        },
+        "filters": {
+            "ema_trend": {
+                "enabled": true,
+                "window": 200
+            },
+            "vol_gate": {
+                "enabled": true,
+                "max_vol_pct": 1.5
+            },
+            "imbalance": {
+                "enabled": true,
+                "block_threshold": 0.65
+            }
         }
     }
 }

@@ -1,4 +1,4 @@
-use crate::config::{BollingerConfig, StrategyConfig};
+use crate::config::{BollingerConfig, EmaTrendConfig, StrategyConfig};
 use std::collections::VecDeque;
 use std::time::Instant;
 
@@ -194,6 +194,47 @@ impl Indicator for BollingerIndicator {
     }
 }
 
+// ==========================================
+// 4. EMA TREND FILTER
+// ==========================================
+struct EmaFilter {
+    config: EmaTrendConfig,
+    value: Option<f64>,
+    k: f64,
+}
+
+impl EmaFilter {
+    fn new(config: EmaTrendConfig) -> Self {
+        let k = if config.window > 0 {
+            2.0 / (config.window as f64 + 1.0)
+        } else {
+            0.0
+        };
+        Self { config, value: None, k }
+    }
+
+    fn update(&mut self, price: f64) {
+        match self.value {
+            Some(prev) => self.value = Some(prev + self.k * (price - prev)),
+            None => self.value = Some(price),
+        }
+    }
+
+    /// Price vs EMA: Buy allowed if price < EMA (dip into uptrend);
+    /// Sell allowed if price > EMA (pop into downtrend).
+    fn allows_with_price(&self, side: &str, price: f64) -> bool {
+        if !self.config.enabled {
+            return true;
+        }
+        let Some(ema) = self.value else { return true };
+        match side {
+            "Buy" => price < ema,
+            "Sell" => price > ema,
+            _ => true,
+        }
+    }
+}
+
 /// Minden beküldött jel opcionális; üres lista = nincs engedélyezett indikátor.
 /// Több jelnél mindegyiknek `Some` és azonos iránynak kell lennie.
 fn combine_enabled_signals(parts: &[Option<String>]) -> Option<String> {
@@ -218,6 +259,7 @@ pub struct SignalEngine {
     z_score: ZScoreIndicator,
     rsi: RsiIndicator,
     bollinger: BollingerIndicator,
+    ema: EmaFilter,
 }
 
 impl SignalEngine {
@@ -226,11 +268,13 @@ impl SignalEngine {
             z_score: ZScoreIndicator::new(config.signals.z_score.clone()),
             rsi: RsiIndicator::new(config.signals.rsi.clone()),
             bollinger: BollingerIndicator::new(config.signals.bollinger.clone()),
+            ema: EmaFilter::new(config.signals.filters.ema_trend.clone()),
             config,
         }
     }
 
-    pub async fn tick(&mut self, mid: f64) -> Option<SignalResult> {
+    /// `imbalance`: orderbook bid-side ratio from feed (0.0 = all asks, 1.0 = all bids, 0.5 = balanced).
+    pub async fn tick(&mut self, mid: f64, imbalance: f64) -> Option<SignalResult> {
         if mid <= 0.0 {
             return None;
         }
@@ -238,6 +282,7 @@ impl SignalEngine {
         self.z_score.update(mid);
         self.rsi.update(mid);
         self.bollinger.update(mid);
+        self.ema.update(mid);
 
         let z_sig = self.z_score.evaluate();
         let rsi_sig = self.rsi.evaluate();
@@ -265,6 +310,51 @@ impl SignalEngine {
             .rolling_price_std()
             .filter(|v| v.is_finite() && *v > 0.0)
             .unwrap_or(mid * 0.005);
+
+        // --- FILTER 1: EMA trend ---
+        if !self.ema.allows_with_price(&final_sig, mid) {
+            tracing::debug!(
+                "Signal {} blocked by EMA trend filter (mid={:.2}, ema={:.2})",
+                final_sig,
+                mid,
+                self.ema.value.unwrap_or(0.0)
+            );
+            return None;
+        }
+
+        // --- FILTER 2: Volatility gate ---
+        let vg = &self.config.signals.filters.vol_gate;
+        if vg.enabled && mid > 0.0 {
+            let vol_pct = (vol_px / mid) * 100.0;
+            if vol_pct > vg.max_vol_pct {
+                tracing::debug!(
+                    "Signal {} blocked by vol gate ({:.3}% > {:.1}% max)",
+                    final_sig,
+                    vol_pct,
+                    vg.max_vol_pct
+                );
+                return None;
+            }
+        }
+
+        // --- FILTER 3: Orderbook imbalance ---
+        let imb = &self.config.signals.filters.imbalance;
+        if imb.enabled {
+            let blocked = match final_sig.as_str() {
+                "Sell" => imbalance > imb.block_threshold,
+                "Buy" => imbalance < (1.0 - imb.block_threshold),
+                _ => false,
+            };
+            if blocked {
+                tracing::debug!(
+                    "Signal {} blocked by imbalance filter (imb={:.3}, threshold={:.2})",
+                    final_sig,
+                    imbalance,
+                    imb.block_threshold
+                );
+                return None;
+            }
+        }
 
         Some(SignalResult {
             side: final_sig,
@@ -297,5 +387,35 @@ mod tests {
             combine_enabled_signals(&[Some("Buy".to_string()), None]),
             None
         );
+    }
+
+    #[test]
+    fn ema_filter_blocks_counter_trend() {
+        let cfg = EmaTrendConfig { enabled: true, window: 5 };
+        let mut ema = EmaFilter::new(cfg);
+        // Simulate rising price: EMA trails below → should block Buy, allow Sell
+        for p in [100.0, 101.0, 102.0, 103.0, 104.0, 105.0] {
+            ema.update(p);
+        }
+        assert!(ema.value.unwrap() < 105.0);
+        assert!(ema.allows_with_price("Sell", 105.0));
+        assert!(!ema.allows_with_price("Buy", 105.0));
+
+        // Simulate falling price
+        for p in [90.0, 89.0, 88.0, 87.0, 86.0, 85.0] {
+            ema.update(p);
+        }
+        assert!(ema.value.unwrap() > 85.0);
+        assert!(ema.allows_with_price("Buy", 85.0));
+        assert!(!ema.allows_with_price("Sell", 85.0));
+    }
+
+    #[test]
+    fn ema_filter_disabled_allows_all() {
+        let cfg = EmaTrendConfig { enabled: false, window: 5 };
+        let mut ema = EmaFilter::new(cfg);
+        ema.update(100.0);
+        assert!(ema.allows_with_price("Buy", 105.0));
+        assert!(ema.allows_with_price("Sell", 95.0));
     }
 }
