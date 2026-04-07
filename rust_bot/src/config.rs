@@ -44,11 +44,33 @@ pub struct StrategyConfig {
     pub min_ladder_order_notional_usd: f64,
     pub ladder_levels: Vec<LadderLevel>,
     pub signals: SignalConfig,
+
+    // --- Liquidity Sweep ---
+    #[serde(default = "default_sweep_window")]
+    pub sweep_window: u32,
+    #[serde(default = "default_sweep_threshold_pct")]
+    pub sweep_threshold_pct: f64,
+
+    // --- Order Flow ---
+    #[serde(default = "default_flow_window")]
+    pub flow_window: u32,
+    #[serde(default = "default_flow_threshold")]
+    pub flow_threshold: f64,
+
+    // --- Anchored VWAP ---
+    #[serde(default = "default_vwap_session_hours")]
+    pub vwap_session_hours: u32,
+    #[serde(default = "default_vwap_deviation_pct")]
+    pub vwap_deviation_pct: f64,
 }
 
-fn default_min_ladder_order_notional_usd() -> f64 {
-    18.0
-}
+fn default_min_ladder_order_notional_usd() -> f64 { 11.0 }
+fn default_sweep_window() -> u32 { 100 }
+fn default_sweep_threshold_pct() -> f64 { 0.08 }
+fn default_flow_window() -> u32 { 50 }
+fn default_flow_threshold() -> f64 { 3.5 }
+fn default_vwap_session_hours() -> u32 { 8 }
+fn default_vwap_deviation_pct() -> f64 { 0.15 }
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct LadderLevel {
@@ -226,27 +248,20 @@ mod strategy_config_tests {
             min_signal_interval_ms: 0,
             balance_pct_per_trade: balance_pct,
             max_notional_usd_per_trade: max_n,
-            min_ladder_order_notional_usd: 18.0,
+            min_ladder_order_notional_usd: 11.0,
             ladder_levels: vec![],
             signals: SignalConfig {
-                z_score: ZScoreConfig {
-                    enabled: false,
-                    threshold: 0.0,
-                    window: 1,
-                },
-                rsi: RsiConfig {
-                    enabled: false,
-                    window: 1,
-                    buy_below: 0.0,
-                    sell_above: 0.0,
-                },
-                bollinger: BollingerConfig {
-                    enabled: false,
-                    window: 1,
-                    std_dev: 0.0,
-                },
+                z_score: ZScoreConfig { enabled: false, threshold: 0.0, window: 1 },
+                rsi: RsiConfig { enabled: false, window: 1, buy_below: 0.0, sell_above: 0.0 },
+                bollinger: BollingerConfig { enabled: false, window: 1, std_dev: 0.0 },
                 filters: SignalFilters::default(),
             },
+            sweep_window: 100,
+            sweep_threshold_pct: 0.08,
+            flow_window: 50,
+            flow_threshold: 3.5,
+            vwap_session_hours: 8,
+            vwap_deviation_pct: 0.15,
         }
     }
 
