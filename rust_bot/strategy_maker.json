@@ -20,16 +20,6 @@
         {"level": 2, "offset_from_mid_pct": 0.269, "size_pct": 0.30},
         {"level": 3, "offset_from_mid_pct": 0.538, "size_pct": 0.40}
     ],
-    "signals": {
-        "z_score": {"enabled": false, "threshold": 4.5, "window": 400},
-        "rsi": {"enabled": false, "window": 14, "buy_below": 30.0, "sell_above": 70.0},
-        "bollinger": {"enabled": false, "window": 20, "std_dev": 2.0},
-        "filters": {
-            "ema_trend": {"enabled": false, "window": 200},
-            "vol_gate": {"enabled": false, "max_vol_pct": 1.5},
-            "imbalance": {"enabled": false, "block_threshold": 0.65}
-        }
-    },
     "sweep_window": 100,
     "sweep_threshold_pct": 0.08,
     "flow_window": 50,

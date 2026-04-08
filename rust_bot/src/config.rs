@@ -43,7 +43,6 @@ pub struct StrategyConfig {
     #[serde(default = "default_min_ladder_order_notional_usd")]
     pub min_ladder_order_notional_usd: f64,
     pub ladder_levels: Vec<LadderLevel>,
-    pub signals: SignalConfig,
 
     // --- Liquidity Sweep ---
     #[serde(default = "default_sweep_window")]
@@ -79,95 +78,6 @@ pub struct LadderLevel {
     pub size_pct: f64,
 }
 
-#[derive(Deserialize, Debug, Clone)]
-pub struct SignalConfig {
-    pub z_score: ZScoreConfig,
-    pub rsi: RsiConfig,
-    pub bollinger: BollingerConfig,
-    #[serde(default)]
-    pub filters: SignalFilters,
-}
-
-#[derive(Deserialize, Debug, Clone)]
-pub struct SignalFilters {
-    #[serde(default)]
-    pub ema_trend: EmaTrendConfig,
-    #[serde(default)]
-    pub vol_gate: VolGateConfig,
-    #[serde(default)]
-    pub imbalance: ImbalanceConfig,
-}
-
-impl Default for SignalFilters {
-    fn default() -> Self {
-        Self {
-            ema_trend: EmaTrendConfig::default(),
-            vol_gate: VolGateConfig::default(),
-            imbalance: ImbalanceConfig::default(),
-        }
-    }
-}
-
-#[derive(Deserialize, Debug, Clone)]
-pub struct EmaTrendConfig {
-    pub enabled: bool,
-    pub window: usize,
-}
-
-impl Default for EmaTrendConfig {
-    fn default() -> Self {
-        Self { enabled: false, window: 200 }
-    }
-}
-
-#[derive(Deserialize, Debug, Clone)]
-pub struct VolGateConfig {
-    pub enabled: bool,
-    /// Max rolling vol as % of mid price; above → skip signal.
-    pub max_vol_pct: f64,
-}
-
-impl Default for VolGateConfig {
-    fn default() -> Self {
-        Self { enabled: false, max_vol_pct: 2.0 }
-    }
-}
-
-#[derive(Deserialize, Debug, Clone)]
-pub struct ImbalanceConfig {
-    pub enabled: bool,
-    /// Don't sell if bid-side imbalance (buyer dominance) above this (e.g. 0.65).
-    /// Don't buy if bid-side imbalance below (1 - threshold) (e.g. 0.35).
-    pub block_threshold: f64,
-}
-
-impl Default for ImbalanceConfig {
-    fn default() -> Self {
-        Self { enabled: false, block_threshold: 0.65 }
-    }
-}
-
-#[derive(Deserialize, Debug, Clone)]
-pub struct ZScoreConfig {
-    pub enabled: bool,
-    pub threshold: f64,
-    pub window: usize,
-}
-
-#[derive(Deserialize, Debug, Clone)]
-pub struct RsiConfig {
-    pub enabled: bool,
-    pub window: usize,
-    pub buy_below: f64,
-    pub sell_above: f64,
-}
-
-#[derive(Deserialize, Debug, Clone)]
-pub struct BollingerConfig {
-    pub enabled: bool,
-    pub window: usize,
-    pub std_dev: f64,
-}
 
 impl StrategyConfig {
     /// Cél-notional (USD): `equity × (balance_pct/100) × leverage`, majd `max_notional` plafon.
@@ -250,12 +160,6 @@ mod strategy_config_tests {
             max_notional_usd_per_trade: max_n,
             min_ladder_order_notional_usd: 11.0,
             ladder_levels: vec![],
-            signals: SignalConfig {
-                z_score: ZScoreConfig { enabled: false, threshold: 0.0, window: 1 },
-                rsi: RsiConfig { enabled: false, window: 1, buy_below: 0.0, sell_above: 0.0 },
-                bollinger: BollingerConfig { enabled: false, window: 1, std_dev: 0.0 },
-                filters: SignalFilters::default(),
-            },
             sweep_window: 100,
             sweep_threshold_pct: 0.08,
             flow_window: 50,
