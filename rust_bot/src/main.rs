@@ -673,7 +673,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         has_tpsl,
                         delta
                     );
-                    if has_tpsl && delta < 0.0001 {
+                    // Ha TP/SL már kint van és a pozíció nem változott lényegesen → nincs teendő.
+                    if has_tpsl && delta < 0.001 {
+                        last_protected_pos = ex_pos; // tracking szinkronizálása (restart után is)
                         continue;
                     }
                 }
@@ -681,6 +683,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if (ex_pos.abs() - last_protected_pos.abs()).abs() < 0.001 { continue; }
 
                 if ref_px <= 0.0 { continue; }
+
+                // Régi TP/SL törlése MIELŐTT új kerülne ki — különben restart/részleges zárás után
+                // dupla TP/SL halmozódik a könyvön.
+                {
+                    let old_tpsl: Vec<u64> = fe.as_array().unwrap_or(&vec![]).iter()
+                        .filter(|o| o["coin"].as_str() == Some(&coin_rec) && hl_order_is_protected(o))
+                        .filter_map(|o| o["oid"].as_u64()
+                            .or_else(|| o["oid"].as_str().and_then(|v| v.parse().ok())))
+                        .collect();
+                    if !old_tpsl.is_empty() {
+                        info!("🧹 Régi TP/SL törlése ({} db) újraküldés előtt...", old_tpsl.len());
+                        let cancel_old = om_rec.build_cancel_payload(&old_tpsl);
+                        l1_gate_r
+                            .run(|nonce| {
+                                let s = signer_r.clone();
+                                let r = rest_client_r.clone();
+                                let net = app_config.is_mainnet;
+                                async move {
+                                    match s.sign_l1_action(&cancel_old, nonce, net).await {
+                                        Ok(sig) => {
+                                            let res = r.send_l1_action(&cancel_old, nonce, sig).await;
+                                            let _ = exchange_action_ok_or_warn("régi TP/SL cancel", &res);
+                                        }
+                                        Err(e) => tracing::warn!("régi TP/SL cancel aláírás: {}", e),
+                                    }
+                                }
+                            })
+                            .await;
+                        tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
+                    }
+                }
+
                 if let Some((tp, sl)) = OrderManager::tp_sl_prices_for_position(ex_pos, ref_px, *vol_rec_t.lock().await, app_config.strategy.min_tick_size, app_config.strategy.tp_min_pct, app_config.strategy.sl_min_pct, state_rec.read().await.mid_price, app_config.strategy.maker_fee_rate, app_config.strategy.taker_fee_rate) {
                     tracing::debug!(
                         "reconcile TP/SL: coin={} ex_pos={:.4} ref_px={:.4} tp={:.4} sl={:.4}",
