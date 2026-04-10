@@ -7,11 +7,11 @@
     "maker_fee_rate": 0.00015,
     "taker_fee_rate": 0.00045,
     "skew_penalty": null,
-    "tp_min_pct": 0.95,
-    "sl_min_pct": 3.0,
+    "tp_min_pct": 1.5,
+    "sl_min_pct": 1.0,
     "max_positions": 1,
     "dust_limit_usd": 15.0,
-    "min_signal_interval_ms": 300000,
+    "min_signal_interval_ms": 60000,
     "balance_pct_per_trade": 25.0,
     "max_notional_usd_per_trade": 200.0,
     "min_ladder_order_notional_usd": 11.0,
@@ -20,10 +20,10 @@
         {"level": 2, "offset_from_mid_pct": 0.269, "size_pct": 0.30},
         {"level": 3, "offset_from_mid_pct": 0.538, "size_pct": 0.40}
     ],
-    "sweep_window": 100,
-    "sweep_threshold_pct": 0.08,
+    "sweep_window": 50,
+    "sweep_threshold_pct": 0.05,
     "flow_window": 50,
-    "flow_threshold": 3.5,
+    "flow_threshold": 2.0,
     "vwap_session_hours": 8,
     "vwap_deviation_pct": 0.15
 }
