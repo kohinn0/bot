@@ -99,25 +99,52 @@ impl HyperliquidFeed {
                 let url = Url::parse(&this.ws_url).unwrap();
 
                 match connect_async(url).await {
-                    Ok((mut ws_stream, _)) => {
+                    Ok((ws_stream, _)) => {
                         info!("✅ Hyperliquid WS Connected");
+
+                        let (mut sink, mut stream) = ws_stream.split();
 
                         let sub_l2 = WsRequest::Subscribe {
                             subscription: SubscriptionData::L2Book { coin: this.coin.clone() },
                         };
-                        ws_stream.send(Message::Text(serde_json::to_string(&sub_l2).unwrap())).await.ok();
+                        sink.send(Message::Text(serde_json::to_string(&sub_l2).unwrap())).await.ok();
 
                         let sub_user = WsRequest::Subscribe {
                             subscription: SubscriptionData::UserEvents { user: this.user_address.clone() },
                         };
-                        ws_stream.send(Message::Text(serde_json::to_string(&sub_user).unwrap())).await.ok();
+                        sink.send(Message::Text(serde_json::to_string(&sub_user).unwrap())).await.ok();
 
-                        while let Some(msg) = ws_stream.next().await {
-                            match msg {
-                                Ok(Message::Text(text)) => this.process_message(&text).await,
-                                Ok(Message::Close(_)) => break,
-                                Err(_) => break,
-                                _ => {}
+                        // 30 másodperces ping — megakadályozza a szerver-oldali timeout kiesést
+                        let mut ping_timer = tokio::time::interval(
+                            tokio::time::Duration::from_secs(30)
+                        );
+                        ping_timer.tick().await; // első tick azonnali, elfogyasztjuk
+
+                        loop {
+                            tokio::select! {
+                                msg = stream.next() => {
+                                    match msg {
+                                        Some(Ok(Message::Text(text))) => {
+                                            // Szerver ping → pong válasz
+                                            if text.contains("\"ping\"") {
+                                                let _ = sink.send(Message::Text(r#"{"method":"pong"}"#.to_string())).await;
+                                            } else {
+                                                this.process_message(&text).await;
+                                            }
+                                        }
+                                        Some(Ok(Message::Ping(data))) => {
+                                            let _ = sink.send(Message::Pong(data)).await;
+                                        }
+                                        Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                                        _ => {}
+                                    }
+                                }
+                                _ = ping_timer.tick() => {
+                                    // Kliens-oldali keepalive ping
+                                    if sink.send(Message::Text(r#"{"method":"ping"}"#.to_string())).await.is_err() {
+                                        break;
+                                    }
+                                }
                             }
                         }
                     }

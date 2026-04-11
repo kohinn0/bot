@@ -152,15 +152,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tokio::spawn(async move {
         loop {
-            let (mid, imbalance) = {
+            let (mid, imbalance, feed_ts) = {
                 let s = state_t.read().await;
                 let m = if s.best_bid > 0.0 && s.best_ask > 0.0 {
                     (s.best_bid + s.best_ask) / 2.0
                 } else {
                     0.0
                 };
-                (m, s.imbalance)
+                (m, s.imbalance, s.last_update_ts)
             };
+            // Elavult feed ellenőrzés: ha a WS >2s óta nem küldött adatot, ne tüzeljünk.
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            if feed_ts > 0 && now_ms.saturating_sub(feed_ts) > 2000 {
+                tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                continue;
+            }
             if let Some(signal) = signal_engine.tick(mid, imbalance).await {
                 // Csak akkor hívunk HL-t, ha a szignál-intervallum lejárt — különben 5 ms-onként spammelnénk.
                 if last_signal_time.elapsed() < min_signal_interval {
