@@ -191,12 +191,25 @@ impl SignalEngine {
         let (flow_bull, flow_bear) = self.flow.tick(imbalance);
         let (below_vwap, above_vwap) = self.vwap.tick(mid);
 
+        // 1. Liquidity sweep reversal (eredeti logika)
         if sweep_buy && (flow_bull || below_vwap) {
             return Some(SignalResult { side: "Buy".to_string(), target_mid: mid, volatility });
         }
         if sweep_sell && (flow_bear || above_vwap) {
             return Some(SignalResult { side: "Sell".to_string(), target_mid: mid, volatility });
         }
+
+        // 2. Flow + VWAP mean-reversion (sweep nélkül — trendező/csendes piacon is nyit)
+        // Elég ha az orderbook irányított ÉS az ár eltér a session VWAP-tól.
+        if self.tick_count > 100 {
+            if flow_bull && below_vwap {
+                return Some(SignalResult { side: "Buy".to_string(), target_mid: mid, volatility });
+            }
+            if flow_bear && above_vwap {
+                return Some(SignalResult { side: "Sell".to_string(), target_mid: mid, volatility });
+            }
+        }
+
         None
     }
 
