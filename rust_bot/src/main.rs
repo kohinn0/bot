@@ -170,7 +170,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
                 continue;
             }
-            if let Some(signal) = signal_engine.tick(mid, imbalance).await {
+            if let Some(signal) = signal_engine.tick(mid, imbalance) {
                 // Csak akkor hívunk HL-t, ha a szignál-intervallum lejárt — különben 5 ms-onként spammelnénk.
                 if last_signal_time.elapsed() < min_signal_interval {
                     continue;

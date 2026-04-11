@@ -20,6 +20,9 @@ struct SweepEngine {
     swept_high: bool,
     sweep_low_level: f64,
     sweep_high_level: f64,
+    // O(1) rolling min/max tracking
+    running_high: f64,
+    running_low: f64,
 }
 
 impl SweepEngine {
@@ -32,22 +35,21 @@ impl SweepEngine {
             swept_high: false,
             sweep_low_level: f64::NAN,
             sweep_high_level: f64::NAN,
+            running_high: f64::NEG_INFINITY,
+            running_low: f64::INFINITY,
         }
     }
 
     fn tick(&mut self, mid: f64) -> (bool, bool) {
-        // KRITIKUS: recent_high/low az ELŐZŐ tickek alapján számolódik,
-        // MIELŐTT az aktuális árat hozzáadjuk.
-        // Ha utána számolnánk: recent_high >= mid → thresh_up > mid → sweep soha nem tüzel.
         let has_history = self.prices.len() >= self.window / 2;
 
         let (recent_high, recent_low) = if has_history {
-            let h = self.prices.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-            let l = self.prices.iter().cloned().fold(f64::INFINITY, f64::min);
-            (h, l)
+            (self.running_high, self.running_low)
         } else {
             if self.prices.len() >= self.window { self.prices.pop_front(); }
             self.prices.push_back(mid);
+            self.running_high = self.running_high.max(mid);
+            self.running_low = self.running_low.min(mid);
             return (false, false);
         };
 
@@ -63,12 +65,25 @@ impl SweepEngine {
             self.sweep_low_level = recent_low;
         }
 
-        if self.prices.len() >= self.window { self.prices.pop_front(); }
+        // Rolling window update: ha a legrégebbi árat dobjuk ki és az volt a min/max,
+        // újra kell számolni — ez O(n) de ritkán fordul elő (csak ablak teli esetén).
+        if self.prices.len() >= self.window {
+            if let Some(evicted) = self.prices.pop_front() {
+                if (evicted - self.running_high).abs() < 1e-12
+                    || (evicted - self.running_low).abs() < 1e-12
+                {
+                    // Kiesett a min vagy max — teljes újraszámítás szükséges
+                    self.running_high = self.prices.iter().cloned().fold(mid, f64::max);
+                    self.running_low = self.prices.iter().cloned().fold(mid, f64::min);
+                }
+            }
+        }
         self.prices.push_back(mid);
+        self.running_high = self.running_high.max(mid);
+        self.running_low = self.running_low.min(mid);
 
         let mut buy_sig = false;
         let mut sell_sig = false;
-
         if self.swept_low && mid > self.sweep_low_level {
             buy_sig = true;
             self.swept_low = false;
@@ -77,7 +92,6 @@ impl SweepEngine {
             sell_sig = true;
             self.swept_high = false;
         }
-
         (buy_sig, sell_sig)
     }
 }
@@ -182,7 +196,8 @@ impl SignalEngine {
         }
     }
 
-    pub async fn tick(&mut self, mid: f64, imbalance: f64) -> Option<SignalResult> {
+    /// CPU-only számítás — nincs I/O, nem blokkol aszinkron executort.
+    pub fn tick(&mut self, mid: f64, imbalance: f64) -> Option<SignalResult> {
         if mid <= 0.0 { return None; }
         self.tick_count += 1;
         let volatility = self.update_volatility(mid);
