@@ -86,6 +86,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let target_notional_usd = Arc::new(tokio::sync::Mutex::new(app_config.strategy.notional_per_level_usd(initial_equity)));
     let current_position = Arc::new(tokio::sync::Mutex::new(0.0f64));
     let last_volatility = Arc::new(tokio::sync::Mutex::new(0.01f64));
+    // Trade cooldown: veszteséges zárás után 10 perc tilalom (revenge trading elleni védelem)
+    let trade_cooldown: Arc<tokio::sync::Mutex<Option<std::time::Instant>>> =
+        Arc::new(tokio::sync::Mutex::new(None));
 
     let mut signal_engine = SignalEngine::new(app_config.strategy.clone());
     let mut order_manager = OrderManager::new(app_config.strategy.clone(), asset_idx, sz_decimals);
@@ -141,9 +144,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let (signer_t, feed_t, rest_client_t, pos_sim_t, vol_sim_t, state_t, hl_user_t, target_notional_t, wallet_equity_t, l1_gate_t) = 
+    let (signer_t, feed_t, rest_client_t, pos_sim_t, vol_sim_t, state_t, hl_user_t, target_notional_t, wallet_equity_t, l1_gate_t) =
         (signer.clone(), feed.clone(), rest_client.clone(), current_position.clone(), last_volatility.clone(), state_ref.clone(), hl_user.clone(), target_notional_usd.clone(), wallet_equity.clone(), l1_gate.clone());
-    
+    let trade_cooldown_t = trade_cooldown.clone();
+
     let mut last_signal_time = std::time::Instant::now() - std::time::Duration::from_secs(60);
     let min_signal_interval = std::time::Duration::from_millis(app_config.strategy.min_signal_interval_ms);
     let coin_signal = coin.clone();
@@ -174,6 +178,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Csak akkor hívunk HL-t, ha a szignál-intervallum lejárt — különben 5 ms-onként spammelnénk.
                 if last_signal_time.elapsed() < min_signal_interval {
                     continue;
+                }
+
+                // Trade cooldown: veszteséges zárás után 10 perc tilalom
+                {
+                    let mut cd = trade_cooldown_t.lock().await;
+                    if let Some(until) = *cd {
+                        if std::time::Instant::now() < until {
+                            let secs = until.duration_since(std::time::Instant::now()).as_secs();
+                            tracing::debug!("Trade cooldown aktív — {}s van hátra", secs);
+                            continue;
+                        } else {
+                            *cd = None;
+                            info!("✅ Trade cooldown lejárt — kereskedés folytatható");
+                        }
+                    }
                 }
 
                 // Élő clearinghouse **előbb**, mint bármi `pos_sim`-re épülő ág: különben a min_slice elutasításnál
@@ -475,9 +494,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    let (signer_r, rest_client_r, pos_rec_t, state_rec, vol_rec_t, hl_user_r, coin_rec, l1_gate_r) = 
+    let (signer_r, rest_client_r, pos_rec_t, state_rec, vol_rec_t, hl_user_r, coin_rec, l1_gate_r) =
         (signer.clone(), rest_client.clone(), current_position.clone(), state_ref.clone(), last_volatility.clone(), hl_user.clone(), coin.clone(), l1_gate.clone());
     let om_rec = Arc::new(OrderManager::new(app_config.strategy.clone(), asset_idx, sz_decimals));
+    let trade_cooldown_r = trade_cooldown.clone();
+    let feed_r = feed.clone();
 
     tokio::spawn(async move {
         let dust_limit_usd = app_config.strategy.dust_limit_usd;
@@ -486,8 +507,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::time::Instant::now() - std::time::Duration::from_secs(3600);
         let mut dust_fail_streak: u32 = 0;
         let mut dust_episode_info_logged: bool = false;
+
+        // Fill-esemény figyelő: azonnali reconcile aktiváláshoz
+        let mut fill_rx = feed_r.fill_tx.subscribe();
+        // P&L nyomkövetés a cooldown logikához
+        let mut prev_ex_pos: f64 = 0.0;
+        let mut prev_ent_px: f64 = 0.0;
+        let mut last_fill_px: Option<f64> = None;
+
         loop {
-            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+            // Eseményvezérelt trigger: fill WS üzenet OR 150ms timer
+            tokio::select! {
+                _ = tokio::time::sleep(tokio::time::Duration::from_millis(150)) => {}
+                fill_res = fill_rx.recv() => {
+                    match fill_res {
+                        Ok(fill) if fill.coin == coin_rec => {
+                            last_fill_px = Some(fill.px);
+                            tracing::debug!(
+                                "Fill esemény fogadva: px={:.4} sz={:.4} side={} — azonnali reconcile",
+                                fill.px, fill.sz, fill.side
+                            );
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            tracing::warn!("Fill broadcast lemaradt {} üzenettel", n);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
             let st = match get_user_state_retry_ok(&rest_client_r, hl_user_r.as_str()).await {
                 Ok(st) => st,
                 Err(e) => {
@@ -497,6 +545,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
                 let (ex_pos, ent_px) = clearinghouse_position_for_coin(&st, &coin_rec);
                 *pos_rec_t.lock().await = ex_pos;
+
+                // P&L nyomkövetés: ha volt pozíció és most nincs → zárás detektálva
+                let was_in_position = prev_ex_pos.abs() > 0.001;
+                let now_flat = ex_pos.abs() < 0.001;
+                if was_in_position && now_flat && prev_ent_px > 0.0 {
+                    if let Some(close_px) = last_fill_px {
+                        let prev_long = prev_ex_pos > 0.0;
+                        let is_loss = if prev_long { close_px < prev_ent_px } else { close_px > prev_ent_px };
+                        if is_loss {
+                            let cooldown_secs = 600u64; // 10 perc
+                            *trade_cooldown_r.lock().await =
+                                Some(std::time::Instant::now() + std::time::Duration::from_secs(cooldown_secs));
+                            tracing::warn!(
+                                "🛑 TRADE COOLDOWN: veszteséges zárás (entry={:.4} close={:.4}) — {} perc szünet",
+                                prev_ent_px, close_px, cooldown_secs / 60
+                            );
+                        } else {
+                            tracing::info!(
+                                "✅ Nyereséges zárás: entry={:.4} close={:.4}",
+                                prev_ent_px, close_px
+                            );
+                        }
+                    }
+                    last_fill_px = None;
+                }
+                // Pozíció-tracking frissítése
+                if ex_pos.abs() > 0.001 {
+                    prev_ent_px = ent_px.unwrap_or(prev_ent_px);
+                } else {
+                    prev_ent_px = 0.0;
+                }
+                prev_ex_pos = ex_pos;
+
                 let fe = match get_frontend_open_orders_retry_ok(&rest_client_r, hl_user_r.as_str()).await {
                     Ok(v) => v,
                     Err(e) => {

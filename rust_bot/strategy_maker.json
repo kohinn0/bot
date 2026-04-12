@@ -23,7 +23,7 @@
     "sweep_window": 50,
     "sweep_threshold_pct": 0.05,
     "flow_window": 50,
-    "flow_threshold": 2.0,
+    "flow_threshold": 1.0,
     "vwap_session_hours": 8,
     "vwap_deviation_pct": 0.10
 }

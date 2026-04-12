@@ -112,7 +112,13 @@ impl FlowEngine {
     }
 
     fn tick(&mut self, imbalance: f64) -> (bool, bool) {
-        let delta = imbalance - 0.5;
+        // Nem-lineáris (köbös) skálázás: 0.95 imbalance >> 0.6 imbalance.
+        // d ∈ [-0.5, 0.5] → scaled ∈ [-1, 1] → köbös → delta ∈ [-0.25, 0.25].
+        // Lineárisnál 0.6 vs 0.95 = 4.5× különbség; köbösnel ~60×.
+        let d = imbalance - 0.5;
+        let s = d * 2.0;                        // normálva [-1, 1]
+        let delta = s * s * s * 0.25;           // d^3 * 0.25, max ±0.25
+
         if self.history.len() >= self.window {
             if let Some(old) = self.history.pop_front() {
                 self.cumulative -= old;
@@ -285,11 +291,22 @@ mod tests {
 
     #[test]
     fn flow_bullish_on_sustained_bid_pressure() {
-        let mut engine = FlowEngine::new(10, 3.0);
+        // Köbös skálán: 0.9 imbalance → d=0.4, s=0.8, delta=0.8³×0.25≈0.128/tick
+        // threshold=1.0 → 8 tick után triggerel; 11 tick >> elegendő
+        let mut engine = FlowEngine::new(10, 1.0);
         for _ in 0..11 { let _ = engine.tick(0.9); }
         let (bull, bear) = engine.tick(0.9);
-        assert!(bull);
+        assert!(bull, "köbös 0.9 imbalance 11 ticken: bull kell");
         assert!(!bear);
+    }
+
+    #[test]
+    fn flow_neutral_imbalance_never_triggers() {
+        // 0.6 imbalance → d=0.1, s=0.2, delta=0.008/tick; 50 tick cumul=0.4 < 1.0 threshold
+        let mut engine = FlowEngine::new(50, 1.0);
+        for _ in 0..50 { let _ = engine.tick(0.6); }
+        let (bull, _bear) = engine.tick(0.6);
+        assert!(!bull, "mérsékelt 0.6 imbalance nem triggerelheti a flow engine-t");
     }
 
     #[test]
