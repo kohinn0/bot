@@ -15,6 +15,55 @@ mod config;
 mod network;
 mod logic;
 
+/// Eszkaláló trade-tilalom: egymást követő veszteséges zárások után exponenciálisan nő a pihenő.
+/// 1 veszteség → 10 perc, 2 → 30 perc, 3+ → 2 óra; nyereséges zárás nullázza a számlálót.
+struct CooldownState {
+    until: Option<std::time::Instant>,
+    consecutive_losses: u32,
+}
+
+impl CooldownState {
+    fn new() -> Self {
+        Self { until: None, consecutive_losses: 0 }
+    }
+
+    fn on_loss(&mut self) {
+        self.consecutive_losses += 1;
+        let secs: u64 = match self.consecutive_losses {
+            1 => 600,   // 10 perc
+            2 => 1800,  // 30 perc
+            _ => 7200,  // 2 óra (3+)
+        };
+        self.until = Some(std::time::Instant::now() + std::time::Duration::from_secs(secs));
+        tracing::warn!(
+            "🛑 TRADE COOLDOWN #{}: {} egymást követő veszteség — {} perc szünet",
+            self.consecutive_losses, self.consecutive_losses, secs / 60
+        );
+    }
+
+    fn on_profit(&mut self) {
+        if self.consecutive_losses > 0 {
+            tracing::info!(
+                "✅ Nyereséges zárás — consecutive_losses {} → 0 reset",
+                self.consecutive_losses
+            );
+        }
+        self.consecutive_losses = 0;
+        self.until = None;
+    }
+
+    fn is_active(&self) -> bool {
+        self.until.map_or(false, |t| std::time::Instant::now() < t)
+    }
+
+    fn remaining_secs(&self) -> u64 {
+        self.until
+            .filter(|&t| t > std::time::Instant::now())
+            .map(|t| t.duration_since(std::time::Instant::now()).as_secs())
+            .unwrap_or(0)
+    }
+}
+
 use dotenvy::dotenv;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -86,9 +135,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let target_notional_usd = Arc::new(tokio::sync::Mutex::new(app_config.strategy.notional_per_level_usd(initial_equity)));
     let current_position = Arc::new(tokio::sync::Mutex::new(0.0f64));
     let last_volatility = Arc::new(tokio::sync::Mutex::new(0.01f64));
-    // Trade cooldown: veszteséges zárás után 10 perc tilalom (revenge trading elleni védelem)
-    let trade_cooldown: Arc<tokio::sync::Mutex<Option<std::time::Instant>>> =
-        Arc::new(tokio::sync::Mutex::new(None));
+    // Trade cooldown: veszteséges zárás után eszkaláló tilalom (revenge trading elleni védelem)
+    let trade_cooldown: Arc<tokio::sync::Mutex<CooldownState>> =
+        Arc::new(tokio::sync::Mutex::new(CooldownState::new()));
 
     let mut signal_engine = SignalEngine::new(app_config.strategy.clone());
     let mut order_manager = OrderManager::new(app_config.strategy.clone(), asset_idx, sz_decimals);
@@ -180,18 +229,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     continue;
                 }
 
-                // Trade cooldown: veszteséges zárás után 10 perc tilalom
+                // Trade cooldown: eszkaláló tilalom veszteséges zárások után
                 {
-                    let mut cd = trade_cooldown_t.lock().await;
-                    if let Some(until) = *cd {
-                        if std::time::Instant::now() < until {
-                            let secs = until.duration_since(std::time::Instant::now()).as_secs();
-                            tracing::debug!("Trade cooldown aktív — {}s van hátra", secs);
-                            continue;
-                        } else {
-                            *cd = None;
-                            info!("✅ Trade cooldown lejárt — kereskedés folytatható");
-                        }
+                    let cd = trade_cooldown_t.lock().await;
+                    if cd.is_active() {
+                        tracing::debug!("Trade cooldown aktív — {}s van hátra", cd.remaining_secs());
+                        continue;
                     }
                 }
 
@@ -554,18 +597,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let prev_long = prev_ex_pos > 0.0;
                         let is_loss = if prev_long { close_px < prev_ent_px } else { close_px > prev_ent_px };
                         if is_loss {
-                            let cooldown_secs = 600u64; // 10 perc
-                            *trade_cooldown_r.lock().await =
-                                Some(std::time::Instant::now() + std::time::Duration::from_secs(cooldown_secs));
-                            tracing::warn!(
-                                "🛑 TRADE COOLDOWN: veszteséges zárás (entry={:.4} close={:.4}) — {} perc szünet",
-                                prev_ent_px, close_px, cooldown_secs / 60
-                            );
+                            trade_cooldown_r.lock().await.on_loss();
                         } else {
-                            tracing::info!(
-                                "✅ Nyereséges zárás: entry={:.4} close={:.4}",
-                                prev_ent_px, close_px
-                            );
+                            trade_cooldown_r.lock().await.on_profit();
                         }
                     }
                     last_fill_px = None;

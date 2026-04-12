@@ -6,8 +6,8 @@
     "min_shares": 0.001,
     "maker_fee_rate": 0.00015,
     "taker_fee_rate": 0.00045,
-    "skew_penalty": null,
-    "tp_min_pct": 1.5,
+    "skew_penalty": 0.1,
+    "tp_min_pct": 2.0,
     "sl_min_pct": 1.0,
     "max_positions": 1,
     "dust_limit_usd": 15.0,
@@ -21,13 +21,17 @@
         {"level": 3, "offset_from_mid_pct": 0.538, "size_pct": 0.40}
     ],
     "sweep_window": 50,
-    "sweep_threshold_pct": 0.05,
+    "sweep_threshold_pct": 0.10,
+    "sweep_confirmation_pct": 0.07,
+    "sweep_confirm_ticks": 2,
     "flow_window": 50,
     "flow_threshold": 1.0,
     "vwap_session_hours": 8,
-    "vwap_deviation_pct": 0.10,
+    "vwap_deviation_pct": 0.15,
     "regime_fast_period": 50,
     "regime_slow_period": 200,
     "regime_sample_secs": 30,
-    "regime_band_pct": 0.08
+    "regime_band_pct": 0.08,
+    "min_vol_pct": 0.03,
+    "max_vol_pct": 0.30
 }

@@ -23,10 +23,17 @@ struct SweepEngine {
     // O(1) rolling min/max tracking
     running_high: f64,
     running_low: f64,
+    // Visszapattanás-megerősítés: megakadályozza, hogy folytatódó esésbe longgoljunk be.
+    confirmation_pct: f64,
+    confirm_ticks_required: usize,
+    pending_buy_level: Option<f64>,  // sweep_low_level az észlelés pillanatában
+    pending_sell_level: Option<f64>, // sweep_high_level az észlelés pillanatában
+    buy_confirm_ticks: usize,
+    sell_confirm_ticks: usize,
 }
 
 impl SweepEngine {
-    fn new(window: usize, threshold_pct: f64) -> Self {
+    fn new(window: usize, threshold_pct: f64, confirmation_pct: f64, confirm_ticks_required: usize) -> Self {
         Self {
             window,
             threshold_pct,
@@ -37,6 +44,12 @@ impl SweepEngine {
             sweep_high_level: f64::NAN,
             running_high: f64::NEG_INFINITY,
             running_low: f64::INFINITY,
+            confirmation_pct,
+            confirm_ticks_required,
+            pending_buy_level: None,
+            pending_sell_level: None,
+            buy_confirm_ticks: 0,
+            sell_confirm_ticks: 0,
         }
     }
 
@@ -53,16 +66,26 @@ impl SweepEngine {
             return (false, false);
         };
 
+        // A megerősítés ellenőrzése az ELŐZŐ tick-beli függő állapotra fut —
+        // nem a most észlelt söprésre. Ezért mentjük el a pending-et a söprés-detektálás ELŐTT.
+        let prev_pending_buy  = self.pending_buy_level;
+        let prev_pending_sell = self.pending_sell_level;
+
         let thresh_up = recent_high * (1.0 + self.threshold_pct / 100.0);
         let thresh_down = recent_low * (1.0 - self.threshold_pct / 100.0);
 
-        if mid >= thresh_up {
+        // Söprés észlelése → függő szignál állapotba lép (csak a KÖVETKEZŐ tick értékeli ki)
+        if mid >= thresh_up && self.pending_sell_level.is_none() {
             self.swept_high = true;
             self.sweep_high_level = recent_high;
+            self.pending_sell_level = Some(recent_high);
+            self.sell_confirm_ticks = 0;
         }
-        if mid <= thresh_down {
+        if mid <= thresh_down && self.pending_buy_level.is_none() {
             self.swept_low = true;
             self.sweep_low_level = recent_low;
+            self.pending_buy_level = Some(recent_low);
+            self.buy_confirm_ticks = 0;
         }
 
         if self.prices.len() >= self.window {
@@ -81,14 +104,49 @@ impl SweepEngine {
 
         let mut buy_sig = false;
         let mut sell_sig = false;
-        if self.swept_low && mid > self.sweep_low_level {
-            buy_sig = true;
-            self.swept_low = false;
+
+        // Függő BUY megerősítés (az előző tick óta fennálló pending-re)
+        if let Some(swept_level) = prev_pending_buy {
+            if mid < swept_level {
+                // Ár tovább esett a söprés szintje alá → folytatódó esés, töröljük
+                self.pending_buy_level = None;
+                self.swept_low = false;
+                self.buy_confirm_ticks = 0;
+            } else {
+                let confirm_thresh = swept_level * (1.0 + self.confirmation_pct / 100.0);
+                if mid >= confirm_thresh {
+                    self.buy_confirm_ticks += 1;
+                }
+                if self.buy_confirm_ticks >= self.confirm_ticks_required {
+                    buy_sig = true;
+                    self.pending_buy_level = None;
+                    self.swept_low = false;
+                    self.buy_confirm_ticks = 0;
+                }
+            }
         }
-        if self.swept_high && mid < self.sweep_high_level {
-            sell_sig = true;
-            self.swept_high = false;
+
+        // Függő SELL megerősítés (az előző tick óta fennálló pending-re)
+        if let Some(swept_level) = prev_pending_sell {
+            if mid > swept_level {
+                // Ár tovább emelkedett → folytatódó emelkedés, töröljük
+                self.pending_sell_level = None;
+                self.swept_high = false;
+                self.sell_confirm_ticks = 0;
+            } else {
+                let confirm_thresh = swept_level * (1.0 - self.confirmation_pct / 100.0);
+                if mid <= confirm_thresh {
+                    self.sell_confirm_ticks += 1;
+                }
+                if self.sell_confirm_ticks >= self.confirm_ticks_required {
+                    sell_sig = true;
+                    self.pending_sell_level = None;
+                    self.swept_high = false;
+                    self.sell_confirm_ticks = 0;
+                }
+            }
         }
+
         (buy_sig, sell_sig)
     }
 }
@@ -316,12 +374,19 @@ pub struct SignalEngine {
     sum_x: f64,
     sum_x2: f64,
     tick_count: u64,
+    min_vol_pct: Option<f64>,
+    max_vol_pct: Option<f64>,
 }
 
 impl SignalEngine {
     pub fn new(config: StrategyConfig) -> Self {
         Self {
-            sweep: SweepEngine::new(config.sweep_window as usize, config.sweep_threshold_pct),
+            sweep: SweepEngine::new(
+                config.sweep_window as usize,
+                config.sweep_threshold_pct,
+                config.sweep_confirmation_pct,
+                config.sweep_confirm_ticks as usize,
+            ),
             flow: FlowEngine::new(config.flow_window as usize, config.flow_threshold),
             vwap: VwapEngine::new(config.vwap_session_hours, config.vwap_deviation_pct),
             regime: RegimeEngine::new(
@@ -335,6 +400,8 @@ impl SignalEngine {
             sum_x: 0.0,
             sum_x2: 0.0,
             tick_count: 0,
+            min_vol_pct: config.min_vol_pct,
+            max_vol_pct: config.max_vol_pct,
         }
     }
 
@@ -345,6 +412,20 @@ impl SignalEngine {
         if mid <= 0.0 { return None; }
         self.tick_count += 1;
         let volatility = self.update_volatility(mid);
+
+        // Volatilitás-rezsim határok: csendes piacban a spread felemésztené az edge-et,
+        // viharos piacban a diffúzió az SL-t söpörné el.
+        let vol_pct = volatility / mid * 100.0;
+        if let Some(min_v) = self.min_vol_pct {
+            if vol_pct < min_v && self.tick_count > 200 {
+                return None;
+            }
+        }
+        if let Some(max_v) = self.max_vol_pct {
+            if vol_pct > max_v {
+                return None;
+            }
+        }
 
         let (sweep_buy, sweep_sell) = self.sweep.tick(mid);
         let (flow_bull, flow_bear) = self.flow.tick(imbalance);
@@ -419,23 +500,60 @@ mod tests {
 
     #[test]
     fn sweep_buy_signal_on_low_sweep_and_reversal() {
-        let mut engine = SweepEngine::new(10, 0.10);
+        // confirmation_pct=0.0, confirm_ticks=1 → az első visszakerülés a söprés szintje fölé tüzel
+        let mut engine = SweepEngine::new(10, 0.10, 0.0, 1);
         for p in [100.0_f64, 100.1, 99.9, 100.05, 100.15] {
             let _ = engine.tick(p);
         }
-        let _ = engine.tick(99.75); // sweep_low = true
-        let (buy, sell) = engine.tick(100.0);
+        let _ = engine.tick(99.75); // sweep_low = true, pending_buy beállítva
+        let (buy, sell) = engine.tick(100.0); // 1 tick a confirmation_thresh (99.9) fölött → tüzel
         assert!(buy, "Buy szignálnak kellene tüzelni sweep+reversal után");
         assert!(!sell);
     }
 
     #[test]
     fn sweep_no_signal_without_sweep() {
-        let mut engine = SweepEngine::new(10, 0.10);
+        let mut engine = SweepEngine::new(10, 0.10, 0.0, 1);
         for p in [100.0_f64, 100.05, 99.95, 100.02, 100.03, 100.01] {
             let (buy, sell) = engine.tick(p);
             assert!(!buy && !sell);
         }
+    }
+
+    #[test]
+    fn sweep_buy_invalidated_on_continuation() {
+        // Hamis visszapattanás: söprés után az ár tovább esik → nincs szignál
+        let mut engine = SweepEngine::new(10, 0.10, 0.05, 1);
+        // Ablak feltöltése
+        for p in [100.0_f64, 100.1, 99.9, 100.05, 100.15] {
+            let _ = engine.tick(p);
+        }
+        // Söprés: ár a recent_low (99.9) * 0.999 = ~99.8001 alá megy
+        let _ = engine.tick(99.75); // pending_buy beállítva (swept_level ≈ 99.9)
+        // Ár kissé visszajön, de a confirmation_pct (0.05%) thresholdet nem éri el
+        let _ = engine.tick(99.85); // 99.85 < 99.9 * 1.0005 = 99.9499 → confirm_ticks nem nő
+        // Ár újabb mélypontra esik → invalidálás
+        let (buy, sell) = engine.tick(99.70); // mid < swept_level → pending törlődik
+        assert!(!buy, "Folytatódó esésbe NEM szabad buy szignált adni");
+        assert!(!sell);
+    }
+
+    #[test]
+    fn sweep_buy_fires_after_confirmation() {
+        // Valós visszapattanás: sweep + elegendő recovery → szignál
+        let mut engine = SweepEngine::new(10, 0.10, 0.05, 2);
+        for p in [100.0_f64, 100.1, 99.9, 100.05, 100.15] {
+            let _ = engine.tick(p);
+        }
+        // Söprés (swept_level ≈ 99.9)
+        let _ = engine.tick(99.75);
+        // 1. confirming tick: 99.9 * 1.0005 = 99.9499 < 100.05 → buy_confirm_ticks=1
+        let (b1, _) = engine.tick(100.05);
+        assert!(!b1, "1 confirming tick még nem elég (confirm_ticks=2)");
+        // 2. confirming tick → buy_confirm_ticks=2 >= 2 → tüzel
+        let (b2, s2) = engine.tick(100.10);
+        assert!(b2, "2 confirming tick után buy szignálnak kell tüzelni");
+        assert!(!s2);
     }
 
     #[test]

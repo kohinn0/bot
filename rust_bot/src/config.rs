@@ -49,6 +49,12 @@ pub struct StrategyConfig {
     pub sweep_window: u32,
     #[serde(default = "default_sweep_threshold_pct")]
     pub sweep_threshold_pct: f64,
+    /// Megerősítési küszöb: ennyivel kell az ársöprés szintje fölé/alá kerülni, mielőtt a szignál tüzel.
+    #[serde(default = "default_sweep_confirmation_pct")]
+    pub sweep_confirmation_pct: f64,
+    /// Ennyi tikk után tüzel a söprés-szignál (visszapattanás debounce).
+    #[serde(default = "default_sweep_confirm_ticks")]
+    pub sweep_confirm_ticks: u32,
 
     // --- Order Flow ---
     #[serde(default = "default_flow_window")]
@@ -75,11 +81,23 @@ pub struct StrategyConfig {
     /// EMA-különbség sávszélessége (%) — ennél kisebb spread = SIDEWAYS (mindkét irány szabad).
     #[serde(default = "default_regime_band_pct")]
     pub regime_band_pct: f64,
+
+    // --- Volatilitás-rezsim határok ---
+    /// Ha a volatilitás (%) ennél kisebb, szignált elnyom (piac túl csendes, spread felemésztené az edge-et).
+    /// `null` = nincs alsó korlát.
+    #[serde(default)]
+    pub min_vol_pct: Option<f64>,
+    /// Ha a volatilitás (%) ennél nagyobb, szignált elnyom (piac túl vad, SL-t söpörné el a diffúzió).
+    /// `null` = nincs felső korlát.
+    #[serde(default)]
+    pub max_vol_pct: Option<f64>,
 }
 
 fn default_min_ladder_order_notional_usd() -> f64 { 11.0 }
 fn default_sweep_window() -> u32 { 100 }
 fn default_sweep_threshold_pct() -> f64 { 0.08 }
+fn default_sweep_confirmation_pct() -> f64 { 0.05 }
+fn default_sweep_confirm_ticks() -> u32 { 2 }
 fn default_flow_window() -> u32 { 50 }
 fn default_flow_threshold() -> f64 { 3.5 }
 fn default_vwap_session_hours() -> u32 { 8 }
@@ -180,6 +198,8 @@ mod strategy_config_tests {
             ladder_levels: vec![],
             sweep_window: 100,
             sweep_threshold_pct: 0.08,
+            sweep_confirmation_pct: 0.05,
+            sweep_confirm_ticks: 2,
             flow_window: 50,
             flow_threshold: 3.5,
             vwap_session_hours: 8,
@@ -188,6 +208,8 @@ mod strategy_config_tests {
             regime_slow_period: 200,
             regime_sample_secs: 30,
             regime_band_pct: 0.08,
+            min_vol_pct: None,
+            max_vol_pct: None,
         }
     }
 
