@@ -432,12 +432,14 @@ impl SignalEngine {
         let (below_vwap, above_vwap) = self.vwap.tick(mid, volume_vwap);
         let regime = self.regime.tick(mid);
 
-        // 1. Likviditás-söpör visszafordulás — minden rezsimben engedett.
-        //    Ez rövid távú struktúra, nem trendel: bármely irányban működhet.
-        if sweep_buy && (flow_bull || below_vwap) {
+        // 1. Likviditás-söpör visszafordulás — enyhe rezsim-korláttal.
+        //    Sideways piacon mindkét irány engedett; trendben ne menjünk direkt szembe a rezsimmel.
+        let buy_allowed = regime != Regime::Downtrend;
+        let sell_allowed = regime != Regime::Uptrend;
+        if sweep_buy && (flow_bull || below_vwap) && buy_allowed {
             return Some(SignalResult { side: "Buy".to_string(), target_mid: mid, volatility });
         }
-        if sweep_sell && (flow_bear || above_vwap) {
+        if sweep_sell && (flow_bear || above_vwap) && sell_allowed {
             return Some(SignalResult { side: "Sell".to_string(), target_mid: mid, volatility });
         }
 
@@ -450,9 +452,6 @@ impl SignalEngine {
         //                 Short belépés (rally VWAP fölé downtrendben) engedett.
         //    - SIDEWAYS:  mindkét irány szabad (mean reversion a legjobb ilyen piacon).
         if self.tick_count > 100 {
-            let buy_allowed  = regime != Regime::Downtrend;
-            let sell_allowed = regime != Regime::Uptrend;
-
             if flow_bull && below_vwap && buy_allowed {
                 return Some(SignalResult { side: "Buy".to_string(), target_mid: mid, volatility });
             }
