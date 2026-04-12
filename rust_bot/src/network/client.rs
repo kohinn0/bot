@@ -193,21 +193,30 @@ pub fn exchange_action_ok_or_warn(ctx: &str, res: &Result<Value, reqwest::Error>
     }
 }
 
-/// Cancel-specifikus: `true` ha cancel sikeres VAGY orderek már nem léteznek (idempotens).
-/// Null body → "valószínűleg ok" (HL hiccup, de cancel valószínűleg végbement).
-pub fn exchange_cancel_ok_or_idempotent(ctx: &str, res: &Result<Value, reqwest::Error>) -> bool {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelAck {
+    Confirmed,
+    Uncertain,
+    Failed,
+}
+
+/// Cancel-specifikus állapot:
+/// - `Confirmed`: a cancel biztosan sikeres, vagy az orderek már nem léteznek
+/// - `Uncertain`: a HL `Null` választ adott, ezért friss könyv-olvasás kell
+/// - `Failed`: HTTP vagy egyéb biztos hiba
+pub fn exchange_cancel_ack_or_warn(ctx: &str, res: &Result<Value, reqwest::Error>) -> CancelAck {
     match res {
         Err(e) => {
             tracing::warn!("{}: HTTP hiba: {}", ctx, e);
-            false
+            CancelAck::Failed
         }
         Ok(body) => {
             if body.is_null() {
-                tracing::debug!("{}: Null válasz — cancel valószínűleg sikeres", ctx);
-                return true;
+                tracing::warn!("{}: Null válasz — cancel státusz bizonytalan", ctx);
+                return CancelAck::Uncertain;
             }
             if exchange_order_submission_ok(body) {
-                return true;
+                return CancelAck::Confirmed;
             }
             if body.get("status").and_then(|s| s.as_str()) == Some("ok") {
                 if let Some(arr) = body.pointer("/response/data/statuses").and_then(|x| x.as_array()) {
@@ -222,12 +231,12 @@ pub fn exchange_cancel_ok_or_idempotent(ctx: &str, res: &Result<Value, reqwest::
                     });
                     if all_gone {
                         tracing::debug!("{}: idempotens — orderek már nem léteznek", ctx);
-                        return true;
+                        return CancelAck::Confirmed;
                     }
                 }
             }
             tracing::warn!("{}: cancel válasz nem ok: {:?}", ctx, body);
-            false
+            CancelAck::Failed
         }
     }
 }
@@ -646,5 +655,35 @@ mod tests {
         // A bemenetben mindhárom oid benne van: csak a 3-as maradhat.
         let kept = filter_cancel_oids_excluding_position_tpsl_triggers(&fe, "SOL", vec![1, 2, 3]);
         assert_eq!(kept, vec![3]);
+    }
+
+    #[test]
+    fn cancel_ack_treats_null_as_uncertain() {
+        let res: Result<Value, reqwest::Error> = Ok(Value::Null);
+        assert_eq!(
+            exchange_cancel_ack_or_warn("test cancel", &res),
+            CancelAck::Uncertain
+        );
+    }
+
+    #[test]
+    fn cancel_ack_treats_already_gone_as_confirmed() {
+        let body = json!({
+            "status": "ok",
+            "response": {
+                "type": "cancel",
+                "data": {
+                    "statuses": [
+                        {"error": "Order was never placed, already canceled, or filled. asset=5"},
+                        {"error": "Order was never placed, already canceled, or filled. asset=5"}
+                    ]
+                }
+            }
+        });
+        let res: Result<Value, reqwest::Error> = Ok(body);
+        assert_eq!(
+            exchange_cancel_ack_or_warn("test cancel", &res),
+            CancelAck::Confirmed
+        );
     }
 }

@@ -90,44 +90,6 @@ impl VwapAcc {
             log_counter: 0,
         }
     }
-
-    /// Trade feldolgozása. Visszaadja az aktuális VWAP-ot és az összes forgalmat.
-    fn process(&mut self, px: f64, sz: f64, trade_ts_ms: u64) -> (f64, f64) {
-        // Session reset: az első trade-nél inicializál, vagy ha lejárt a session
-        if self.session_start_ms == 0 {
-            self.session_start_ms = trade_ts_ms;
-        } else if trade_ts_ms >= self.session_start_ms + self.session_ms {
-            let old_vwap = if self.sum_v > 0.0 { self.sum_pv / self.sum_v } else { 0.0 };
-            info!(
-                "🔄 VWAP session reset: lejárt {:?}h — előző VWAP={:.4} forgalom={:.2}",
-                self.session_ms / 3_600_000,
-                old_vwap,
-                self.sum_v
-            );
-            self.sum_pv = 0.0;
-            self.sum_v = 0.0;
-            self.session_start_ms = trade_ts_ms;
-        }
-
-        self.sum_pv += px * sz;
-        self.sum_v  += sz;
-
-        let vwap = if self.sum_v > 0.0 { self.sum_pv / self.sum_v } else { 0.0 };
-
-        // Periódikus log (~500 trade-enként)
-        self.log_counter += 1;
-        if self.log_counter >= 500 {
-            self.log_counter = 0;
-            info!(
-                "📊 Volume VWAP: {:.4}  forgalom: {:.2}  (session: {:.1}h eltelt)",
-                vwap,
-                self.sum_v,
-                (trade_ts_ms.saturating_sub(self.session_start_ms)) as f64 / 3_600_000.0
-            );
-        }
-
-        (vwap, self.sum_v)
-    }
 }
 
 pub struct HyperliquidFeed {

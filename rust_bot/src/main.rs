@@ -75,12 +75,13 @@ use crate::logic::signer::HyperliquidSigner;
 use crate::logic::signal::SignalEngine;
 use crate::logic::order_manager::OrderManager;
 use crate::network::client::{
+    CancelAck,
     clearinghouse_coin_szi,
     clearinghouse_position_for_coin,
     collect_ladder_cancel_oids_from_frontend,
     collect_resting_oids_from_exchange_response,
     exchange_action_ok_or_warn,
-    exchange_cancel_ok_or_idempotent,
+    exchange_cancel_ack_or_warn,
     filter_cancel_oids_excluding_position_tpsl_triggers,
     frontend_has_any_open_order_for_coin,
     frontend_has_blocking_orders_for_coin,
@@ -818,6 +819,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 // Régi TP/SL törlése MIELŐTT új kerülne ki — különben restart/részleges zárás után
                 // dupla TP/SL halmozódik a könyvön.
+                let mut cancel_was_uncertain = false;
                 {
                     let old_tpsl: Vec<u64> = fe.as_array().unwrap_or(&vec![]).iter()
                         .filter(|o| o["coin"].as_str() == Some(&coin_rec) && hl_order_is_protected(o))
@@ -827,7 +829,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if !old_tpsl.is_empty() {
                         info!("🧹 Régi TP/SL törlése ({} db) újraküldés előtt...", old_tpsl.len());
                         let cancel_old = om_rec.build_cancel_payload(&old_tpsl);
-                        l1_gate_r
+                        let cancel_ack = l1_gate_r
                             .run(|nonce| {
                                 let s = signer_r.clone();
                                 let r = rest_client_r.clone();
@@ -836,15 +838,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     match s.sign_l1_action(&cancel_old, nonce, net).await {
                                         Ok(sig) => {
                                             let res = r.send_l1_action(&cancel_old, nonce, sig).await;
-                                            let _ = exchange_cancel_ok_or_idempotent("régi TP/SL cancel", &res);
+                                            exchange_cancel_ack_or_warn("régi TP/SL cancel", &res)
                                         }
-                                        Err(e) => tracing::warn!("régi TP/SL cancel aláírás: {}", e),
+                                        Err(e) => {
+                                            tracing::warn!("régi TP/SL cancel aláírás: {}", e);
+                                            CancelAck::Failed
+                                        }
                                     }
                                 }
                             })
                             .await;
+                        cancel_was_uncertain = cancel_ack == CancelAck::Uncertain;
                         tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
                     }
+                }
+
+                // Cancel után kötelezően újraolvassuk a könyvet. Ez megfogja a bizonytalan (`Null`)
+                // cancel-választ és megakadályozza a dupla TP/SL újraküldést.
+                let fe_after_cancel = match get_frontend_open_orders_retry_ok(&rest_client_r, hl_user_r.as_str()).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!("reconcile: cancel utáni frontendOpenOrders {}", e);
+                        continue;
+                    }
+                };
+                let still_has_tpsl = fe_after_cancel.as_array().unwrap_or(&vec![]).iter().any(|o| {
+                    o["coin"].as_str() == Some(&coin_rec) && hl_order_is_protected(o)
+                });
+                if still_has_tpsl {
+                    last_protected_pos = ex_pos;
+                    tpsl_fail_streak = 0;
+                    if cancel_was_uncertain {
+                        tracing::info!("reconcile: TP/SL cancel bizonytalan volt, de a védelem még a könyvön van — nem küldünk új TP/SL-t");
+                    }
+                    continue;
                 }
 
                 // TP/SL újrapróba backoff: Null / hálózati hiba esetén ne zaklassuk 150ms-enként.
