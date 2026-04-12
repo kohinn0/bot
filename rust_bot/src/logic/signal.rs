@@ -65,14 +65,11 @@ impl SweepEngine {
             self.sweep_low_level = recent_low;
         }
 
-        // Rolling window update: ha a legrégebbi árat dobjuk ki és az volt a min/max,
-        // újra kell számolni — ez O(n) de ritkán fordul elő (csak ablak teli esetén).
         if self.prices.len() >= self.window {
             if let Some(evicted) = self.prices.pop_front() {
                 if (evicted - self.running_high).abs() < 1e-12
                     || (evicted - self.running_low).abs() < 1e-12
                 {
-                    // Kiesett a min vagy max — teljes újraszámítás szükséges
                     self.running_high = self.prices.iter().cloned().fold(mid, f64::max);
                     self.running_low = self.prices.iter().cloned().fold(mid, f64::min);
                 }
@@ -114,10 +111,9 @@ impl FlowEngine {
     fn tick(&mut self, imbalance: f64) -> (bool, bool) {
         // Nem-lineáris (köbös) skálázás: 0.95 imbalance >> 0.6 imbalance.
         // d ∈ [-0.5, 0.5] → scaled ∈ [-1, 1] → köbös → delta ∈ [-0.25, 0.25].
-        // Lineárisnál 0.6 vs 0.95 = 4.5× különbség; köbösnel ~60×.
         let d = imbalance - 0.5;
-        let s = d * 2.0;                        // normálva [-1, 1]
-        let delta = s * s * s * 0.25;           // d^3 * 0.25, max ±0.25
+        let s = d * 2.0;
+        let delta = s * s * s * 0.25;
 
         if self.history.len() >= self.window {
             if let Some(old) = self.history.pop_front() {
@@ -175,12 +171,134 @@ impl VwapEngine {
 }
 
 // ==========================================
+// 4. REGIME FILTER (EMA-alapú trend-szűrő)
+// ==========================================
+// Időalapú mintavételezés: minden `sample_secs` másodpercben frissíti az EMA-kat.
+// Alapértelmezett konfig: 30s minta → EMA-50 ≈ 25 perc, EMA-200 ≈ 100 perc (1h40m).
+// Ez az 1-2 órás piaci struktúrát adja vissza, amit az orderbook tick-ek nem látnak.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Regime {
+    Uptrend,
+    Downtrend,
+    Sideways,
+}
+
+impl Regime {
+    fn label(self) -> &'static str {
+        match self {
+            Regime::Uptrend   => "UPTREND",
+            Regime::Downtrend => "DOWNTREND",
+            Regime::Sideways  => "SIDEWAYS",
+        }
+    }
+}
+
+struct RegimeEngine {
+    fast_alpha: f64,
+    slow_alpha: f64,
+    fast_ema: f64,
+    slow_ema: f64,
+    band_pct: f64,
+    sample_secs: u64,
+    last_sample: Instant,
+    acc_sum: f64,
+    acc_count: u64,
+    samples_total: u64,
+    /// Ennyi mintára van szükség, mielőtt trend-jelzést adunk (slow EMA konvergencia).
+    min_samples: u64,
+    prev_regime: Regime,
+    log_counter: u32,
+}
+
+impl RegimeEngine {
+    fn new(fast_period: usize, slow_period: usize, sample_secs: u64, band_pct: f64) -> Self {
+        Self {
+            fast_alpha: 2.0 / (fast_period as f64 + 1.0),
+            slow_alpha: 2.0 / (slow_period as f64 + 1.0),
+            fast_ema: 0.0,
+            slow_ema: 0.0,
+            band_pct,
+            sample_secs,
+            last_sample: Instant::now(),
+            acc_sum: 0.0,
+            acc_count: 0,
+            samples_total: 0,
+            // Slow EMA konvergencia: ~1× slow_period elegendő (exponenciális lecsengés)
+            min_samples: slow_period as u64,
+            prev_regime: Regime::Sideways,
+            log_counter: 0,
+        }
+    }
+
+    fn tick(&mut self, mid: f64) -> Regime {
+        // Minden tick: akkumulálás
+        self.acc_sum += mid;
+        self.acc_count += 1;
+
+        // Mintavételezési periódus nem telt le → jelenlegi rezsim visszaadása
+        if self.last_sample.elapsed().as_secs() < self.sample_secs {
+            return self.prev_regime;
+        }
+
+        // Mintavételezési periódus lejárt: EMA frissítés
+        let sample_px = if self.acc_count > 0 {
+            self.acc_sum / self.acc_count as f64
+        } else {
+            mid
+        };
+        self.acc_sum = 0.0;
+        self.acc_count = 0;
+        self.last_sample = Instant::now();
+        self.samples_total += 1;
+
+        if self.fast_ema == 0.0 {
+            // Inicializálás: mindkét EMA az első árra áll
+            self.fast_ema = sample_px;
+            self.slow_ema = sample_px;
+            return Regime::Sideways;
+        }
+
+        self.fast_ema = sample_px * self.fast_alpha + self.fast_ema * (1.0 - self.fast_alpha);
+        self.slow_ema = sample_px * self.slow_alpha + self.slow_ema * (1.0 - self.slow_alpha);
+
+        let regime = if self.samples_total < self.min_samples {
+            // Slow EMA még konvergál → semleges
+            Regime::Sideways
+        } else {
+            let spread_pct = (self.fast_ema - self.slow_ema) / self.slow_ema * 100.0;
+            if spread_pct > self.band_pct {
+                Regime::Uptrend
+            } else if spread_pct < -self.band_pct {
+                Regime::Downtrend
+            } else {
+                Regime::Sideways
+            }
+        };
+
+        // Rezsimváltás vagy 10 percenkénti periodikus log
+        self.log_counter += 1;
+        let changed = regime != self.prev_regime;
+        if changed || self.log_counter >= 20 {
+            let spread = (self.fast_ema - self.slow_ema) / self.slow_ema * 100.0;
+            tracing::info!(
+                "📊 Rezsim: {} | EMA-fast={:.4} EMA-slow={:.4} spread={:+.3}% | minták={}",
+                regime.label(), self.fast_ema, self.slow_ema, spread, self.samples_total
+            );
+            self.log_counter = 0;
+        }
+        self.prev_regime = regime;
+        regime
+    }
+}
+
+// ==========================================
 // MOTOR
 // ==========================================
 pub struct SignalEngine {
     sweep: SweepEngine,
     flow: FlowEngine,
     vwap: VwapEngine,
+    regime: RegimeEngine,
     prev_mid: Option<f64>,
     return_history: VecDeque<f64>,
     sum_x: f64,
@@ -194,6 +312,12 @@ impl SignalEngine {
             sweep: SweepEngine::new(config.sweep_window as usize, config.sweep_threshold_pct),
             flow: FlowEngine::new(config.flow_window as usize, config.flow_threshold),
             vwap: VwapEngine::new(config.vwap_session_hours, config.vwap_deviation_pct),
+            regime: RegimeEngine::new(
+                config.regime_fast_period as usize,
+                config.regime_slow_period as usize,
+                config.regime_sample_secs,
+                config.regime_band_pct,
+            ),
             prev_mid: None,
             return_history: VecDeque::new(),
             sum_x: 0.0,
@@ -211,8 +335,10 @@ impl SignalEngine {
         let (sweep_buy, sweep_sell) = self.sweep.tick(mid);
         let (flow_bull, flow_bear) = self.flow.tick(imbalance);
         let (below_vwap, above_vwap) = self.vwap.tick(mid);
+        let regime = self.regime.tick(mid);
 
-        // 1. Liquidity sweep reversal (eredeti logika)
+        // 1. Likviditás-söpör visszafordulás — minden rezsimben engedett.
+        //    Ez rövid távú struktúra, nem trendel: bármely irányban működhet.
         if sweep_buy && (flow_bull || below_vwap) {
             return Some(SignalResult { side: "Buy".to_string(), target_mid: mid, volatility });
         }
@@ -220,13 +346,22 @@ impl SignalEngine {
             return Some(SignalResult { side: "Sell".to_string(), target_mid: mid, volatility });
         }
 
-        // 2. Flow + VWAP mean-reversion (sweep nélkül — trendező/csendes piacon is nyit)
-        // Elég ha az orderbook irányított ÉS az ár eltér a session VWAP-tól.
+        // 2. Flow + VWAP mean-reversion — CSAK ha a rezsim nem zárja ki az irányt.
+        //
+        //    Logika:
+        //    - UPTREND:   ne adjunk el (VWAP feletti ár normális; ne shortoljuk a trendet)
+        //                 Long belépés (dip VWAP alá uptrendben) engedett.
+        //    - DOWNTREND: ne vegyünk (VWAP alatti ár normális; ne longjuk a trendet)
+        //                 Short belépés (rally VWAP fölé downtrendben) engedett.
+        //    - SIDEWAYS:  mindkét irány szabad (mean reversion a legjobb ilyen piacon).
         if self.tick_count > 100 {
-            if flow_bull && below_vwap {
+            let buy_allowed  = regime != Regime::Downtrend;
+            let sell_allowed = regime != Regime::Uptrend;
+
+            if flow_bull && below_vwap && buy_allowed {
                 return Some(SignalResult { side: "Buy".to_string(), target_mid: mid, volatility });
             }
-            if flow_bear && above_vwap {
+            if flow_bear && above_vwap && sell_allowed {
                 return Some(SignalResult { side: "Sell".to_string(), target_mid: mid, volatility });
             }
         }
@@ -316,5 +451,34 @@ mod tests {
         let (below, above) = engine.tick(99.4);
         assert!(below);
         assert!(!above);
+    }
+
+    #[test]
+    fn regime_sideways_during_warmup() {
+        // Slow EMA min_samples=5 szükséges; kevesebb minta → SIDEWAYS
+        let mut engine = RegimeEngine::new(3, 5, 0, 0.05); // sample_secs=0 → minden ticknél frissít
+        for _ in 0..3 {
+            assert_eq!(engine.tick(100.0), Regime::Sideways, "warmup alatt SIDEWAYS kell");
+        }
+    }
+
+    #[test]
+    fn regime_detects_uptrend() {
+        // sample_secs=0: minden tick minta; band=0.0: minimális spread elég
+        let mut engine = RegimeEngine::new(3, 5, 0, 0.0);
+        // Növekvő árak → fast EMA > slow EMA
+        let prices = [100.0, 101.0, 102.0, 103.0, 104.0, 105.0, 106.0, 107.0, 108.0, 109.0, 110.0];
+        let mut last = Regime::Sideways;
+        for &p in &prices { last = engine.tick(p); }
+        assert_eq!(last, Regime::Uptrend, "tartós emelkedés után UPTREND kell");
+    }
+
+    #[test]
+    fn regime_detects_downtrend() {
+        let mut engine = RegimeEngine::new(3, 5, 0, 0.0);
+        let prices = [110.0, 109.0, 108.0, 107.0, 106.0, 105.0, 104.0, 103.0, 102.0, 101.0, 100.0];
+        let mut last = Regime::Sideways;
+        for &p in &prices { last = engine.tick(p); }
+        assert_eq!(last, Regime::Downtrend, "tartós esés után DOWNTREND kell");
     }
 }

@@ -61,6 +61,20 @@ pub struct StrategyConfig {
     pub vwap_session_hours: u32,
     #[serde(default = "default_vwap_deviation_pct")]
     pub vwap_deviation_pct: f64,
+
+    // --- Regime Filter (EMA trend-szűrő) ---
+    /// Gyors EMA periódusa (minták száma). 30s mintánál: 50 × 30s ≈ 25 perc.
+    #[serde(default = "default_regime_fast_period")]
+    pub regime_fast_period: u32,
+    /// Lassú EMA periódusa. 30s mintánál: 200 × 30s ≈ 100 perc.
+    #[serde(default = "default_regime_slow_period")]
+    pub regime_slow_period: u32,
+    /// Mintavételezési intervallum másodpercben (hány mp-enként frissül az EMA).
+    #[serde(default = "default_regime_sample_secs")]
+    pub regime_sample_secs: u64,
+    /// EMA-különbség sávszélessége (%) — ennél kisebb spread = SIDEWAYS (mindkét irány szabad).
+    #[serde(default = "default_regime_band_pct")]
+    pub regime_band_pct: f64,
 }
 
 fn default_min_ladder_order_notional_usd() -> f64 { 11.0 }
@@ -70,6 +84,10 @@ fn default_flow_window() -> u32 { 50 }
 fn default_flow_threshold() -> f64 { 3.5 }
 fn default_vwap_session_hours() -> u32 { 8 }
 fn default_vwap_deviation_pct() -> f64 { 0.15 }
+fn default_regime_fast_period() -> u32 { 50 }
+fn default_regime_slow_period() -> u32 { 200 }
+fn default_regime_sample_secs() -> u64 { 30 }
+fn default_regime_band_pct() -> f64 { 0.08 }
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct LadderLevel {
@@ -166,6 +184,10 @@ mod strategy_config_tests {
             flow_threshold: 3.5,
             vwap_session_hours: 8,
             vwap_deviation_pct: 0.15,
+            regime_fast_period: 50,
+            regime_slow_period: 200,
+            regime_sample_secs: 30,
+            regime_band_pct: 0.08,
         }
     }
 

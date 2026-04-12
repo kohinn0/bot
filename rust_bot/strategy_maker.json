@@ -25,5 +25,9 @@
     "flow_window": 50,
     "flow_threshold": 1.0,
     "vwap_session_hours": 8,
-    "vwap_deviation_pct": 0.10
+    "vwap_deviation_pct": 0.10,
+    "regime_fast_period": 50,
+    "regime_slow_period": 200,
+    "regime_sample_secs": 30,
+    "regime_band_pct": 0.08
 }
