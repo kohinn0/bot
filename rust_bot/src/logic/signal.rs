@@ -127,15 +127,18 @@ impl FlowEngine {
 }
 
 // ==========================================
-// 3. ANCHORED VWAP (TWAP, nincs volumen adat)
+// 3. VWAP ENGINE
+//    Elsődleges: Volume-weighted VWAP (a feed trades streamjéből).
+//    Fallback:   TWAP (időn alapuló átlag), ha még nincs elég trades adat.
 // ==========================================
 struct VwapEngine {
     session_duration: Duration,
     deviation_pct: f64,
+    // TWAP fallback belső állapot
     session_start: Option<Instant>,
     sum_price: f64,
     count: u64,
-    vwap: f64,
+    twap: f64,
 }
 
 impl VwapEngine {
@@ -146,11 +149,15 @@ impl VwapEngine {
             session_start: None,
             sum_price: 0.0,
             count: 0,
-            vwap: 0.0,
+            twap: 0.0,
         }
     }
 
-    fn tick(&mut self, mid: f64) -> (bool, bool) {
+    /// `volume_vwap`: a feed által számított Volume VWAP.
+    /// - Ha > 0: ezt használja (igazi forgalom-súlyozott VWAP).
+    /// - Ha == 0: TWAP fallback (bot induláskor, amíg a trades stream feltölt).
+    fn tick(&mut self, mid: f64, volume_vwap: f64) -> (bool, bool) {
+        // TWAP mindig frissül (fallback + self-check)
         let now = Instant::now();
         if self.session_start.map_or(true, |s| now.duration_since(s) >= self.session_duration) {
             self.session_start = Some(now);
@@ -159,13 +166,18 @@ impl VwapEngine {
         }
         self.sum_price += mid;
         self.count += 1;
-        self.vwap = self.sum_price / self.count as f64;
+        self.twap = self.sum_price / self.count as f64;
 
-        if self.vwap <= 0.0 || self.count < 30 {
+        // Effektív VWAP: volume_vwap ha elérhető, különben TWAP
+        let effective_vwap = if volume_vwap > 0.0 { volume_vwap } else { self.twap };
+
+        // Warmup: ha TWAP-ra támaszkodunk, várjunk legalább 30 mintát
+        if effective_vwap <= 0.0 || (volume_vwap <= 0.0 && self.count < 30) {
             return (false, false);
         }
-        let lower = self.vwap * (1.0 - self.deviation_pct / 100.0);
-        let upper = self.vwap * (1.0 + self.deviation_pct / 100.0);
+
+        let lower = effective_vwap * (1.0 - self.deviation_pct / 100.0);
+        let upper = effective_vwap * (1.0 + self.deviation_pct / 100.0);
         (mid < lower, mid > upper)
     }
 }
@@ -327,14 +339,16 @@ impl SignalEngine {
     }
 
     /// CPU-only számítás — nincs I/O, nem blokkol aszinkron executort.
-    pub fn tick(&mut self, mid: f64, imbalance: f64) -> Option<SignalResult> {
+    ///
+    /// `volume_vwap`: feed által számított Volume VWAP (0.0 = nincs adat → TWAP fallback).
+    pub fn tick(&mut self, mid: f64, imbalance: f64, volume_vwap: f64) -> Option<SignalResult> {
         if mid <= 0.0 { return None; }
         self.tick_count += 1;
         let volatility = self.update_volatility(mid);
 
         let (sweep_buy, sweep_sell) = self.sweep.tick(mid);
         let (flow_bull, flow_bear) = self.flow.tick(imbalance);
-        let (below_vwap, above_vwap) = self.vwap.tick(mid);
+        let (below_vwap, above_vwap) = self.vwap.tick(mid, volume_vwap);
         let regime = self.regime.tick(mid);
 
         // 1. Likviditás-söpör visszafordulás — minden rezsimben engedett.
@@ -445,11 +459,23 @@ mod tests {
     }
 
     #[test]
-    fn vwap_below_signal() {
+    fn vwap_below_signal_twap_fallback() {
+        // volume_vwap=0.0 → TWAP fallback; TWAP≈100.0 után 99.4 < lower
         let mut engine = VwapEngine::new(8, 0.5);
-        for _ in 0..100 { engine.tick(100.0); }
-        let (below, above) = engine.tick(99.4);
-        assert!(below);
+        for _ in 0..100 { engine.tick(100.0, 0.0); }
+        let (below, above) = engine.tick(99.4, 0.0);
+        assert!(below, "TWAP fallback: 99.4 alatta kell legyen");
+        assert!(!above);
+    }
+
+    #[test]
+    fn vwap_below_signal_volume_vwap() {
+        // volume_vwap=100.0 → ezt használja, nem a TWAP-ot
+        let mut engine = VwapEngine::new(8, 0.5);
+        // Csak néhány tick (kevesebb mint 30) — TWAP fallback nem lenne elég
+        for _ in 0..5 { engine.tick(50.0, 0.0); } // TWAP=50, de ezt nem kellene használni
+        let (below, above) = engine.tick(99.4, 100.0); // volume_vwap=100.0
+        assert!(below, "volume VWAP=100.0 esetén 99.4 alatta kell legyen");
         assert!(!above);
     }
 

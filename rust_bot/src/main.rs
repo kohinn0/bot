@@ -72,7 +72,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let feed = Arc::new(HyperliquidFeed::new(&coin, &hl_user, is_mainnet));
+    let feed = Arc::new(HyperliquidFeed::new(&coin, &hl_user, is_mainnet, app_config.strategy.vwap_session_hours));
     let state_ref = feed.state.clone();
     feed.clone().start().await;
 
@@ -156,14 +156,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tokio::spawn(async move {
         loop {
-            let (mid, imbalance, feed_ts) = {
+            let (mid, imbalance, feed_ts, volume_vwap) = {
                 let s = state_t.read().await;
                 let m = if s.best_bid > 0.0 && s.best_ask > 0.0 {
                     (s.best_bid + s.best_ask) / 2.0
                 } else {
                     0.0
                 };
-                (m, s.imbalance, s.last_update_ts)
+                (m, s.imbalance, s.last_update_ts, s.volume_vwap)
             };
             // Elavult feed ellenőrzés: ha a WS >2s óta nem küldött adatot, ne tüzeljünk.
             let now_ms = std::time::SystemTime::now()
@@ -174,7 +174,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
                 continue;
             }
-            if let Some(signal) = signal_engine.tick(mid, imbalance) {
+            if let Some(signal) = signal_engine.tick(mid, imbalance, volume_vwap) {
                 // Csak akkor hívunk HL-t, ha a szignál-intervallum lejárt — különben 5 ms-onként spammelnénk.
                 if last_signal_time.elapsed() < min_signal_interval {
                     continue;

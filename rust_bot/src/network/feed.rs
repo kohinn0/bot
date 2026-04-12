@@ -17,6 +17,10 @@ pub struct L2BookState {
     pub best_ask: f64,
     pub imbalance: f64,
     pub last_update_ts: u64,
+    /// Volumen-súlyozott VWAP az aktuális sessionre. 0.0 = még nincs elég adat.
+    pub volume_vwap: f64,
+    /// Aktuális session teljes forgalma (coin egységben).
+    pub vwap_volume: f64,
 }
 
 impl Default for L2BookState {
@@ -28,6 +32,8 @@ impl Default for L2BookState {
             best_ask: 0.0,
             imbalance: 0.5,
             last_update_ts: 0,
+            volume_vwap: 0.0,
+            vwap_volume: 0.0,
         }
     }
 }
@@ -55,12 +61,73 @@ enum SubscriptionData {
     L2Book { coin: String },
     #[serde(rename = "userEvents")]
     UserEvents { user: String },
+    #[serde(rename = "trades")]
+    Trades { coin: String },
 }
 
 #[derive(Deserialize, Debug)]
 struct WsResponse {
     channel: String,
     data: Option<serde_json::Value>,
+}
+
+/// Belső VWAP akkumulátor — egyetlen Mutex mögé zárva, minimális lockolással.
+struct VwapAcc {
+    sum_pv: f64,           // Σ(ár × forgalom)
+    sum_v: f64,            // Σ(forgalom)
+    session_start_ms: u64, // Session kezdete (trade timestamp ms)
+    session_ms: u64,       // Session hossza ms-ban
+    log_counter: u32,      // Periodikus log számláló
+}
+
+impl VwapAcc {
+    fn new(session_hours: u32) -> Self {
+        Self {
+            sum_pv: 0.0,
+            sum_v: 0.0,
+            session_start_ms: 0,
+            session_ms: session_hours as u64 * 3_600_000,
+            log_counter: 0,
+        }
+    }
+
+    /// Trade feldolgozása. Visszaadja az aktuális VWAP-ot és az összes forgalmat.
+    fn process(&mut self, px: f64, sz: f64, trade_ts_ms: u64) -> (f64, f64) {
+        // Session reset: az első trade-nél inicializál, vagy ha lejárt a session
+        if self.session_start_ms == 0 {
+            self.session_start_ms = trade_ts_ms;
+        } else if trade_ts_ms >= self.session_start_ms + self.session_ms {
+            let old_vwap = if self.sum_v > 0.0 { self.sum_pv / self.sum_v } else { 0.0 };
+            info!(
+                "🔄 VWAP session reset: lejárt {:?}h — előző VWAP={:.4} forgalom={:.2}",
+                self.session_ms / 3_600_000,
+                old_vwap,
+                self.sum_v
+            );
+            self.sum_pv = 0.0;
+            self.sum_v = 0.0;
+            self.session_start_ms = trade_ts_ms;
+        }
+
+        self.sum_pv += px * sz;
+        self.sum_v  += sz;
+
+        let vwap = if self.sum_v > 0.0 { self.sum_pv / self.sum_v } else { 0.0 };
+
+        // Periódikus log (~500 trade-enként)
+        self.log_counter += 1;
+        if self.log_counter >= 500 {
+            self.log_counter = 0;
+            info!(
+                "📊 Volume VWAP: {:.4}  forgalom: {:.2}  (session: {:.1}h eltelt)",
+                vwap,
+                self.sum_v,
+                (trade_ts_ms.saturating_sub(self.session_start_ms)) as f64 / 3_600_000.0
+            );
+        }
+
+        (vwap, self.sum_v)
+    }
 }
 
 pub struct HyperliquidFeed {
@@ -71,10 +138,11 @@ pub struct HyperliquidFeed {
     pub open_order_oids: Arc<Mutex<Vec<u64>>>,
     pub post_only_reject_flag: Arc<Mutex<bool>>,
     pub fill_tx: broadcast::Sender<FillEvent>,
+    vwap_acc: Arc<Mutex<VwapAcc>>,
 }
 
 impl HyperliquidFeed {
-    pub fn new(coin: &str, user_address: &str, is_mainnet: bool) -> Self {
+    pub fn new(coin: &str, user_address: &str, is_mainnet: bool, vwap_session_hours: u32) -> Self {
         let (fill_tx, _) = broadcast::channel(100);
         let ws_url = if is_mainnet { HL_MAINNET_WSS_URL } else { HL_TESTNET_WSS_URL };
         Self {
@@ -88,6 +156,7 @@ impl HyperliquidFeed {
             open_order_oids: Arc::new(Mutex::new(Vec::new())),
             post_only_reject_flag: Arc::new(Mutex::new(false)),
             fill_tx,
+            vwap_acc: Arc::new(Mutex::new(VwapAcc::new(vwap_session_hours))),
         }
     }
 
@@ -104,28 +173,36 @@ impl HyperliquidFeed {
 
                         let (mut sink, mut stream) = ws_stream.split();
 
+                        // L2 book feliratkozás
                         let sub_l2 = WsRequest::Subscribe {
                             subscription: SubscriptionData::L2Book { coin: this.coin.clone() },
                         };
                         sink.send(Message::Text(serde_json::to_string(&sub_l2).unwrap())).await.ok();
 
+                        // Saját fill-ek
                         let sub_user = WsRequest::Subscribe {
                             subscription: SubscriptionData::UserEvents { user: this.user_address.clone() },
                         };
                         sink.send(Message::Text(serde_json::to_string(&sub_user).unwrap())).await.ok();
 
-                        // 30 másodperces ping — megakadályozza a szerver-oldali timeout kiesést
+                        // Piaci ügyletek — Volume VWAP számításhoz
+                        let sub_trades = WsRequest::Subscribe {
+                            subscription: SubscriptionData::Trades { coin: this.coin.clone() },
+                        };
+                        sink.send(Message::Text(serde_json::to_string(&sub_trades).unwrap())).await.ok();
+                        info!("📈 Trades stream feliratkozás: {}", this.coin);
+
+                        // 30 másodperces ping — szerver-oldali timeout ellen
                         let mut ping_timer = tokio::time::interval(
                             tokio::time::Duration::from_secs(30)
                         );
-                        ping_timer.tick().await; // első tick azonnali, elfogyasztjuk
+                        ping_timer.tick().await;
 
                         loop {
                             tokio::select! {
                                 msg = stream.next() => {
                                     match msg {
                                         Some(Ok(Message::Text(text))) => {
-                                            // Szerver ping → pong válasz
                                             if text.contains("\"ping\"") {
                                                 let _ = sink.send(Message::Text(r#"{"method":"pong"}"#.to_string())).await;
                                             } else {
@@ -140,7 +217,6 @@ impl HyperliquidFeed {
                                     }
                                 }
                                 _ = ping_timer.tick() => {
-                                    // Kliens-oldali keepalive ping
                                     if sink.send(Message::Text(r#"{"method":"ping"}"#.to_string())).await.is_err() {
                                         break;
                                     }
@@ -162,6 +238,9 @@ impl HyperliquidFeed {
             match response.channel.as_str() {
                 "l2Book" => {
                     if let Some(data) = response.data { self.process_l2_book(data).await; }
+                }
+                "trades" => {
+                    if let Some(data) = response.data { self.process_trades(data).await; }
                 }
                 "userEvents" | "user" => {
                     if let Some(data) = response.data { self.process_user_event(data).await; }
@@ -189,6 +268,77 @@ impl HyperliquidFeed {
                 info!("📡 WS POST FEEDBACK érkezett");
             }
         }
+    }
+
+    /// Tényleges piaci ügyletek feldolgozása → Volume VWAP frissítés.
+    ///
+    /// A Hyperliquid trades üzenet formátuma:
+    /// `[{"coin":"SOL","side":"B","px":"152.50","sz":"1.5","time":1700000000000,"hash":"0x..."}]`
+    async fn process_trades(&self, data: serde_json::Value) {
+        let trades = match data.as_array() {
+            Some(a) => a,
+            None => return,
+        };
+
+        let mut batch_pv = 0.0f64;
+        let mut batch_v  = 0.0f64;
+        let mut latest_ts: u64 = 0;
+
+        for trade in trades {
+            if trade["coin"].as_str() != Some(self.coin.as_str()) { continue; }
+            let px: f64 = trade["px"].as_str().unwrap_or("0").parse().unwrap_or(0.0);
+            let sz: f64 = trade["sz"].as_str().unwrap_or("0").parse().unwrap_or(0.0);
+            let ts: u64 = trade["time"].as_u64().unwrap_or(0);
+            if px > 0.0 && sz > 0.0 {
+                batch_pv += px * sz;
+                batch_v  += sz;
+                if ts > latest_ts { latest_ts = ts; }
+            }
+        }
+
+        if batch_v <= 0.0 || latest_ts == 0 { return; }
+
+        // Batch-enként egyszer lockolunk (nem trade-enként)
+        let (vwap, total_v) = {
+            let mut acc = self.vwap_acc.lock().await;
+            // Minden trade-et egyenként kellene feldolgozni a timestamp alapú resethez,
+            // de a batch-en belül a legkésőbbi timestamp-et használjuk közelítésként.
+            acc.sum_pv += batch_pv;
+            acc.sum_v  += batch_v;
+
+            // Session reset detektálás (első inicializálás vagy lejárt session)
+            if acc.session_start_ms == 0 {
+                acc.session_start_ms = latest_ts;
+            } else if latest_ts >= acc.session_start_ms + acc.session_ms {
+                let old_vwap = if acc.sum_v > 0.0 { acc.sum_pv / acc.sum_v } else { 0.0 };
+                info!(
+                    "🔄 VWAP session reset ({}h) — előző VWAP={:.4}  forgalom={:.2}",
+                    acc.session_ms / 3_600_000, old_vwap, acc.sum_v
+                );
+                acc.sum_pv = batch_pv;
+                acc.sum_v  = batch_v;
+                acc.session_start_ms = latest_ts;
+            }
+
+            let vwap = acc.sum_pv / acc.sum_v;
+
+            acc.log_counter += 1;
+            if acc.log_counter >= 500 {
+                acc.log_counter = 0;
+                let elapsed_h = (latest_ts.saturating_sub(acc.session_start_ms)) as f64 / 3_600_000.0;
+                info!(
+                    "📊 Volume VWAP: {:.4}  forgalom: {:.2}  (session: {:.1}h)",
+                    vwap, acc.sum_v, elapsed_h
+                );
+            }
+
+            (vwap, acc.sum_v)
+        };
+
+        // VWAP írása a megosztott állapotba
+        let mut state = self.state.write().await;
+        state.volume_vwap = vwap;
+        state.vwap_volume = total_v;
     }
 
     async fn log_post_summary(&self, data: &serde_json::Value) {
