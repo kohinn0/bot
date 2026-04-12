@@ -200,6 +200,13 @@ pub enum CancelAck {
     Failed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrderAck {
+    Confirmed,
+    Uncertain,
+    Failed,
+}
+
 /// Cancel-specifikus állapot:
 /// - `Confirmed`: a cancel biztosan sikeres, vagy az orderek már nem léteznek
 /// - `Uncertain`: a HL `Null` választ adott, ezért friss könyv-olvasás kell
@@ -237,6 +244,31 @@ pub fn exchange_cancel_ack_or_warn(ctx: &str, res: &Result<Value, reqwest::Error
             }
             tracing::warn!("{}: cancel válasz nem ok: {:?}", ctx, body);
             CancelAck::Failed
+        }
+    }
+}
+
+/// Order / leverage / order-batch állapot:
+/// - `Confirmed`: biztos siker
+/// - `Uncertain`: a HL `Null` választ adott, ezért friss könyv/pozíció ellenőrzés kell
+/// - `Failed`: biztos hiba
+pub fn exchange_order_ack_or_warn(ctx: &str, res: &Result<Value, reqwest::Error>) -> OrderAck {
+    match res {
+        Err(e) => {
+            tracing::warn!("{}: HTTP / válasz parse: {}", ctx, e);
+            OrderAck::Failed
+        }
+        Ok(body) => {
+            if body.is_null() {
+                tracing::warn!("{}: HL válasz bizonytalan: Null", ctx);
+                return OrderAck::Uncertain;
+            }
+            if exchange_order_submission_ok(body) {
+                OrderAck::Confirmed
+            } else {
+                tracing::warn!("{}: HL válasz nem ok: {:?}", ctx, body);
+                OrderAck::Failed
+            }
         }
     }
 }
@@ -684,6 +716,35 @@ mod tests {
         assert_eq!(
             exchange_cancel_ack_or_warn("test cancel", &res),
             CancelAck::Confirmed
+        );
+    }
+
+    #[test]
+    fn order_ack_treats_null_as_uncertain() {
+        let res: Result<Value, reqwest::Error> = Ok(Value::Null);
+        assert_eq!(
+            exchange_order_ack_or_warn("test order", &res),
+            OrderAck::Uncertain
+        );
+    }
+
+    #[test]
+    fn order_ack_treats_ok_response_as_confirmed() {
+        let body = json!({
+            "status": "ok",
+            "response": {
+                "type": "order",
+                "data": {
+                    "statuses": [
+                        {"resting": {"oid": 123}}
+                    ]
+                }
+            }
+        });
+        let res: Result<Value, reqwest::Error> = Ok(body);
+        assert_eq!(
+            exchange_order_ack_or_warn("test order", &res),
+            OrderAck::Confirmed
         );
     }
 }

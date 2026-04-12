@@ -76,12 +76,14 @@ use crate::logic::signal::SignalEngine;
 use crate::logic::order_manager::OrderManager;
 use crate::network::client::{
     CancelAck,
+    OrderAck,
     clearinghouse_coin_szi,
     clearinghouse_position_for_coin,
     collect_ladder_cancel_oids_from_frontend,
     collect_resting_oids_from_exchange_response,
     exchange_action_ok_or_warn,
     exchange_cancel_ack_or_warn,
+    exchange_order_ack_or_warn,
     filter_cancel_oids_excluding_position_tpsl_triggers,
     frontend_has_any_open_order_for_coin,
     frontend_has_blocking_orders_for_coin,
@@ -508,17 +510,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             match signer.sign_l1_action(&act, nonce, net).await {
                                 Ok(sig) => {
                                     let res = rest.send_l1_action(&act, nonce, sig).await;
-                                    let ok = exchange_action_ok_or_warn("szignál létra", &res);
-                                    if ok {
-                                        if let Ok(ref body) = res {
-                                            let new_oids =
-                                                collect_resting_oids_from_exchange_response(body);
-                                            if !new_oids.is_empty() {
-                                                feed.open_order_oids.lock().await.extend(new_oids);
+                                    match exchange_order_ack_or_warn("szignál létra", &res) {
+                                        OrderAck::Confirmed => {
+                                            if let Ok(ref body) = res {
+                                                let new_oids =
+                                                    collect_resting_oids_from_exchange_response(body);
+                                                if !new_oids.is_empty() {
+                                                    feed.open_order_oids.lock().await.extend(new_oids);
+                                                }
+                                            }
+                                            true
+                                        }
+                                        OrderAck::Uncertain => {
+                                            let fe_now =
+                                                get_frontend_open_orders_retry_ok_fast(&rest, user.as_str()).await.ok();
+                                            let state_now =
+                                                get_user_state_retry_ok_fast(&rest, user.as_str()).await.ok();
+                                            let has_coin_orders = fe_now
+                                                .as_ref()
+                                                .map(|fe| frontend_has_any_open_order_for_coin(fe, coin.as_str()))
+                                                .unwrap_or(false);
+                                            let has_pos = state_now
+                                                .as_ref()
+                                                .map(|st| clearinghouse_coin_szi(st, coin.as_str()).abs() > 0.0001)
+                                                .unwrap_or(false);
+                                            if has_coin_orders || has_pos {
+                                                tracing::info!(
+                                                    "szignál létra: Null válasz után a könyv/pozíció már változott — sikernek tekintjük"
+                                                );
+                                                true
+                                            } else {
+                                                false
                                             }
                                         }
+                                        OrderAck::Failed => false,
                                     }
-                                    ok
                                 }
                                 Err(e) => {
                                     tracing::warn!("szignál létra aláírás: {}", e);
@@ -794,19 +820,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .await;
                     }
 
-                    let has_tpsl = fe.as_array().unwrap_or(&vec![]).iter().any(|o| {
-                        o["coin"].as_str() == Some(&coin_rec) && hl_order_is_protected(o)
-                    });
+                    let protected_count = fe
+                        .as_array()
+                        .unwrap_or(&vec![])
+                        .iter()
+                        .filter(|o| o["coin"].as_str() == Some(&coin_rec) && hl_order_is_protected(o))
+                        .count();
+                    let has_tpsl = protected_count > 0;
                     let delta = (ex_pos.abs() - last_protected_pos.abs()).abs();
                     tracing::debug!(
-                        "reconcile anti-stale: has_tpsl={} delta_from_last_protected={:.6}",
+                        "reconcile anti-stale: has_tpsl={} protected_count={} delta_from_last_protected={:.6}",
                         has_tpsl,
+                        protected_count,
                         delta
                     );
                     // Ha TP/SL már kint van és a pozíció nem változott lényegesen → nincs teendő.
                     // Emellett: ha last_protected_pos=0 (restart vagy Null-válasz utáni állapot),
                     // de a TP/SL már fent van a könyvön, szinkronizálunk és nem cancelünk/küldünk újra.
-                    if has_tpsl && (delta < 0.001 || last_protected_pos.abs() < 0.001) {
+                    if protected_count == 2 && (delta < 0.001 || last_protected_pos.abs() < 0.001) {
                         last_protected_pos = ex_pos; // tracking szinkronizálása (restart + Null után is)
                         tpsl_fail_streak = 0;
                         continue;
@@ -862,10 +893,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         continue;
                     }
                 };
-                let still_has_tpsl = fe_after_cancel.as_array().unwrap_or(&vec![]).iter().any(|o| {
-                    o["coin"].as_str() == Some(&coin_rec) && hl_order_is_protected(o)
-                });
-                if still_has_tpsl {
+                let protected_after_cancel = fe_after_cancel
+                    .as_array()
+                    .unwrap_or(&vec![])
+                    .iter()
+                    .filter(|o| o["coin"].as_str() == Some(&coin_rec) && hl_order_is_protected(o))
+                    .count();
+                if protected_after_cancel > 0 {
                     last_protected_pos = ex_pos;
                     tpsl_fail_streak = 0;
                     if cancel_was_uncertain {
