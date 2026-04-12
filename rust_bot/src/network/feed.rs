@@ -163,6 +163,7 @@ impl HyperliquidFeed {
     pub async fn start(self: Arc<Self>) {
         let this = self.clone();
         tokio::spawn(async move {
+            let mut reconnect_delay_secs: u64 = 1;
             loop {
                 info!("🔗 Kapcsolódás a Hyperliquid WS-hez...");
                 let url = Url::parse(&this.ws_url).unwrap();
@@ -170,6 +171,7 @@ impl HyperliquidFeed {
                 match connect_async(url).await {
                     Ok((ws_stream, _)) => {
                         info!("✅ Hyperliquid WS Connected");
+                        reconnect_delay_secs = 1; // sikeres csatlakozás → reset
 
                         let (mut sink, mut stream) = ws_stream.split();
 
@@ -198,7 +200,7 @@ impl HyperliquidFeed {
                         );
                         ping_timer.tick().await;
 
-                        loop {
+                        let disconnect_reason = loop {
                             tokio::select! {
                                 msg = stream.next() => {
                                     match msg {
@@ -212,23 +214,36 @@ impl HyperliquidFeed {
                                         Some(Ok(Message::Ping(data))) => {
                                             let _ = sink.send(Message::Pong(data)).await;
                                         }
-                                        Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                                        Some(Ok(Message::Close(frame))) => {
+                                            break format!("szerver Close: {:?}", frame.map(|f| f.reason.to_string()));
+                                        }
+                                        Some(Err(e)) => {
+                                            break format!("WS hiba: {}", e);
+                                        }
+                                        None => {
+                                            break "stream lezárult (None)".to_string();
+                                        }
                                         _ => {}
                                     }
                                 }
                                 _ = ping_timer.tick() => {
                                     if sink.send(Message::Text(r#"{"method":"ping"}"#.to_string())).await.is_err() {
-                                        break;
+                                        break "ping küldési hiba".to_string();
                                     }
                                 }
                             }
-                        }
+                        };
+
+                        warn!("⚠️ WS megszakadt ({}). Újracsatlakozás {}mp múlva...", disconnect_reason, reconnect_delay_secs);
                     }
-                    Err(e) => error!("❌ Sikertelen WS kapcsolódás: {}", e),
+                    Err(e) => {
+                        warn!("❌ WS kapcsolódás sikertelen: {}. Újracsatlakozás {}mp múlva...", e, reconnect_delay_secs);
+                    }
                 }
 
-                warn!("⚠️ WS megszakadt. Újracsatlakozás 1mp múlva...");
-                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                tokio::time::sleep(tokio::time::Duration::from_secs(reconnect_delay_secs)).await;
+                // Exponenciális backoff: 1 → 2 → 4 → 8 → 16 → max 60s
+                reconnect_delay_secs = (reconnect_delay_secs * 2).min(60);
             }
         });
     }
@@ -252,7 +267,7 @@ impl HyperliquidFeed {
                     }
                 }
                 "info" | "error" => {
-                    info!("📡 WS {} üzenet", response.channel);
+                    tracing::debug!("📡 WS {} üzenet", response.channel);
                 }
                 _ => {}
             }
