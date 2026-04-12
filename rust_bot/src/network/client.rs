@@ -193,6 +193,45 @@ pub fn exchange_action_ok_or_warn(ctx: &str, res: &Result<Value, reqwest::Error>
     }
 }
 
+/// Cancel-specifikus: `true` ha cancel sikeres VAGY orderek már nem léteznek (idempotens).
+/// Null body → "valószínűleg ok" (HL hiccup, de cancel valószínűleg végbement).
+pub fn exchange_cancel_ok_or_idempotent(ctx: &str, res: &Result<Value, reqwest::Error>) -> bool {
+    match res {
+        Err(e) => {
+            tracing::warn!("{}: HTTP hiba: {}", ctx, e);
+            false
+        }
+        Ok(body) => {
+            if body.is_null() {
+                tracing::debug!("{}: Null válasz — cancel valószínűleg sikeres", ctx);
+                return true;
+            }
+            if exchange_order_submission_ok(body) {
+                return true;
+            }
+            if body.get("status").and_then(|s| s.as_str()) == Some("ok") {
+                if let Some(arr) = body.pointer("/response/data/statuses").and_then(|x| x.as_array()) {
+                    let all_gone = arr.iter().all(|st| {
+                        st.get("error")
+                            .and_then(|e| e.as_str())
+                            .map_or(false, |msg| {
+                                msg.contains("already canceled")
+                                    || msg.contains("already filled")
+                                    || msg.contains("never placed")
+                            })
+                    });
+                    if all_gone {
+                        tracing::debug!("{}: idempotens — orderek már nem léteznek", ctx);
+                        return true;
+                    }
+                }
+            }
+            tracing::warn!("{}: cancel válasz nem ok: {:?}", ctx, body);
+            false
+        }
+    }
+}
+
 
 
 fn parse_order_oid(ord: &Value) -> Option<u64> {

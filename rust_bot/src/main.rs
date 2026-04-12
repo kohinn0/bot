@@ -80,6 +80,7 @@ use crate::network::client::{
     collect_ladder_cancel_oids_from_frontend,
     collect_resting_oids_from_exchange_response,
     exchange_action_ok_or_warn,
+    exchange_cancel_ok_or_idempotent,
     filter_cancel_oids_excluding_position_tpsl_triggers,
     frontend_has_any_open_order_for_coin,
     frontend_has_blocking_orders_for_coin,
@@ -835,7 +836,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     match s.sign_l1_action(&cancel_old, nonce, net).await {
                                         Ok(sig) => {
                                             let res = r.send_l1_action(&cancel_old, nonce, sig).await;
-                                            let _ = exchange_action_ok_or_warn("régi TP/SL cancel", &res);
+                                            let _ = exchange_cancel_ok_or_idempotent("régi TP/SL cancel", &res);
                                         }
                                         Err(e) => tracing::warn!("régi TP/SL cancel aláírás: {}", e),
                                     }
