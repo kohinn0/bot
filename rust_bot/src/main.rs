@@ -550,6 +550,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::time::Instant::now() - std::time::Duration::from_secs(3600);
         let mut dust_fail_streak: u32 = 0;
         let mut dust_episode_info_logged: bool = false;
+        // TP/SL elhelyezés backoff: Null / hálózati hiba esetén ne zaklassuk 150ms-enként a HL-t.
+        let mut next_tpsl_after =
+            std::time::Instant::now() - std::time::Duration::from_secs(3600);
+        let mut tpsl_fail_streak: u32 = 0;
 
         // Fill-esemény figyelő: azonnali reconcile aktiváláshoz
         let mut fill_rx = feed_r.fill_tx.subscribe();
@@ -798,8 +802,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         delta
                     );
                     // Ha TP/SL már kint van és a pozíció nem változott lényegesen → nincs teendő.
-                    if has_tpsl && delta < 0.001 {
-                        last_protected_pos = ex_pos; // tracking szinkronizálása (restart után is)
+                    // Emellett: ha last_protected_pos=0 (restart vagy Null-válasz utáni állapot),
+                    // de a TP/SL már fent van a könyvön, szinkronizálunk és nem cancelünk/küldünk újra.
+                    if has_tpsl && (delta < 0.001 || last_protected_pos.abs() < 0.001) {
+                        last_protected_pos = ex_pos; // tracking szinkronizálása (restart + Null után is)
+                        tpsl_fail_streak = 0;
                         continue;
                     }
                 }
@@ -836,6 +843,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             })
                             .await;
                         tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
+                    }
+                }
+
+                // TP/SL újrapróba backoff: Null / hálózati hiba esetén ne zaklassuk 150ms-enként.
+                {
+                    let now = std::time::Instant::now();
+                    if now < next_tpsl_after {
+                        tracing::debug!(
+                            "TP/SL újrapróba halasztva — {:.0}s múlva (streak={})",
+                            (next_tpsl_after - now).as_secs_f64(),
+                            tpsl_fail_streak
+                        );
+                        continue;
                     }
                 }
 
@@ -912,6 +932,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 e
                             ),
                         }
+                        tpsl_fail_streak = 0;
+                    } else {
+                        // TP/SL elhelyezés sikertelen (Null válasz vagy hálózati hiba).
+                        // A HL néha Null-t ad vissza, de az order mégis teljesül — a has_tpsl
+                        // check a következő tickben észleli és szinkronizálja last_protected_pos-t.
+                        // Ha az order valóban nem ment ki, a backoff megakadályozza a 150ms-es hammert.
+                        tpsl_fail_streak = tpsl_fail_streak.saturating_add(1);
+                        let backoff_secs =
+                            (5u64.saturating_mul(1u64 << tpsl_fail_streak.min(4))).min(60);
+                        next_tpsl_after = std::time::Instant::now()
+                            + std::time::Duration::from_secs(backoff_secs);
+                        tracing::warn!(
+                            "TP/SL elhelyezés sikertelen (streak={}): {}s múlva újrapróba (ha nincs kint TP/SL)",
+                            tpsl_fail_streak,
+                            backoff_secs
+                        );
                     }
                 }
         }
