@@ -432,10 +432,16 @@ impl SignalEngine {
         let (below_vwap, above_vwap) = self.vwap.tick(mid, volume_vwap);
         let regime = self.regime.tick(mid);
 
-        // 1. Likviditás-söpör visszafordulás — enyhe rezsim-korláttal.
-        //    Sideways piacon mindkét irány engedett; trendben ne menjünk direkt szembe a rezsimmel.
-        let buy_allowed = regime != Regime::Downtrend;
+        // Rezsim-szűrő: mindkét szignáltípusra egységesen.
+        // DOWNTREND: ne vegyünk (eső trend ellen long = catching falling knife).
+        // UPTREND:   ne adjunk el (emelkedő trend ellen short = szükségtelen kockázat).
+        // SIDEWAYS:  mindkét irány szabad (mean-reversion a legjobb ilyen piacon).
+        let buy_allowed  = regime != Regime::Downtrend;
         let sell_allowed = regime != Regime::Uptrend;
+
+        // 1. Likviditás-söpör visszafordulás — rezsim-szűréssel.
+        //    Korábban minden rezsimben engedett volt, de downtrend közben a sweep buy
+        //    rendre catching-falling-knife belépést generált (2-tik visszapattanás + esés folytatódik).
         if sweep_buy && (flow_bull || below_vwap) && buy_allowed {
             return Some(SignalResult { side: "Buy".to_string(), target_mid: mid, volatility });
         }
@@ -443,7 +449,7 @@ impl SignalEngine {
             return Some(SignalResult { side: "Sell".to_string(), target_mid: mid, volatility });
         }
 
-        // 2. Flow + VWAP mean-reversion — CSAK ha a rezsim nem zárja ki az irányt.
+        // 2. Flow + VWAP mean-reversion — szintén rezsim-szűréssel.
         //
         //    Logika:
         //    - UPTREND:   ne adjunk el (VWAP feletti ár normális; ne shortoljuk a trendet)
