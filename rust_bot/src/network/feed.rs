@@ -135,6 +135,11 @@ impl HyperliquidFeed {
                         info!("✅ Hyperliquid WS Connected");
                         reconnect_delay_secs = 1; // sikeres csatlakozás → reset
 
+                        // VWAP session reset: az újracsatlakozás után a régi session adatai
+                        // (esetleg hiányosak a leállás miatt) ne fertőzzék az új VWAP-ot.
+                        // session_start_ms=0 → a következő trade batch újrainicializálja.
+                        this.vwap_acc.lock().await.session_start_ms = 0;
+
                         let (mut sink, mut stream) = ws_stream.split();
 
                         // L2 book feliratkozás

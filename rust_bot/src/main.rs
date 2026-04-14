@@ -621,6 +621,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let (ex_pos, ent_px) = clearinghouse_position_for_coin(&st, &coin_rec);
                 *pos_rec_t.lock().await = ex_pos;
 
+                // Restart-seed: ha az első ticken már van pozíció (pl. újraindítás közben nyílt),
+                // last_fill_px-t az entry price-ra állítjuk — különben a zárás iránya sosem
+                // derül ki (last_fill_px=None → cooldown nem triggerel veszteségnél).
+                if prev_ex_pos.abs() < 0.001 && ex_pos.abs() > 0.001 && last_fill_px.is_none() {
+                    if let Some(ep) = ent_px {
+                        last_fill_px = Some(ep);
+                        tracing::debug!("Restart-seed: last_fill_px = ent_px {:.4}", ep);
+                    }
+                }
+
                 // P&L nyomkövetés: ha volt pozíció és most nincs → zárás detektálva
                 let was_in_position = prev_ex_pos.abs() > 0.001;
                 let now_flat = ex_pos.abs() < 0.001;

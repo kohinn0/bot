@@ -54,7 +54,9 @@ impl SweepEngine {
     }
 
     fn tick(&mut self, mid: f64) -> (bool, bool) {
-        let has_history = self.prices.len() >= self.window / 2;
+        // Teljes ablak kell a futó min/max megbízhatóságához — a fél-ablakos korai start
+        // részleges historával hamis söprés-szinteket produkálna.
+        let has_history = self.prices.len() >= self.window;
 
         let (recent_high, recent_low) = if has_history {
             (self.running_high, self.running_low)
@@ -294,7 +296,11 @@ impl RegimeEngine {
             acc_count: 0,
             samples_total: 0,
             // Slow EMA konvergencia: ~1× slow_period elegendő (exponenciális lecsengés)
-            min_samples: slow_period as u64,
+            // Warmup: slow_period / 4 minta elég az EMA-szóródás értelmezéséhez
+            // (mindkét EMA ugyanonnan indul → tényleges spread = tényleges trend).
+            // 200/4 = 50 minta × 30s = 25 perc. A korábbi slow_period (100 perc) alatt
+            // SIDEWAYS volt az egész melegítési időszak → downtrend közben is longholt a bot.
+            min_samples: (slow_period / 4).max(2) as u64,
             prev_regime: Regime::Sideways,
             log_counter: 0,
         }
@@ -506,12 +512,13 @@ mod tests {
     #[test]
     fn sweep_buy_signal_on_low_sweep_and_reversal() {
         // confirmation_pct=0.0, confirm_ticks=1 → az első visszakerülés a söprés szintje fölé tüzel
+        // Teljes ablak (window=10) kell a has_history=true-hoz.
         let mut engine = SweepEngine::new(10, 0.10, 0.0, 1);
-        for p in [100.0_f64, 100.1, 99.9, 100.05, 100.15] {
+        for p in [100.0_f64, 100.1, 99.9, 100.05, 100.15, 100.0, 100.1, 99.95, 100.08, 100.12] {
             let _ = engine.tick(p);
         }
-        let _ = engine.tick(99.75); // sweep_low = true, pending_buy beállítva
-        let (buy, sell) = engine.tick(100.0); // 1 tick a confirmation_thresh (99.9) fölött → tüzel
+        let _ = engine.tick(99.75); // sweep_low = true, pending_buy beállítva (swept_level≈99.9)
+        let (buy, sell) = engine.tick(100.0); // 100.0 >= 99.9 → confirm_ticks=1 >= 1 → tüzel
         assert!(buy, "Buy szignálnak kellene tüzelni sweep+reversal után");
         assert!(!sell);
     }
@@ -529,8 +536,8 @@ mod tests {
     fn sweep_buy_invalidated_on_continuation() {
         // Hamis visszapattanás: söprés után az ár tovább esik → nincs szignál
         let mut engine = SweepEngine::new(10, 0.10, 0.05, 1);
-        // Ablak feltöltése
-        for p in [100.0_f64, 100.1, 99.9, 100.05, 100.15] {
+        // Teljes ablak feltöltése (window=10)
+        for p in [100.0_f64, 100.1, 99.9, 100.05, 100.15, 100.0, 100.1, 99.95, 100.08, 100.12] {
             let _ = engine.tick(p);
         }
         // Söprés: ár a recent_low (99.9) * 0.999 = ~99.8001 alá megy
@@ -547,7 +554,8 @@ mod tests {
     fn sweep_buy_fires_after_confirmation() {
         // Valós visszapattanás: sweep + elegendő recovery → szignál
         let mut engine = SweepEngine::new(10, 0.10, 0.05, 2);
-        for p in [100.0_f64, 100.1, 99.9, 100.05, 100.15] {
+        // Teljes ablak feltöltése (window=10)
+        for p in [100.0_f64, 100.1, 99.9, 100.05, 100.15, 100.0, 100.1, 99.95, 100.08, 100.12] {
             let _ = engine.tick(p);
         }
         // Söprés (swept_level ≈ 99.9)
