@@ -32,6 +32,6 @@
     "regime_slow_period": 200,
     "regime_sample_secs": 30,
     "regime_band_pct": 0.10,
-    "min_vol_pct": 0.03,
+    "min_vol_pct": null,
     "max_vol_pct": 0.25
 }
