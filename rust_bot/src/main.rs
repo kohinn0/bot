@@ -102,6 +102,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|_| EnvFilter::new("info"));
     let subscriber = FmtSubscriber::builder().with_env_filter(filter).finish();
     tracing::subscriber::set_global_default(subscriber).expect("Failed to set tracing subscriber");
+
+    // Panic hook: bármely (spawn-olt) taszk panic-ja a tracing log-ba kerül, ne csak a stderr-be.
+    // Így a "néma" crash-ek (panic = "unwind" + eldobott JoinHandle) is visszakereshetők a logból.
+    std::panic::set_hook(Box::new(|info| {
+        let loc = info.location().map(|l| format!("{}:{}", l.file(), l.line())).unwrap_or_else(|| "<?>".to_string());
+        let msg = info.payload().downcast_ref::<&'static str>().map(|s| s.to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "<non-string panic payload>".to_string());
+        tracing::error!("💥 PANIC @ {} — {}", loc, msg);
+    }));
+
     dotenv().ok();
     info!("🚀 INICIALIZÁLÁS: SebessegBot V4.4 (Dust & Stale Limit Killer) 🚀");
 
