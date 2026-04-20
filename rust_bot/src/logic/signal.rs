@@ -30,6 +30,11 @@ struct SweepEngine {
     pending_sell_level: Option<f64>, // sweep_high_level az észlelés pillanatában
     buy_confirm_ticks: usize,
     sell_confirm_ticks: usize,
+    // Söprés-trigger ár: az az ár, amelyen a söprés éppen tüzelt (mid a detektálás pillanatában).
+    // Érvénytelenítés: ha az ár az eredeti trigger szint alá/fölé megy (nem a window low/high-hoz képest),
+    // az azonnali false invalidálást kerüljük el — a sell sweep különben minden esetben azonnal törlődne.
+    pending_buy_trigger: f64,
+    pending_sell_trigger: f64,
 }
 
 impl SweepEngine {
@@ -50,6 +55,8 @@ impl SweepEngine {
             pending_sell_level: None,
             buy_confirm_ticks: 0,
             sell_confirm_ticks: 0,
+            pending_buy_trigger: 0.0,
+            pending_sell_trigger: f64::INFINITY,
         }
     }
 
@@ -81,12 +88,14 @@ impl SweepEngine {
             self.swept_high = true;
             self.sweep_high_level = recent_high;
             self.pending_sell_level = Some(recent_high);
+            self.pending_sell_trigger = mid; // a tényleges trigger ár (nem az ablak csúcs)
             self.sell_confirm_ticks = 0;
         }
         if mid <= thresh_down && self.pending_buy_level.is_none() {
             self.swept_low = true;
             self.sweep_low_level = recent_low;
             self.pending_buy_level = Some(recent_low);
+            self.pending_buy_trigger = mid; // a tényleges trigger ár (nem az ablak mélypont)
             self.buy_confirm_ticks = 0;
         }
 
@@ -109,8 +118,9 @@ impl SweepEngine {
 
         // Függő BUY megerősítés (az előző tick óta fennálló pending-re)
         if let Some(swept_level) = prev_pending_buy {
-            if mid < swept_level {
-                // Ár tovább esett a söprés szintje alá → folytatódó esés, töröljük
+            if mid < self.pending_buy_trigger {
+                // Ár az eredeti sweep trigger szint alá esett → folytatódó esés, töröljük.
+                // (Nem az ablak mélypont a határ — az azonnal invalidálná a normális visszapattanást.)
                 self.pending_buy_level = None;
                 self.swept_low = false;
                 self.buy_confirm_ticks = 0;
@@ -130,8 +140,9 @@ impl SweepEngine {
 
         // Függő SELL megerősítés (az előző tick óta fennálló pending-re)
         if let Some(swept_level) = prev_pending_sell {
-            if mid > swept_level {
-                // Ár tovább emelkedett → folytatódó emelkedés, töröljük
+            if mid > self.pending_sell_trigger {
+                // Ár az eredeti sweep trigger szint fölé emelkedett → folytatódó emelkedés, töröljük.
+                // (Nem az ablak csúcs a határ — az azonnal invalidálná, mert a sweep ár már fölötte volt.)
                 self.pending_sell_level = None;
                 self.swept_high = false;
                 self.sell_confirm_ticks = 0;
