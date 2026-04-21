@@ -952,7 +952,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         sl
                     );
                     let prot = om_rec.build_protective_tpsl_payload(if ex_pos > 0.0 { "Sell" } else { "Buy" }, tp, sl, ex_pos.abs());
-                    let ok = l1_gate_r
+                    let ack = l1_gate_r
                         .run(|nonce| {
                             let s = signer_r.clone();
                             let r = rest_client_r.clone();
@@ -961,16 +961,53 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 match s.sign_l1_action(&prot, nonce, net).await {
                                     Ok(sig) => {
                                         let res = r.send_l1_action(&prot, nonce, sig).await;
-                                        exchange_action_ok_or_warn("reconcile TP/SL", &res)
+                                        exchange_order_ack_or_warn("reconcile TP/SL", &res)
                                     }
                                     Err(e) => {
                                         tracing::warn!("TP/SL aláírás: {}", e);
-                                        false
+                                        OrderAck::Failed
                                     }
                                 }
                             }
                         })
                         .await;
+
+                    // Null válasz esetén a HL gyakran mégis felteszi a TP/SL-t — könyv-ellenőrzéssel
+                    // igazoljuk, ne hamis "sikertelen" miatt halmozódjon duplikátum (5 TP/SL eset).
+                    let ok = match ack {
+                        OrderAck::Confirmed => true,
+                        OrderAck::Failed => false,
+                        OrderAck::Uncertain => {
+                            tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+                            match get_frontend_open_orders_retry_ok_fast(&rest_client_r, hl_user_r.as_str()).await {
+                                Ok(fe_verify) => {
+                                    let protected_now = fe_verify
+                                        .as_array()
+                                        .unwrap_or(&vec![])
+                                        .iter()
+                                        .filter(|o| o["coin"].as_str() == Some(&coin_rec) && hl_order_is_protected(o))
+                                        .count();
+                                    if protected_now >= 2 {
+                                        tracing::info!(
+                                            "reconcile TP/SL: Null válasz, de {} védő order a könyvön — sikernek tekintjük",
+                                            protected_now
+                                        );
+                                        true
+                                    } else {
+                                        tracing::warn!(
+                                            "reconcile TP/SL: Null válasz és csak {} védő order kint — sikertelennek vesszük",
+                                            protected_now
+                                        );
+                                        false
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!("reconcile TP/SL: Null utáni könyv-ellenőrzés hibás: {} — sikertelennek vesszük", e);
+                                    false
+                                }
+                            }
+                        }
+                    };
                     if ok {
                         last_protected_pos = ex_pos;
                         // Részleges fill után a régi maker létra maradék gyakran csak TP/SL feltevése után
