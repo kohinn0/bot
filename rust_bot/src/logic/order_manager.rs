@@ -86,7 +86,11 @@ impl OrderManager {
         if !mark_mid.is_finite() || mark_mid <= 0.0 || !tick.is_finite() || tick <= 0.0 {
             return None;
         }
-        let min_sep = (tick * 2.0).max(tick);
+        // Minimum trigger-távolság a mark-tól: a HL néha csendben (Null) elutasítja
+        // a túl szoros trigger-t. 0.3% biztonsági keret + abszolút minimum 2 tick.
+        // Korábban csak `tick*2` volt (SOL-nál ≈0.023%), ami a mark ellen futott pozíción
+        // a clamp utáni SL-t közvetlenül a mark mellé tette → HL rejected.
+        let min_sep = (mark_mid * 0.003).max(tick * 2.0);
         let ceil_tick = |px: f64| (px / tick).ceil() * tick;
         let floor_tick = |px: f64| (px / tick).floor() * tick;
 
