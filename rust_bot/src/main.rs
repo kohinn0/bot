@@ -114,7 +114,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }));
 
     dotenv().ok();
-    info!("🚀 INICIALIZÁLÁS: SebessegBot V4.4 (Dust & Stale Limit Killer) 🚀");
+    info!("🚀 INICIALIZÁLÁS: SebessegBot V4.5 (Emergency Close on TPSL Fail) 🚀");
 
     let app_config = AppConfig::load();
     let coin = app_config.strategy.coin.clone();
@@ -929,6 +929,53 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     continue;
                 }
 
+                // 🚨 VÉSZLEÁLLÍTÁS: tartósan sikertelen TP/SL → kényszerzárás piaci áron.
+                // Ha 8 egymást követő ticken sem sikerül TP/SL-t felrakni (Null válasz, hálózat,
+                // ár-számítás), a bot IOC-cal zárja a pozíciót — különben napokig „ragad" TP/SL nélkül.
+                if tpsl_fail_streak >= 8 {
+                    let (bid, ask) = {
+                        let book = state_rec.read().await;
+                        (book.best_bid, book.best_ask)
+                    };
+                    if bid > 0.0 && ask > 0.0 && ask > bid {
+                        tracing::error!(
+                            "🚨 VÉSZLEÁLLÍTÁS: TP/SL {}x sikertelen — kényszerzárás ex_pos={:.4}",
+                            tpsl_fail_streak, ex_pos
+                        );
+                        let ioc_px = if ex_pos > 0.0 { bid } else { ask };
+                        let close_action = om_rec.build_market_close_payload(ex_pos < 0.0, ioc_px, ex_pos.abs());
+                        let closed = l1_gate_r
+                            .run(|nonce| {
+                                let s = signer_r.clone();
+                                let r = rest_client_r.clone();
+                                let net = app_config.is_mainnet;
+                                async move {
+                                    match s.sign_l1_action(&close_action, nonce, net).await {
+                                        Ok(sig) => {
+                                            let res = r.send_l1_action(&close_action, nonce, sig).await;
+                                            exchange_action_ok_or_warn("vészleállítás IOC zárás", &res)
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!("vészleállítás aláírás: {}", e);
+                                            false
+                                        }
+                                    }
+                                }
+                            })
+                            .await;
+                        tpsl_fail_streak = 0;
+                        last_protected_pos = 0.0;
+                        next_tpsl_after = std::time::Instant::now()
+                            + std::time::Duration::from_secs(if closed { 5 } else { 30 });
+                    } else {
+                        tracing::error!(
+                            "🚨 VÉSZLEÁLLÍTÁS: {}x TP/SL hiba, nincs érvényes bid/ask — következő tick",
+                            tpsl_fail_streak
+                        );
+                    }
+                    continue;
+                }
+
                 // TP/SL újrapróba backoff: Null / hálózati hiba esetén ne zaklassuk 150ms-enként.
                 {
                     let now = std::time::Instant::now();
@@ -942,7 +989,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
 
-                if let Some((tp, sl)) = OrderManager::tp_sl_prices_for_position(ex_pos, ref_px, *vol_rec_t.lock().await, app_config.strategy.min_tick_size, app_config.strategy.tp_min_pct, app_config.strategy.sl_min_pct, state_rec.read().await.mid_price, app_config.strategy.maker_fee_rate, app_config.strategy.taker_fee_rate) {
+                // Ha a feed átmenetileg halott (mid_price=0), az entry price alapján számolunk TP/SL-t;
+                // jobb egy konzervatív védelem, mint hogy a bot TP/SL nélkül ragadjon napokig.
+                let mark_mid_for_tpsl = {
+                    let m = state_rec.read().await.mid_price;
+                    if m > 0.0 { m } else { ref_px }
+                };
+                match OrderManager::tp_sl_prices_for_position(ex_pos, ref_px, *vol_rec_t.lock().await, app_config.strategy.min_tick_size, app_config.strategy.tp_min_pct, app_config.strategy.sl_min_pct, mark_mid_for_tpsl, app_config.strategy.maker_fee_rate, app_config.strategy.taker_fee_rate) {
+                    None => {
+                        tpsl_fail_streak = tpsl_fail_streak.saturating_add(1);
+                        let backoff_secs = (5u64.saturating_mul(1u64 << tpsl_fail_streak.min(4))).min(60);
+                        next_tpsl_after = std::time::Instant::now() + std::time::Duration::from_secs(backoff_secs);
+                        tracing::warn!(
+                            "TP/SL számítás None (streak={}): mark={:.4} ref={:.4} — {}s backoff",
+                            tpsl_fail_streak, mark_mid_for_tpsl, ref_px, backoff_secs
+                        );
+                    }
+                    Some((tp, sl)) => {
                     tracing::debug!(
                         "reconcile TP/SL: coin={} ex_pos={:.4} ref_px={:.4} tp={:.4} sl={:.4}",
                         coin_rec,
@@ -1068,6 +1131,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             tpsl_fail_streak,
                             backoff_secs
                         );
+                    }
                     }
                 }
         }
