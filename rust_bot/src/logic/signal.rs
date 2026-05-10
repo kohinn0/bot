@@ -457,12 +457,12 @@ impl SignalEngine {
         let sell_allowed = regime != Regime::Uptrend;
 
         // 1. Likviditás-söpör visszafordulás — rezsim-szűréssel.
-        //    Korábban minden rezsimben engedett volt, de downtrend közben a sweep buy
-        //    rendre catching-falling-knife belépést generált (2-tik visszapattanás + esés folytatódik).
-        if sweep_buy && (flow_bull || below_vwap) && buy_allowed {
+        //    Mindkét megerősítő szignál (flow + VWAP) szükséges, hogy a sweep ne tüzeljen
+        //    gyenge / egyoldalú megerősítéssel; a flow+VWAP ág is ezt a feltételrendszert alkalmazza.
+        if sweep_buy && flow_bull && below_vwap && buy_allowed {
             return Some(SignalResult { side: "Buy".to_string(), target_mid: mid, volatility });
         }
-        if sweep_sell && (flow_bear || above_vwap) && sell_allowed {
+        if sweep_sell && flow_bear && above_vwap && sell_allowed {
             return Some(SignalResult { side: "Sell".to_string(), target_mid: mid, volatility });
         }
 

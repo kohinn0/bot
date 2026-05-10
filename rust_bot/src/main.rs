@@ -114,7 +114,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }));
 
     dotenv().ok();
-    info!("🚀 INICIALIZÁLÁS: SebessegBot V4.5 (Emergency Close on TPSL Fail) 🚀");
+    info!("🚀 INICIALIZÁLÁS: SebessegBot V4.6 (Stricter Signal Conditions) 🚀");
 
     let app_config = AppConfig::load();
     let coin = app_config.strategy.coin.clone();
